@@ -1,109 +1,110 @@
-# `aic` — CLI harness para orquestrar Claude Code + Gemini (Antigravity CLI)
+# `aic` — CLI harness to orchestrate Claude Code + Gemini (Antigravity CLI)
 
-## Contexto
+## Context
 
-Hoje o fluxo do usuário é manual: (1) na fase de planejamento, discute uma feature,
-escreve uma proposta em `.md`, e pede pro Gemini revisar — copiando/colando entre
-ferramentas ou arquivos; (2) na fase de desenvolvimento, pede pro Claude ou Gemini
-executar o plano e depois pede code review dos commits/staged changes, de novo com
-interação manual entre as duas CLIs.
+Today the user's workflow is manual: (1) in the planning phase, they discuss a
+feature, write a proposal in `.md`, and ask Gemini to review it — copying/pasting
+between tools or files; (2) in the development phase, they ask Claude or Gemini to
+execute the plan and then ask for a code review of the commits/staged changes,
+again with manual interaction between the two CLIs.
 
-O objetivo é construir uma CLI (`aic`, de "ai-integrate") em **Rust** — projeto de
-aprendizado explícito do usuário, que vai revisar o código gerado para aprender a
-linguagem — que formaliza esse fluxo: cria e rastreia o plano, aciona o Gemini
-(via `agy`, o Antigravity CLI) ou o Claude (via `claude`) para revisar, e aciona
-qualquer um dos dois para executar/revisar código, guardando o estado localmente
-fora do git (`.aic/` fica no `.gitignore` — artefatos ficam só na máquina, o
-usuário copia manualmente o que quiser versionar).
+The goal is to build a CLI (`aic`, from "ai-integrate") in **Rust** — an explicit
+learning project for the user, who will review the generated code to learn the
+language — that formalizes this workflow: it creates and tracks the plan, invokes
+Gemini (via `agy`, the Antigravity CLI) or Claude (via `claude`) to review, and
+invokes either of them to execute/review code, keeping state locally outside git
+(`.aic/` goes in `.gitignore` — artifacts stay only on the machine, and the user
+manually copies whatever they want to version).
 
-Depois de uma primeira rodada de design, dois ajustes importantes:
+After a first design round, two important adjustments:
 
-1. **Config-first, não flag-first.** Em vez de cada comando levar meia dúzia de
+1. **Config-first, not flag-first.** Instead of every command taking half a dozen
    flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`, `--permission-mode`,
-   `--target`...), a CLI segue o modelo do `/config` do Claude Code: existe um
-   comando `aic config` interativo que define os defaults (quem revisa, quem
-   executa, modo manual/auto, limite de rodadas, branch base), e os comandos do
-   dia a dia ficam curtos (`aic plan review <slug>`, `aic dev execute <slug>`).
-   Flags continuam existindo, mas só como *override pontual*, não como uso normal.
-2. **Correções da revisão do plano original** (ver seção "Decisões revisadas"
-   abaixo): distribuição do binário fora do distrobox, semântica do modo
-   interativo de execução, ordem de implementação (validar o envelope JSON real
-   do `agy` antes de fixar o parser), branch base auto-detectada, e tratamento de
-   erro no loop de revisão.
+   `--target`...), the CLI follows the model of Claude Code's `/config`: there is an
+   interactive `aic config` command that sets the defaults (who reviews, who
+   executes, manual/auto mode, round limit, base branch), and the day-to-day
+   commands stay short (`aic plan review <slug>`, `aic dev execute <slug>`).
+   Flags still exist, but only as a *one-off override*, not normal usage.
+2. **Fixes from the review of the original plan** (see the "Revised decisions"
+   section below): binary distribution outside the distrobox, semantics of the
+   interactive execution mode, implementation order (validate the real `agy` JSON
+   envelope before fixing the parser), auto-detected base branch, and error
+   handling in the review loop.
 
-Descobertas relevantes do levantamento:
-- `claude -p "<prompt>" --output-format json --json-schema '<schema>'` e
-  `agy -p "<prompt>" --output-format json --json-schema '<schema>'` têm, pela
-  documentação, **a mesma interface headless** (print mode, output json/stream-json,
-  json-schema para structured output, `--permission-mode`, `--effort`, `--model`).
-  Isso permite uma única abstração `CliAgent` parametrizada por binário — mas essa
-  suposição só foi confirmada rodando `claude --help` de verdade; `agy` ainda não
-  foi testado (ver "Decisões revisadas").
-- `claude` sem `--print` inicia sessão interativa já com o prompt inicial — ótimo
-  para o modo "acompanhar no terminal" da execução do plano.
-- Ambiente é Fedora Silverblue (imutável); Rust não está instalado no host nem no
-  distrobox `apps-env` (container Fedora 41 já usado para dev geral). Vamos instalar
-  o toolchain Rust (via `rustup`) **dentro do `apps-env`** em vez de criar um novo
-  container — compilação acontece ali, mas o binário final precisa ser exportado
-  pro host (ver "Decisões revisadas").
-- `agy` (Antigravity CLI) ainda não está instalado — precisa ser instalado e
-  autenticado (uma vez, via OAuth/keyring) **cedo**, para validar o formato real
-  da resposta antes de implementar o parser.
+Relevant findings from the survey:
+- `claude -p "<prompt>" --output-format json --json-schema '<schema>'` and
+  `agy -p "<prompt>" --output-format json --json-schema '<schema>'` have, per the
+  documentation, **the same headless interface** (print mode, json/stream-json
+  output, json-schema for structured output, `--permission-mode`, `--effort`,
+  `--model`). This allows a single `CliAgent` abstraction parameterized by binary —
+  but that assumption was only confirmed by actually running `claude --help`; `agy`
+  hasn't been tested yet (see "Revised decisions").
+- `claude` without `--print` starts an interactive session already with the initial
+  prompt — great for the "follow along in the terminal" mode of plan execution.
+- The environment is Fedora Silverblue (immutable); Rust is installed neither on the
+  host nor in the `apps-env` distrobox (Fedora 41 container already used for general
+  dev). We'll install the Rust toolchain (via `rustup`) **inside `apps-env`** instead
+  of creating a new container — compilation happens there, but the final binary has
+  to be exported to the host (see "Revised decisions").
+- `agy` (Antigravity CLI) isn't installed yet — it needs to be installed and
+  authenticated (once, via OAuth/keyring) **early**, to validate the real response
+  format before implementing the parser.
 
-## Decisões revisadas (depois da primeira versão do plano)
+## Revised decisions (after the first version of the plan)
 
-- **Distribuição do binário**: depois de `cargo build --release` dentro do
-  `apps-env`, rodar `distrobox-export --bin ~/aic/target/release/aic` pra expor o
-  binário no `PATH` do host Silverblue. Sem isso a CLI só funcionaria de dentro do
-  container, inútil pro uso real do dia a dia em qualquer repo do host.
-- **`dev execute --mode interactive`**: implementado com
-  `std::os::unix::process::CommandExt::exec()`, que *substitui* o processo `aic`
-  pelo processo do agente (`claude`/`agy`) — herda o terminal de verdade (sinais,
-  stdin/stdout/stderr) sem precisar repassar manualmente. Consequência explícita:
-  o `aic` não roda mais nenhum código depois do `exec()` — não há "pós-processamento"
-  nesse comando. É por isso que o SHA do `HEAD` é gravado *antes* do exec, e por
-  que `dev review` é sempre um comando separado, chamado depois.
-- **Ordem de implementação**: instalar e autenticar o `agy` logo depois do
-  `cargo new` (era o passo 9, virou passo 3), e capturar manualmente uma resposta
-  real de `claude -p ... --output-format json --json-schema ...` e de
-  `agy -p ... --output-format json --json-schema ...` pro mesmo prompt de teste,
-  comparando as duas antes de escrever `agent.rs`. Se os envelopes divergirem
-  (nomes de campo diferentes, por exemplo), o `CliAgent` ganha um pequeno mapeamento
-  por agente em vez de assumir forma idêntica.
-- **Branch base**: em vez de um valor fixo (`main`) na config, `git.rs` tenta
-  `git symbolic-ref refs/remotes/origin/HEAD` pra descobrir a branch default real
-  do remoto; só cai pro valor da config (`default_base_branch`, opcional) se isso
-  falhar (ex: repo sem remoto).
-- **Erros do agente no loop de revisão**: `review::run_review_loop` trata
-  `status != SUCCESS` (erro, timeout, cancelado) como falha dura — aborta com
-  mensagem clara, não entra no loop auto tentando "corrigir" um erro de execução
-  como se fosse um issue de conteúdo.
-- **Target default de `dev review`**: se houver staged changes, usa elas; senão,
-  se a feature tem um SHA de início gravado por `dev execute`, usa o diff desde
-  esse SHA até `HEAD`; senão, cai pro diff contra a branch base auto-detectada.
+- **Binary distribution**: after `cargo build --release` inside `apps-env`, run
+  `distrobox-export --bin ~/aic/target/release/aic` to expose the binary on the
+  Silverblue host's `PATH`. Without that, the CLI would only work from inside the
+  container, useless for real day-to-day use in any repo on the host.
+- **`dev execute --mode interactive`**: implemented with
+  `std::os::unix::process::CommandExt::exec()`, which *replaces* the `aic` process
+  with the agent process (`claude`/`agy`) — it inherits the real terminal (signals,
+  stdin/stdout/stderr) without having to forward anything manually. Explicit
+  consequence: `aic` runs no code after the `exec()` — there is no
+  "post-processing" in this command. That's why the `HEAD` SHA is recorded *before*
+  the exec, and why `dev review` is always a separate command, called afterwards.
+- **Implementation order**: install and authenticate `agy` right after `cargo new`
+  (it was step 9, became step 3), and manually capture a real response from
+  `claude -p ... --output-format json --json-schema ...` and from
+  `agy -p ... --output-format json --json-schema ...` for the same test prompt,
+  comparing the two before writing `agent.rs`. If the envelopes diverge (different
+  field names, for example), `CliAgent` gets a small per-agent mapping instead of
+  assuming an identical shape.
+- **Base branch**: instead of a fixed value (`main`) in the config, `git.rs` tries
+  `git symbolic-ref refs/remotes/origin/HEAD` to discover the remote's real default
+  branch; it only falls back to the config value (`default_base_branch`, optional)
+  if that fails (e.g. repo with no remote).
+- **Agent errors in the review loop**: `review::run_review_loop` treats
+  `status != SUCCESS` (error, timeout, cancelled) as a hard failure — it aborts
+  with a clear message and doesn't enter the auto loop trying to "fix" an execution
+  error as if it were a content issue.
+- **Default target of `dev review`**: if there are staged changes, use them;
+  otherwise, if the feature has a start SHA recorded by `dev execute`, use the diff
+  from that SHA to `HEAD`; otherwise, fall back to the diff against the
+  auto-detected base branch.
 
-## Config (`aic config`) — o coração do "menos parâmetros"
+## Config (`aic config`) — the heart of "fewer parameters"
 
-`aic config` sem argumentos abre um menu interativo (via `dialoguer`), parecido
-com o `/config` do Claude Code: lista as chaves atuais e deixa escolher uma pra
-editar. `aic config show` imprime a config efetiva (global +, se existir, override
-de repo) em formato legível. `aic config set <key> <value>` continua existindo
-pra uso não-interativo/scriptável, mas é o caminho secundário.
+`aic config` with no arguments opens an interactive menu (via `dialoguer`), similar
+to Claude Code's `/config`: it lists the current keys and lets you pick one to
+edit. `aic config show` prints the effective config (global plus, if present, the
+repo override) in a readable format. `aic config set <key> <value>` still exists
+for non-interactive/scriptable use, but it's the secondary path.
 
-Chaves de config (`~/.config/aic/config.toml`, com override opcional em
-`.aic/config.toml` por repositório):
+Config keys (`~/.config/aic/config.toml`, with an optional per-repository override
+in `.aic/config.toml`):
 
 ```toml
-executor = "claude"       # agente usado por padrão pra executar planos / corrigir issues
-reviewer = "gemini"       # agente usado por padrão pra revisar planos / diffs
-mode = "manual"           # "manual" (uma rodada e para) | "auto" (loop até aprovar)
-max_rounds = 3            # teto do modo auto
-permission_mode = "acceptEdits"  # repassado como --permission-mode pro executor
-default_base_branch = ""  # opcional; vazio = auto-detectar via origin/HEAD
+executor = "claude"       # agent used by default to execute plans / fix issues
+reviewer = "gemini"       # agent used by default to review plans / diffs
+mode = "manual"           # "manual" (one round and stop) | "auto" (loop until approved)
+max_rounds = 3            # cap for auto mode
+permission_mode = "acceptEdits"  # forwarded as --permission-mode to the executor
+default_base_branch = ""  # optional; empty = auto-detect via origin/HEAD
 
 [agents.claude]
 binary = "claude"
-model = ""                # vazio = usa o default do próprio claude
+model = ""                # empty = use claude's own default
 effort = ""
 
 [agents.gemini]
@@ -112,112 +113,114 @@ model = ""
 effort = ""
 ```
 
-Com isso, o uso do dia a dia fica:
+With that, day-to-day usage becomes:
 
 ```
-aic plan review auth-flow          # usa reviewer/executor/mode/max_rounds da config
-aic dev execute auth-flow          # usa executor/mode/permission_mode da config
-aic dev review auth-flow           # usa reviewer/executor/mode/max_rounds da config, target auto-detectado
+aic plan review auth-flow          # uses reviewer/executor/mode/max_rounds from config
+aic dev execute auth-flow          # uses executor/mode/permission_mode from config
+aic dev review auth-flow           # uses reviewer/executor/mode/max_rounds from config, auto-detected target
 ```
 
-E as flags por comando (`--reviewer`, `--executor`, `--mode`, `--max-rounds`,
-`--permission-mode`, `--target`, `--range`) continuam existindo em todo comando
-relevante, mas só pra *sobrescrever* a config numa chamada pontual — não são
-necessárias no uso normal.
+And the per-command flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`,
+`--permission-mode`, `--target`, `--range`) still exist on every relevant command,
+but only to *override* the config on a one-off call — they aren't needed in normal
+use.
 
-## Escopo da v1 (MVP)
+## v1 scope (MVP)
 
-Binário único `aic`, comandos:
+Single `aic` binary, commands:
 
-1. **`aic init`** — cria `~/.config/aic/config.toml` (se não existir, com os
-   defaults acima) e o esqueleto `.aic/` no repositório atual (`.aic/plans/`,
-   `.aic/dev/`, `.aic/state.json`), adicionando `.aic/` ao `.gitignore` do repo
-   (cria o arquivo se não existir, só faz append se já existir e a linha não
-   estiver presente).
+1. **`aic init`** — creates `~/.config/aic/config.toml` (if it doesn't exist, with
+   the defaults above) and the `.aic/` skeleton in the current repository
+   (`.aic/plans/`, `.aic/dev/`, `.aic/state.json`), adding `.aic/` to the repo's
+   `.gitignore` (creates the file if it doesn't exist, only appends if it already
+   exists and the line isn't present).
 
-2. **`aic plan new <slug> [--title "..."]`** — cria `.aic/plans/<slug>/plan.md` a
-   partir de um template fixo (Problema, Proposta, Alternativas consideradas,
-   Impacto, Questões abertas) e registra a feature em `state.json` com status
-   `draft`. Não automatiza a "discussão" — isso continua sendo uma conversa normal
-   com o Claude/editor; o comando só formaliza onde o arquivo mora.
+2. **`aic plan new <slug> [--title "..."]`** — creates
+   `.aic/plans/<slug>/plan.md` from a fixed template (Problem, Proposal,
+   Alternatives considered, Impact, Open questions) and registers the feature in
+   `state.json` with status `draft`. It doesn't automate the "discussion" — that
+   remains a normal conversation with Claude/the editor; the command only
+   formalizes where the file lives.
 
-3. **`aic plan review <slug> [--reviewer <agente>] [--executor <agente>] [--mode
-   manual|auto] [--max-rounds N]`** (todos os flags opcionais, default vem da
+3. **`aic plan review <slug> [--reviewer <agent>] [--executor <agent>] [--mode
+   manual|auto] [--max-rounds N]`** (all flags optional, default comes from the
    config)
-   - Lê `plan.md`, monta um prompt de revisão fixo + o conteúdo do arquivo, chama
-     o `reviewer` em modo headless com `--json-schema` pedindo
+   - Reads `plan.md`, builds a fixed review prompt + the file content, calls the
+     `reviewer` in headless mode with `--json-schema` asking for
      `{approved: bool, summary: string, issues: [string]}`.
-   - Salva a resposta em `.aic/plans/<slug>/reviews/plan-rN.md` (timestamp,
-     agente, summary, issues) e atualiza `state.json` (round, approved, status
+   - Saves the response to `.aic/plans/<slug>/reviews/plan-rN.md` (timestamp,
+     agent, summary, issues) and updates `state.json` (round, approved, status
      `approved`/`changes_requested`).
-   - Modo `manual` (default): roda uma rodada e para — imprime o resultado pro
-     usuário decidir o próximo passo.
-   - Modo `auto`: se não aprovado, chama o `executor` em headless pedindo pra
-     revisar o `plan.md` endereçando as `issues` (com `--permission-mode`
-     configurado, restrito ao arquivo do plano), roda o reviewer de novo, repete
-     até `approved=true`, `max_rounds` atingido, ou erro duro do agente (aborta).
+   - `manual` mode (default): runs one round and stops — prints the result for the
+     user to decide the next step.
+   - `auto` mode: if not approved, calls the `executor` in headless mode asking it
+     to revise `plan.md` addressing the `issues` (with the configured
+     `--permission-mode`, restricted to the plan file), runs the reviewer again,
+     and repeats until `approved=true`, `max_rounds` is reached, or a hard agent
+     error (aborts).
 
-4. **`aic dev execute <slug> [--mode interactive|headless] [--executor <agente>]
+4. **`aic dev execute <slug> [--mode interactive|headless] [--executor <agent>]
    [--permission-mode <mode>]`**
-   - `interactive` (default): `exec()` no processo do `executor`, prompt inicial
-     "execute o plano em `.aic/plans/<slug>/plan.md`" — usuário acompanha/participa
-     normalmente; `aic` não roda mais nada depois disso nessa invocação.
-   - `headless`: roda em `--print`, captura JSON, grava um registro de execução em
-     `.aic/dev/<slug>/execution-log.md` (timestamp, status, resumo da resposta).
-   - Em ambos os casos, grava no `state.json` o SHA do `HEAD` **antes** de começar
-     — usado depois por `dev review` pra saber o range de commits da feature.
+   - `interactive` (default): `exec()` into the `executor` process, initial prompt
+     "execute the plan in `.aic/plans/<slug>/plan.md`" — the user follows/takes part
+     normally; `aic` runs nothing else after that in this invocation.
+   - `headless`: runs in `--print`, captures JSON, writes an execution record to
+     `.aic/dev/<slug>/execution-log.md` (timestamp, status, response summary).
+   - In both cases, records the `HEAD` SHA in `state.json` **before** starting —
+     used later by `dev review` to know the feature's commit range.
 
 5. **`aic dev review [<slug>] [--target staged|commits|branch] [--range <rev>]
-   [--reviewer <agente>] [--executor <agente>] [--mode manual|auto] [--max-rounds
+   [--reviewer <agent>] [--executor <agent>] [--mode manual|auto] [--max-rounds
    N]`**
-   - Target default (sem `--target` explícito): staged se houver; senão commits
-     desde o SHA gravado em `dev execute`; senão diff contra a branch base
-     auto-detectada.
-   - Sem `<slug>`: review ad-hoc, sem ligar a uma feature — salva em
+   - Default target (without an explicit `--target`): staged if any; otherwise
+     commits since the SHA recorded by `dev execute`; otherwise the diff against
+     the auto-detected base branch.
+   - Without `<slug>`: ad-hoc review, not tied to a feature — saved to
      `.aic/adhoc-reviews/<timestamp>.md`.
-   - Mesmo padrão de `--json-schema` para `{approved, summary, issues: [{file,
-     description, severity}]}`, mesmo loop manual/auto do `plan review`.
+   - Same `--json-schema` pattern for `{approved, summary, issues: [{file,
+     description, severity}]}`, same manual/auto loop as `plan review`.
 
-6. **`aic status [<slug>]`** — lê `state.json` e imprime o estado (plan:
+6. **`aic status [<slug>]`** — reads `state.json` and prints the state (plan:
    draft/in_review/approved + rounds; dev: not_started/executing/review/done +
-   rounds) de uma feature ou de todas. Sem `<slug>`, tenta inferir a feature atual
-   pelo nome da branch git (slugificado) antes de listar todas.
+   rounds) of one feature or all of them. Without `<slug>`, tries to infer the
+   current feature from the git branch name (slugified) before listing all.
 
-7. **`aic config`** (interativo, sem args), **`aic config show`**, **`aic config
-   set <key> <value>`** — conforme seção "Config" acima.
+7. **`aic config`** (interactive, no args), **`aic config show`**, **`aic config
+   set <key> <value>`** — per the "Config" section above.
 
-Em todo comando que recebe `<slug>` como opcional/primeiro argumento posicional
-(`dev execute`, `dev review`, `status`), se omitido a CLI tenta inferir pelo nome
-da branch git atual (slugificado) e só pede explicitamente se não achar uma
-feature correspondente em `state.json`.
+In every command that takes `<slug>` as an optional/first positional argument
+(`dev execute`, `dev review`, `status`), if omitted the CLI tries to infer it from
+the current git branch name (slugified) and only asks explicitly if it can't find
+a matching feature in `state.json`.
 
-Fora do escopo da v1 (deixar pra depois, não implementar agora): múltiplos
-repositórios/workspaces simultâneos, integração com GitHub PRs, suporte a mais
-agentes além de `claude`/`agy`, templates de plano customizáveis por projeto.
+Out of scope for v1 (leave for later, don't implement now): multiple
+simultaneous repositories/workspaces, GitHub PR integration, support for more
+agents beyond `claude`/`agy`, per-project customizable plan templates.
 
-## Arquitetura / módulos
+## Architecture / modules
 
-Crate binário `aic` (edição 2021), dependências principais: `clap` (derive),
-`serde`/`serde_json`, `toml`, `anyhow`, `chrono`, `dialoguer` (menu interativo do
-`config` e confirmações no modo manual), `owo-colors` (saída colorida).
+Binary crate `aic` (edition 2021), main dependencies: `clap` (derive),
+`serde`/`serde_json`, `toml`, `anyhow`, `chrono`, `dialoguer` (interactive menu for
+`config` and confirmations in manual mode), `owo-colors` (colored output).
 
 ```
 src/
-  main.rs            // parse clap, dispatch pros handlers de comando
-  cli.rs             // structs/enums do clap (Cli, Commands, subcomandos; todos os
-                     // flags de override são Option<T>, default = None = "usa a config")
-  config.rs          // Config (toml, global + override de repo), load/save/merge, defaults,
-                     // menu interativo (dialoguer) pra `aic config` sem args
+  main.rs            // clap parsing, dispatch to the command handlers
+  cli.rs             // clap structs/enums (Cli, Commands, subcommands; all the
+                     // override flags are Option<T>, default = None = "use the config")
+  config.rs          // Config (toml, global + repo override), load/save/merge, defaults,
+                     // interactive menu (dialoguer) for `aic config` with no args
   state.rs           // State/Feature/Round (serde), load/save .aic/state.json
-  agent.rs           // trait AgentRunner (pra permitir fake nos testes) + CliAgent (impl real
-                     // via std::process::Command), RunOpts, parse do envelope JSON
-  review.rs          // ReviewVerdict { approved, summary, issues }, schema fixo,
-                     // run_review_loop() genérico (usado por plan review e dev review),
-                     // trata status != SUCCESS como erro duro (não "not approved")
+  agent.rs           // AgentRunner trait (to allow a fake in tests) + CliAgent (real impl
+                     // via std::process::Command), RunOpts, JSON envelope parsing
+  review.rs          // ReviewVerdict { approved, summary, issues }, fixed schema,
+                     // generic run_review_loop() (used by plan review and dev review),
+                     // treats status != SUCCESS as a hard error (not "not approved")
   git.rs             // diff_staged(), diff_range(a,b), diff_against_branch(name),
-                     // default_branch() (via origin/HEAD, com fallback pra config),
+                     // default_branch() (via origin/HEAD, falling back to config),
                      // head_sha(), is_repo(), current_branch_slug()
-  templates.rs       // template fixo do plan.md
+  templates.rs       // fixed plan.md template
   commands/
     init.rs
     plan.rs          // new, review
@@ -226,53 +229,53 @@ src/
     config_cmd.rs
 ```
 
-`CliAgent::run` é o ponto único que invoca `claude`/`agy` como subprocesso —
-monta os args conforme `RunOpts`, captura stdout/stderr, devolve
-`AgentRunResult { status, raw_text, json: Option<Value> }`. Tanto `plan review`
-quanto `dev review` chamam `review::run_review_loop`, passando o "conteúdo a
-revisar" (texto do plano ou diff), o prompt-base específico, e o par
-executor/reviewer resolvidos (flag > config de repo > config global) — a lógica
-de loop é compartilhada, não duplicada entre os dois comandos.
+`CliAgent::run` is the single point that invokes `claude`/`agy` as a subprocess —
+it builds the args according to `RunOpts`, captures stdout/stderr, and returns
+`AgentRunResult { status, raw_text, json: Option<Value> }`. Both `plan review` and
+`dev review` call `review::run_review_loop`, passing the "content to review" (plan
+text or diff), the specific base prompt, and the resolved executor/reviewer pair
+(flag > repo config > global config) — the loop logic is shared, not duplicated
+between the two commands.
 
-Erros: `anyhow::Result` em todo lugar, com contexto (`.context("...")`) nos
-pontos de I/O e de chamada de subprocesso — inclui mensagem clara se o binário
-configurado não for encontrado no PATH.
+Errors: `anyhow::Result` everywhere, with context (`.context("...")`) at the I/O
+and subprocess-call points — including a clear message if the configured binary
+isn't found on the PATH.
 
-## Passos de implementação
+## Implementation steps
 
-1. Instalar Rust dentro do `apps-env` (distrobox): `distrobox enter apps-env --
+1. Install Rust inside `apps-env` (distrobox): `distrobox enter apps-env --
    bash -lc 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s --
    -y'`.
-2. `cargo new aic` em `/var/home/hediberto/Workspace/ai-integrate` (`git init`
-   também, pra versionar o código da própria CLI).
-3. Instalar e autenticar o `agy` (Antigravity CLI) — passo manual do usuário
-   (abre browser uma vez). Rodar manualmente `claude -p "..." --output-format
-   json --json-schema '...'` e `agy -p "..." --output-format json --json-schema
-   '...'` com o mesmo prompt/schema de teste, comparar os dois envelopes JSON
-   reais antes de seguir — isso define a forma exata de `AgentRunResult`.
-4. Adicionar dependências no `Cargo.toml`.
-5. Implementar `config.rs` + `state.rs` (modelos + load/save/merge) e testes
-   unitários de (de)serialização, incluindo o merge global+repo.
-6. Implementar `agent.rs` (trait `AgentRunner` + `CliAgent`, monta args, roda
-   subprocesso, parse do envelope) com testes unitários do parsing usando as
-   respostas reais capturadas no passo 3 como fixtures.
-7. Implementar `git.rs` (incluindo `default_branch()` via `origin/HEAD`) com
-   testes contra um repo git temporário criado em `tempdir`.
-8. Implementar `review.rs` (loop genérico, incluindo o tratamento de erro duro)
-   com testes usando um `AgentRunner` fake.
-9. Implementar os comandos (`init`, `plan new/review`, `dev execute/review`,
-   `status`, menu interativo de `config`) ligando os módulos acima.
-10. `distrobox-export --bin` do binário release pro host.
-11. Smoke test manual: `aic init` → `aic plan new demo` → editar `plan.md` →
-    `aic plan review demo` (chama `agy` de verdade, usando defaults da config) →
-    `git add` algo de teste → `aic dev review demo` → `aic status`.
+2. `cargo new aic` in `/var/home/hediberto/Workspace/ai-integrate` (also `git init`,
+   to version the CLI's own code).
+3. Install and authenticate `agy` (Antigravity CLI) — manual step for the user
+   (opens a browser once). Manually run `claude -p "..." --output-format
+   json --json-schema '...'` and `agy -p "..." --output-format json --json-schema
+   '...'` with the same test prompt/schema, and compare the two real JSON envelopes
+   before moving on — this defines the exact shape of `AgentRunResult`.
+4. Add dependencies to `Cargo.toml`.
+5. Implement `config.rs` + `state.rs` (models + load/save/merge) and unit tests of
+   (de)serialization, including the global+repo merge.
+6. Implement `agent.rs` (`AgentRunner` trait + `CliAgent`, builds args, runs the
+   subprocess, parses the envelope) with unit tests of the parsing using the real
+   responses captured in step 3 as fixtures.
+7. Implement `git.rs` (including `default_branch()` via `origin/HEAD`) with tests
+   against a temporary git repo created in `tempdir`.
+8. Implement `review.rs` (generic loop, including hard-error handling) with tests
+   using a fake `AgentRunner`.
+9. Implement the commands (`init`, `plan new/review`, `dev execute/review`,
+   `status`, interactive `config` menu) wiring the modules above together.
+10. `distrobox-export --bin` of the release binary to the host.
+11. Manual smoke test: `aic init` → `aic plan new demo` → edit `plan.md` →
+    `aic plan review demo` (calls the real `agy`, using the config defaults) →
+    `git add` something for testing → `aic dev review demo` → `aic status`.
 
-## Verificação
+## Verification
 
-- `cargo build` e `cargo test` (dentro do `apps-env`) depois de cada módulo
-  implementado — cobre parsing de config/state/agent-envelope/git diff sem
-  depender de rede, usando fixtures reais capturadas no passo 3.
-- Teste manual end-to-end (passo 11 acima) com `agy` e `claude` reais, num repo
-  de teste descartável, confirmando que: os arquivos em `.aic/` são criados
-  corretamente; `.aic/` não aparece em `git status`; o `aic` exportado via
-  `distrobox-export` roda direto do shell do host, fora do container.
+- `cargo build` and `cargo test` (inside `apps-env`) after each implemented module
+  — covers config/state/agent-envelope/git diff parsing without depending on the
+  network, using real fixtures captured in step 3.
+- Manual end-to-end test (step 11 above) with the real `agy` and `claude`, in a
+  disposable test repo, confirming that: the files in `.aic/` are created
+  correctly; `.aic/` doesn't show up in `git status`; the `aic` exported via
+  `distrobox-export` runs directly from the host shell, outside the container.

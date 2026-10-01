@@ -22,7 +22,7 @@ optional `--title` value to pass through.
 
 <process>
 1. Parse `$ARGUMENTS` into `<slug>` and an optional title.
-2. Run `aic plan new <slug>` (add `--title "<title>"` if one was given). If it fails
+2. Run `aic plan new <slug> --no-open` (so it doesn't launch an interactive agent; add `--title "<title>"` if one was given). If it fails
    because the plan already exists, that's fine — just continue to step 3 with the
    existing file instead of treating it as an error.
 3. Read `.aic/plans/<slug>/PLAN.md`.

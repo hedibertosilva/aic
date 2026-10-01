@@ -1,32 +1,32 @@
 # aic
 
-CLI que orquestra o Claude Code e o Gemini (via [Antigravity CLI](https://antigravity.google/docs/cli/using/), `agy`) nas duas fases de um fluxo de feature: planejamento (discutir e revisar uma proposta em `.md`) e desenvolvimento (executar o plano aprovado e revisar o código resultante). Um agente codifica, o outro revisa — sem login em nenhum app de terceiros, tudo via CLI local.
+CLI that orchestrates Claude Code and Gemini (via the [Antigravity CLI](https://antigravity.google/docs/cli/using/), `agy`) across the two phases of a feature workflow: planning (discussing and reviewing a proposal in `.md`) and development (executing the approved plan and reviewing the resulting code). One agent writes the code, the other reviews it — no login to any third-party app, everything goes through local CLIs.
 
-Segue o modelo "config-first" do `/config` do Claude Code: você ajusta os defaults (quem revisa, quem executa, modo manual/auto) uma vez, e os comandos do dia a dia ficam curtos.
+It follows the "config-first" model of Claude Code's `/config`: you set the defaults (who reviews, who executes, manual/auto mode) once, and the day-to-day commands stay short.
 
-## Instalação
+## Installation
 
-Requer Rust (`cargo`/`rustc`) e os binários `claude` e `agy` (Antigravity CLI) já instalados e autenticados.
+Requires Rust (`cargo`/`rustc`) and the `claude` and `agy` (Antigravity CLI) binaries, already installed and authenticated.
 
 ```
 cargo build --release
-cp target/release/aic ~/.local/bin/aic   # ou outro diretório no seu PATH
+cp target/release/aic ~/.local/bin/aic   # or another directory on your PATH
 ```
 
-> Se você compila dentro de um distrobox/container, copie o binário direto para o host em vez de usar `distrobox-export --bin` — o wrapper gerado roda o `aic` *dentro* do container a cada chamada, o que pode fazer suas próprias ferramentas (`git`, etc.) resolverem para dentro do container também.
+> If you build inside a distrobox/container, copy the binary straight to the host instead of using `distrobox-export --bin` — the generated wrapper runs `aic` *inside* the container on every call, which can make its own tools (`git`, etc.) resolve inside the container too.
 
-## Configuração
+## Configuration
 
-`aic config` abre um menu interativo (como o `/config` do Claude Code) para ajustar os defaults, guardados em `~/.config/aic/config.toml`:
+`aic config` opens an interactive menu (like Claude Code's `/config`) to adjust the defaults, stored in `~/.config/aic/config.toml`:
 
 ```toml
-executor = "claude"              # quem executa planos / corrige issues
-reviewer = "gemini"              # quem revisa planos / diffs
-mode = "manual"                  # "manual" (uma rodada e para) | "auto" (loop até aprovar)
-max_rounds = 3                   # teto do modo auto
+executor = "claude"              # who executes plans / fixes issues
+reviewer = "gemini"              # who reviews plans / diffs
+mode = "manual"                  # "manual" (one round and stop) | "auto" (loop until approved)
+max_rounds = 3                   # cap for auto mode
 permission_mode = "acceptEdits"  # "acceptEdits" | "plan"
-default_base_branch = ""         # vazio = auto-detectar via origin/HEAD
-skip_permissions = false         # opt-in: auto-aprova toda ferramenta em runs headless
+default_base_branch = ""         # empty = auto-detect via origin/HEAD
+skip_permissions = false         # opt-in: auto-approve every tool in headless runs
 
 [agents.claude]
 binary = "claude"
@@ -39,74 +39,74 @@ model = ""
 effort = ""
 ```
 
-Um repositório pode sobrescrever qualquer chave em `.aic/config.toml` (mesmo schema, campos parciais).
+A repository can override any key in `.aic/config.toml` (same schema, partial fields).
 
-Fora do menu interativo:
+Outside the interactive menu:
 
 ```
-aic config show                  # config efetiva (global + override do repo)
+aic config show                  # effective config (global + repo override)
 aic config set mode auto
 aic config set max_rounds 5
 ```
 
-Todo comando abaixo aceita flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`, `--permission-mode`, `--target`, `--no-filter`) para sobrescrever a config numa chamada pontual — mas no uso normal eles não são necessários.
+Every command below accepts flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`, `--permission-mode`, `--target`, `--no-filter`) to override the config for a single call — but in normal use they aren't needed.
 
-**`git_diff_exclude_patterns` / `git_diff_include_patterns`**: `aic dev review` filtra o diff antes de mandar pro reviewer, removendo lockfiles comuns (`Cargo.lock`, `package-lock.json`, `yarn.lock`, ...), arquivos ignorados pelo `.gitignore` e marcados como `linguist-generated` no `.gitattributes`. `git_diff_exclude_patterns` (lista, default `[]`) soma exclusões; `git_diff_include_patterns` re-inclui o que bater, com precedência sobre qualquer exclusão. Os padrões usam um subconjunto da sintaxe do gitignore: `*` e `?` (dentro de um segmento do caminho) e `**` (cruza `/`). Sem `/`, o padrão casa com qualquer segmento do caminho (`node_modules`, `*.min.js`); com `/`, é ancorado na raiz do repo e também cobre tudo dentro do diretório casado. Uma `/` final é ignorada. Não há negação com `!` (use `git_diff_include_patterns`) nem classes `[...]`. Use `aic dev review --no-filter` para ver o diff completo numa chamada.
+**`git_diff_exclude_patterns` / `git_diff_include_patterns`**: `aic dev review` filters the diff before sending it to the reviewer, removing common lockfiles (`Cargo.lock`, `package-lock.json`, `yarn.lock`, ...), files ignored by `.gitignore`, and files marked `linguist-generated` in `.gitattributes`. `git_diff_exclude_patterns` (list, default `[]`) adds exclusions; `git_diff_include_patterns` re-includes whatever matches, taking precedence over any exclusion. Patterns use a subset of the gitignore syntax: `*` and `?` (within a single path segment) and `**` (crosses `/`). Without a `/`, the pattern matches any path segment (`node_modules`, `*.min.js`); with a `/`, it is anchored at the repo root and also covers everything inside the matched directory. A trailing `/` is ignored. There is no `!` negation (use `git_diff_include_patterns`) and no `[...]` classes. Use `aic dev review --no-filter` to see the full diff in a single call.
 
-**`skip_permissions`**: fica desligado por padrão. Sem ele, se o reviewer ou executor tentar usar uma ferramenta (ler um arquivo, rodar um comando) em modo headless, a chamada é negada e falha com um erro claro em vez de devolver uma resposta vazia silenciosa. Só ative se você confia nos agentes configurados para rodar sem supervisão nesse repositório.
+**`skip_permissions`**: off by default. Without it, if the reviewer or executor tries to use a tool (read a file, run a command) in headless mode, the call is denied and fails with a clear error instead of silently returning an empty response. Only enable it if you trust the configured agents to run unattended in that repository.
 
-## Comandos
+## Commands
 
-| Comando | O que faz |
+| Command | What it does |
 |---|---|
-| `aic init` | Cria `.aic/` no repo atual (`plans/`, `dev/`, `adhoc/reviews/`, `state.json`) e o config global, se não existirem. Adiciona `.aic/` ao `.gitignore`. |
-| `aic plan new <slug> [--title "..."]` | Cria `.aic/plans/<slug>/PLAN.md` a partir de um template (Problema, Proposta, Alternativas, Impacto, Questões abertas) e registra a feature. |
-| `aic plan review <slug>` | Manda o `PLAN.md` pro reviewer; salva o relatório em `.aic/plans/<slug>/reviews/PLAN-RN.md`. Modo `auto` corrige e re-revisa até aprovar. |
-| `aic dev execute <slug> [--mode interactive\|headless]` | Roda o executor contra o plano aprovado. `interactive` (default) assume o terminal (`exec`), igual uma sessão normal; `headless` roda via `-p` e loga em `.aic/dev/<slug>/EXECUTION-LOG.md`. |
-| `aic dev review [<slug>]` | Revisa um diff: staged, commits desde o `dev execute`, ou contra a branch base — escolhido automaticamente, ou via `--target`. Com `<slug>`, salva em `.aic/dev/<slug>/reviews/CODE-RN.md`. Sem `<slug>`, é um review ad-hoc salvo em `.aic/adhoc/reviews/`. |
-| `aic status [<slug>]` | Mostra o estado (plan/dev, rounds) de uma feature ou de todas. Sem argumento, tenta inferir a feature pelo nome da branch atual. |
-| `aic config` / `config show` / `config set` | Ver/editar os defaults. |
+| `aic init` | Creates `.aic/` in the current repo (`plans/`, `dev/`, `adhoc/reviews/`, `state.json`) and the global config, if they don't exist. Adds `.aic/` to `.gitignore`. |
+| `aic plan new <slug> [--title "..."] [--no-open]` | Creates `.aic/plans/<slug>/PLAN.md` from a template (Problem, Proposal, Alternatives, Impact, Open questions) and registers the feature. Then opens the executor (claude/gemini) interactively to start the discussion; `--no-open` skips that. |
+| `aic plan review <slug>` | Sends `PLAN.md` to the reviewer; saves the report to `.aic/plans/<slug>/reviews/PLAN-RN.md`. `auto` mode fixes and re-reviews until approved. |
+| `aic dev execute <slug> [--mode interactive\|headless]` | Runs the executor against the approved plan. `interactive` (default) takes over the terminal (`exec`), like a normal session; `headless` runs via `-p` and logs to `.aic/dev/<slug>/EXECUTION-LOG.md`. |
+| `aic dev review [<slug>]` | Reviews a diff: staged, commits since `dev execute`, or against the base branch — chosen automatically, or via `--target`. With `<slug>`, saves to `.aic/dev/<slug>/reviews/CODE-RN.md`. Without `<slug>`, it's an ad-hoc review saved under `.aic/adhoc/reviews/`. |
+| `aic status [<slug>]` | Shows the state (plan/dev, rounds) of one feature or all of them. With no argument, tries to infer the feature from the current branch name. |
+| `aic config` / `config show` / `config set` | View/edit the defaults. |
 
-`.aic/` fica fora do git (está no `.gitignore`): plano, relatórios e logs ficam só na sua máquina — copie manualmente pro PR o que for útil.
+`.aic/` stays out of git (it's in `.gitignore`): plan, reports and logs live only on your machine — manually copy whatever is useful into the PR.
 
-## Fluxo do dia a dia
+## Day-to-day flow
 
-Exemplo de ponta a ponta: um card de feature até o código revisado e pronto pra PR.
+End-to-end example: from a feature ticket to reviewed code ready for a PR.
 
-**1. Primeira vez no repo**
+**1. First time in the repo**
 
 ```
 $ cd ~/code/payments-service && aic init
 ```
 
-**2. Planejamento** — cria o esqueleto, discute e escreve a proposta normalmente (editor, ou pedindo ajuda ao Claude fora do `aic` — a conversa de design não é automatizada), depois pede a revisão:
+**2. Planning** — create the skeleton, discuss and write the proposal as usual (editor, or asking Claude for help outside `aic` — the design conversation isn't automated), then ask for the review:
 
 ```
 $ aic plan new health-check --title "Health check endpoint"
 $ aic plan review health-check
-Round 1: approved=false — Falta checagem de timeout e as seções de
-alternativas/impacto estão vazias.
+Round 1: approved=false — Missing a timeout check and the
+alternatives/impact sections are empty.
 ```
 
-Ajusta o `plan.md` e roda de novo até aprovar (ou usa `--mode auto --max-rounds 4` para deixar o loop corrigir sozinho).
+Edit `plan.md` and run again until approved (or use `--mode auto --max-rounds 4` to let the loop fix it by itself).
 
-**3. Executar o plano aprovado** — modo interativo acompanha o Claude trabalhando, igual uma sessão normal:
+**3. Execute the approved plan** — interactive mode lets you follow Claude working, like a normal session:
 
 ```
 $ aic dev execute health-check
 ```
 
-**4. Revisar o que foi implementado**:
+**4. Review what was implemented**:
 
 ```
 $ git add -A
 $ aic dev review health-check
-Round 1: approved=false — Falta separar liveness de readiness.
+Round 1: approved=false — Liveness and readiness need to be separated.
 ```
 
-Corrige (manual ou `--mode auto`) e roda de novo até aprovar. O `aic` sempre reavalia o diff real após cada correção — mesmo que não tenha sido comitada — então o loop converge em vez de repetir o mesmo diff.
+Fix it (manually or with `--mode auto`) and run again until approved. `aic` always re-evaluates the real diff after each fix — even if it wasn't committed — so the loop converges instead of repeating the same diff.
 
-**5. Conferir o estado** a qualquer momento:
+**5. Check the state** at any time:
 
 ```
 $ aic status health-check
@@ -115,31 +115,31 @@ $ aic status health-check
   dev:  done (2 round(s))
 ```
 
-Ou, dentro da branch da feature, sem passar o slug: `aic status` tenta inferir pelo nome da branch.
+Or, inside the feature branch, without passing the slug: `aic status` tries to infer it from the branch name.
 
-**6. Review ad-hoc**, sem vínculo com um plano (ex: um fix rápido):
+**6. Ad-hoc review**, not tied to a plan (e.g. a quick fix):
 
 ```
 $ git add -A && aic dev review
 ```
 
-**7. Fechar o ciclo**: com `dev` em `done`, segue o fluxo normal — commit, push, PR.
+**7. Close the cycle**: with `dev` at `done`, continue with the normal flow — commit, push, PR.
 
-## Arquitetura
+## Architecture
 
 ```
 src/
-  main.rs            // parse clap, dispatch pros comandos
-  cli.rs             // definição dos subcomandos/flags (clap derive)
-  config.rs          // Config (toml, global + override de repo), merge, defaults
+  main.rs            // clap parsing, dispatch to the commands
+  cli.rs             // subcommand/flag definitions (clap derive)
+  config.rs          // Config (toml, global + repo override), merge, defaults
   state.rs           // State/Feature/Round (serde), .aic/state.json
-  agent.rs           // CliAgent — invoca claude/agy como subprocesso, normaliza o
-                     // envelope JSON de resposta (os dois têm formatos diferentes)
-  review.rs          // run_review_loop() genérico — usado tanto por plan review
-                     // quanto por dev review
-  git.rs             // diffs, branch default, slug da branch atual
-  templates.rs       // template do plan.md
+  agent.rs           // CliAgent — invokes claude/agy as a subprocess, normalizes the
+                     // JSON response envelope (the two have different formats)
+  review.rs          // generic run_review_loop() — used by both plan review
+                     // and dev review
+  git.rs             // diffs, default branch, current branch slug
+  templates.rs       // plan.md template
   commands/          // init, plan, dev, status, config
 ```
 
-`claude` e `agy` expõem flags headless quase idênticas (`-p`, `--output-format json`, `--json-schema`), mas o envelope de resposta e algumas flags (permissão de edição, prompt inicial em modo interativo) divergem — `agent.rs` e `commands/dev.rs` normalizam essas diferenças por binário, não por nome lógico do agente na config.
+`claude` and `agy` expose nearly identical headless flags (`-p`, `--output-format json`, `--json-schema`), but the response envelope and some flags (edit permission, initial prompt in interactive mode) differ — `agent.rs` and `commands/dev.rs` normalize those differences per binary, not per the logical agent name in the config.

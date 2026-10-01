@@ -32,9 +32,13 @@ fn run() -> Result<()> {
         }
 
         Commands::Plan { command } => match command {
-            PlanCommands::New { slug, title } => {
+            PlanCommands::New {
+                slug,
+                title,
+                no_open,
+            } => {
                 let repo_root = resolve_repo_root()?;
-                commands::plan::new(&repo_root, &slug, title)
+                commands::plan::new(&repo_root, &slug, title, no_open)
             }
             PlanCommands::Review {
                 slug,

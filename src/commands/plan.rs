@@ -16,7 +16,9 @@ fn repo_relative(repo_root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-pub fn new(repo_root: &Path, slug: &str, title: Option<String>) -> Result<()> {
+/// Scaffolds PLAN.md and, unless `no_open`, replaces this process with an
+/// interactive executor session to start discussing the plan.
+pub fn new(repo_root: &Path, slug: &str, title: Option<String>, no_open: bool) -> Result<()> {
     let plan_dir = repo_root.join(".aic").join("plans").join(slug);
     fs::create_dir_all(plan_dir.join("reviews")).context("creating plan directory")?;
     let plan_path = plan_dir.join("PLAN.md");
@@ -36,7 +38,18 @@ pub fn new(repo_root: &Path, slug: &str, title: Option<String>) -> Result<()> {
     state.save(repo_root)?;
 
     println!("Created {}", plan_path.display());
-    Ok(())
+
+    if no_open {
+        return Ok(());
+    }
+
+    let config = Config::load_merged(repo_root)?;
+    let binary = config.agent(&config.executor)?.binary.clone();
+    let prompt = format!(
+        "Let's discuss the plan in {}. Read it, then interview me to fill in its sections.",
+        plan_path.display()
+    );
+    super::dev::exec_interactive(&binary, &prompt, &config.permission_mode, repo_root)
 }
 
 #[derive(Default)]

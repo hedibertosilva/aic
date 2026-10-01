@@ -75,20 +75,7 @@ explain why.",
 
     match mode {
         ExecuteModeArg::Interactive => {
-            let mut cmd = Command::new(&executor_binary);
-            // `claude` takes the initial prompt as a bare positional
-            // argument; `agy` rejects that and requires
-            // `-i`/`--prompt-interactive` to start an interactive session
-            // with an initial message.
-            if binary_stem(&executor_binary) == "agy" {
-                cmd.arg("-i").arg(&prompt);
-            } else {
-                cmd.arg(&prompt);
-            }
-            apply_permission_flag(&mut cmd, &executor_binary, &permission_mode);
-            cmd.current_dir(repo_root);
-            let err = cmd.exec();
-            bail!("failed to exec '{executor_binary}': {err}");
+            exec_interactive(&executor_binary, &prompt, &permission_mode, repo_root)
         }
         ExecuteModeArg::Headless => {
             let agent = CliAgent::with_defaults(executor_name, executor_binary, executor_model, executor_effort);
@@ -118,6 +105,30 @@ explain why.",
             Ok(())
         }
     }
+}
+
+/// Replaces the current process with `binary` running an interactive session
+/// seeded with `prompt`. Only returns on failure.
+pub fn exec_interactive(
+    binary: &str,
+    prompt: &str,
+    permission_mode: &str,
+    cwd: &Path,
+) -> Result<()> {
+    let mut cmd = Command::new(binary);
+    // `claude` takes the initial prompt as a bare positional
+    // argument; `agy` rejects that and requires
+    // `-i`/`--prompt-interactive` to start an interactive session
+    // with an initial message.
+    if binary_stem(binary) == "agy" {
+        cmd.arg("-i").arg(prompt);
+    } else {
+        cmd.arg(prompt);
+    }
+    apply_permission_flag(&mut cmd, binary, permission_mode);
+    cmd.current_dir(cwd);
+    let err = cmd.exec();
+    bail!("failed to exec '{binary}': {err}");
 }
 
 /// The file name of `binary`, stripped of any directory and extension —

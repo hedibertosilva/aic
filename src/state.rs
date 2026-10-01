@@ -115,6 +115,11 @@ impl State {
         for slug in slugs {
             let plan_dir = aic.join("plans").join(&slug);
             let dev_dir = aic.join("dev").join(&slug);
+            // Both directories gone (deleted by hand): forget the feature.
+            if !plan_dir.exists() && !dev_dir.exists() {
+                self.features.remove(&slug);
+                continue;
+            }
             let plan_file = plan_dir.join("PLAN.md");
             let log_file = dev_dir.join("EXECUTION-LOG.md");
             let plan_rounds = scan_rounds(repo_root, &plan_dir.join("reviews"), "PLAN-R");
@@ -318,5 +323,21 @@ mod tests {
         assert!(state.refresh(dir.path()));
         assert_eq!(state.feature("demo").unwrap().plan.status, PlanStatus::Draft);
         assert!(!state.refresh(dir.path()));
+    }
+
+    #[test]
+    fn refresh_drops_features_removed_from_disk() {
+        let dir = tempdir().unwrap();
+        let plan_dir = dir.path().join(".aic/plans/demo");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        std::fs::write(plan_dir.join("PLAN.md"), "# demo").unwrap();
+
+        let mut state = State::default();
+        assert!(state.refresh(dir.path()));
+        assert!(state.feature("demo").is_some());
+
+        std::fs::remove_dir_all(&plan_dir).unwrap();
+        assert!(state.refresh(dir.path()));
+        assert!(state.feature("demo").is_none());
     }
 }

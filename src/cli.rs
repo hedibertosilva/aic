@@ -49,6 +49,9 @@ pub enum PlanCommands {
         /// Title used as the PLAN.md heading. Defaults to the slug.
         #[arg(long)]
         title: Option<String>,
+        /// Don't open the executor agent interactively after creating the plan.
+        #[arg(long = "no-open")]
+        no_open: bool,
     },
     /// Ask the reviewer agent to review PLAN.md.
     Review {
