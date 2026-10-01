@@ -29,13 +29,13 @@ optional `--title` value to pass through.
 4. Interview the user, section by section, to fill in whatever is still just the
    template's HTML comment placeholder (`<!-- ... -->`) — skip sections that already
    have real content (e.g. on a plan you're resuming):
-   - **Problema**: what problem this solves, and for whom.
-   - **Proposta**: what will be built, at a high level.
-   - **Alternativas consideradas**: what else was considered and why it wasn't chosen.
+   - **Problem**: what problem this solves, and for whom.
+   - **Proposal**: what will be built, at a high level.
+   - **Alternatives considered**: what else was considered and why it wasn't chosen.
      If the user has no alternatives in mind, it's fine to leave this section noting
      that explicitly rather than inventing ones.
-   - **Impacto**: what changes for users, other teams, infrastructure.
-   - **Questões abertas**: anything still undecided.
+   - **Impact**: what changes for users, other teams, infrastructure.
+   - **Open questions**: anything still undecided.
    Have a normal back-and-forth conversation for this — these are prose answers, not
    discrete choices, so plain chat turns fit better than AskUserQuestion here. Use your
    own judgment on follow-up questions when an answer is vague or incomplete.

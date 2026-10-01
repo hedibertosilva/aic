@@ -6,7 +6,14 @@ use crate::git;
 use crate::state::{Feature, State};
 
 pub fn run(repo_root: &Path, slug_arg: Option<String>) -> Result<()> {
-    let state = State::load(repo_root)?;
+    let mut state = State::load(repo_root)?;
+    // state.json can drift from .aic/ (files edited or removed by hand,
+    // runs that died before saving), so re-read the disk on every status.
+    if state.refresh(repo_root) {
+        if let Err(err) = state.save(repo_root) {
+            eprintln!("warning: couldn't update state.json: {err:#}");
+        }
+    }
     let explicit = slug_arg.is_some();
     let slug = slug_arg.or_else(|| git::current_branch_slug(repo_root).ok());
 
