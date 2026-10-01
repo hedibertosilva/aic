@@ -27,7 +27,7 @@ current branch, or falls back to an ad-hoc review (not tied to any feature).
    - If a slug was given and it's a tracked feature: read `.aic/state.json`,
      `features.<slug>.dev.rounds`, take the last round's `report_path`.
    - Otherwise (ad-hoc review, no slug or an untracked one): find the most recently
-     modified file under `.aic/adhoc-reviews/`.
+     modified file under `.aic/adhoc/reviews/`.
    Read that file — it has the full `Summary` and `Issues` list.
 3. If the round's `approved` is true: tell the user it's approved. Stop here.
 4. If not approved:

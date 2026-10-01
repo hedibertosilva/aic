@@ -57,11 +57,11 @@ Todo comando abaixo aceita flags (`--reviewer`, `--executor`, `--mode`, `--max-r
 
 | Comando | O que faz |
 |---|---|
-| `aic init` | Cria `.aic/` no repo atual (`plans/`, `dev/`, `adhoc-reviews/`, `state.json`) e o config global, se não existirem. Adiciona `.aic/` ao `.gitignore`. |
-| `aic plan new <slug> [--title "..."]` | Cria `.aic/plans/<slug>/plan.md` a partir de um template (Problema, Proposta, Alternativas, Impacto, Questões abertas) e registra a feature. |
-| `aic plan review <slug>` | Manda o `plan.md` pro reviewer; salva o relatório em `.aic/plans/<slug>/reviews/`. Modo `auto` corrige e re-revisa até aprovar. |
-| `aic dev execute <slug> [--mode interactive\|headless]` | Roda o executor contra o plano aprovado. `interactive` (default) assume o terminal (`exec`), igual uma sessão normal; `headless` roda via `-p` e loga em `.aic/dev/<slug>/execution-log.md`. |
-| `aic dev review [<slug>]` | Revisa um diff: staged, commits desde o `dev execute`, ou contra a branch base — escolhido automaticamente, ou via `--target`. Sem `<slug>`, é um review ad-hoc salvo em `.aic/adhoc-reviews/`. |
+| `aic init` | Cria `.aic/` no repo atual (`plans/`, `dev/`, `adhoc/reviews/`, `state.json`) e o config global, se não existirem. Adiciona `.aic/` ao `.gitignore`. |
+| `aic plan new <slug> [--title "..."]` | Cria `.aic/plans/<slug>/PLAN.md` a partir de um template (Problema, Proposta, Alternativas, Impacto, Questões abertas) e registra a feature. |
+| `aic plan review <slug>` | Manda o `PLAN.md` pro reviewer; salva o relatório em `.aic/plans/<slug>/reviews/PLAN-RN.md`. Modo `auto` corrige e re-revisa até aprovar. |
+| `aic dev execute <slug> [--mode interactive\|headless]` | Roda o executor contra o plano aprovado. `interactive` (default) assume o terminal (`exec`), igual uma sessão normal; `headless` roda via `-p` e loga em `.aic/dev/<slug>/EXECUTION-LOG.md`. |
+| `aic dev review [<slug>]` | Revisa um diff: staged, commits desde o `dev execute`, ou contra a branch base — escolhido automaticamente, ou via `--target`. Com `<slug>`, salva em `.aic/dev/<slug>/reviews/CODE-RN.md`. Sem `<slug>`, é um review ad-hoc salvo em `.aic/adhoc/reviews/`. |
 | `aic status [<slug>]` | Mostra o estado (plan/dev, rounds) de uma feature ou de todas. Sem argumento, tenta inferir a feature pelo nome da branch atual. |
 | `aic config` / `config show` / `config set` | Ver/editar os defaults. |
 

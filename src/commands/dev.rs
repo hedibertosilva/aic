@@ -194,7 +194,7 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
 
     let (reviews_dir, is_adhoc) = match slug {
         Some(slug) => (repo_root.join(".aic").join("dev").join(slug).join("reviews"), false),
-        None => (repo_root.join(".aic").join("adhoc-reviews"), true),
+        None => (repo_root.join(".aic").join("adhoc").join("reviews"), true),
     };
     fs::create_dir_all(&reviews_dir)?;
 

@@ -19,7 +19,7 @@ pub fn run(repo_root: &Path) -> Result<()> {
     }
 
     let aic_dir = repo_root.join(".aic");
-    for sub in ["plans", "dev", "adhoc-reviews"] {
+    for sub in ["plans", "dev", "adhoc/reviews"] {
         fs::create_dir_all(aic_dir.join(sub))
             .with_context(|| format!("creating .aic/{sub}"))?;
     }
