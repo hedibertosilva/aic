@@ -74,37 +74,59 @@ fn split_nul(bytes: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// Max bytes of pathspecs per `git diff` invocation, well under the argv limit.
+const PATHSPEC_CHUNK_BYTES: usize = 64 * 1024;
+
 /// Paths changed by `git diff <diff_args>`, relative to the repo root.
 /// Renames are reported as a delete plus an add so both sides show up.
 pub fn changed_files(repo_root: &Path, diff_args: &[String]) -> Result<Vec<String>> {
     let mut args: Vec<&str> = vec!["diff", "--name-only", "-z", "--no-renames"];
     args.extend(diff_args.iter().map(String::as_str));
+    args.push("--");
     // `run_git` trims, which is harmless for NUL-separated output.
     Ok(split_nul(run_git(repo_root, &args)?.as_bytes()))
 }
 
 /// `git diff <diff_args>` restricted to `paths`, with renames split like
-/// `changed_files`. Paths go via stdin as literal pathspecs, so magic
-/// characters in file names stay literal and the argv size limit doesn't
-/// apply. An empty `paths` yields an empty diff rather than git's "no
-/// pathspec means everything".
+/// `changed_files`. Paths are passed as literal pathspecs after `--`, so
+/// magic characters in file names stay literal; the list is chunked to stay
+/// under the argv size limit. An empty `paths` yields an empty diff rather
+/// than git's "no pathspec means everything".
 pub fn diff_paths(repo_root: &Path, diff_args: &[String], paths: &[String]) -> Result<String> {
-    if paths.is_empty() {
-        return Ok(String::new());
+    let mut chunks: Vec<&[String]> = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, p) in paths.iter().enumerate() {
+        if bytes > 0 && bytes + p.len() + 1 > PATHSPEC_CHUNK_BYTES {
+            chunks.push(&paths[start..i]);
+            start = i;
+            bytes = 0;
+        }
+        bytes += p.len() + 1;
     }
-    let mut args: Vec<&str> = vec!["diff", "--no-renames"];
-    args.extend(diff_args.iter().map(String::as_str));
-    args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
-    let input: String = paths.iter().map(|p| format!(":(literal){p}\0")).collect();
-    let out = run_git_stdin(repo_root, &args, input.as_bytes())?;
-    Ok(String::from_utf8_lossy(&out).trim().to_string())
+    if start < paths.len() {
+        chunks.push(&paths[start..]);
+    }
+
+    let mut parts = Vec::new();
+    for chunk in chunks {
+        let mut args: Vec<&str> = vec!["--literal-pathspecs", "diff", "--no-renames"];
+        args.extend(diff_args.iter().map(String::as_str));
+        args.push("--");
+        args.extend(chunk.iter().map(String::as_str));
+        let out = run_git(repo_root, &args)?;
+        if !out.is_empty() {
+            parts.push(out);
+        }
+    }
+    Ok(parts.join("\n"))
 }
 
-/// `git diff <diff_args>` with no path filtering, rename detection left at
-/// git's default.
+/// `git diff <diff_args>` with no path filtering. Uses `--no-renames` like
+/// the filtered path so both modes show the reviewer the same diff shape.
 pub fn diff_paths_unfiltered(repo_root: &Path, diff_args: &[String]) -> Result<String> {
-    let mut args: Vec<&str> = vec!["diff"];
+    let mut args: Vec<&str> = vec!["diff", "--no-renames"];
     args.extend(diff_args.iter().map(String::as_str));
+    args.push("--");
     run_git(repo_root, &args)
 }
 
