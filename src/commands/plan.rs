@@ -128,7 +128,7 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
     }
     state.save(repo_root)?;
 
-    print_outcome(&outcome);
+    print_outcome(&outcome, existing_rounds);
     Ok(())
 }
 
@@ -183,11 +183,11 @@ fn save_review_report(
     Ok(path)
 }
 
-fn print_outcome(outcome: &LoopOutcome) {
+fn print_outcome(outcome: &LoopOutcome, existing_rounds: u32) {
     for (i, round) in outcome.rounds.iter().enumerate() {
         println!(
             "Round {}: approved={} — {}",
-            i + 1,
+            existing_rounds + i as u32 + 1,
             round.verdict.approved,
             round.verdict.summary
         );
