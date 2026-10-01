@@ -37,13 +37,13 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum PlanCommands {
-    /// Scaffold a new plan.md for a feature.
+    /// Scaffold a new PLAN.md for a feature.
     New {
         slug: String,
         #[arg(long)]
         title: Option<String>,
     },
-    /// Ask the reviewer agent to review plan.md.
+    /// Ask the reviewer agent to review PLAN.md.
     Review {
         slug: String,
         #[arg(long)]

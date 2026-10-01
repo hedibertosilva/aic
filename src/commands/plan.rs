@@ -19,13 +19,13 @@ fn repo_relative(repo_root: &Path, path: &Path) -> String {
 pub fn new(repo_root: &Path, slug: &str, title: Option<String>) -> Result<()> {
     let plan_dir = repo_root.join(".aic").join("plans").join(slug);
     fs::create_dir_all(plan_dir.join("reviews")).context("creating plan directory")?;
-    let plan_path = plan_dir.join("plan.md");
+    let plan_path = plan_dir.join("PLAN.md");
     if plan_path.exists() {
         bail!("{} already exists", plan_path.display());
     }
 
     let title = title.unwrap_or_else(|| slug.to_string());
-    fs::write(&plan_path, plan_template(&title)).context("writing plan.md")?;
+    fs::write(&plan_path, plan_template(&title)).context("writing PLAN.md")?;
 
     let mut state = State::load(repo_root)?;
     {
@@ -111,8 +111,8 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
             )?;
             Ok(repo_relative(&repo_root_owned, &path))
         },
-        fs::read_to_string(&plan_path).context("reading plan.md")?,
-        || fs::read_to_string(&plan_path).context("re-reading plan.md after revision"),
+        fs::read_to_string(&plan_path).context("reading PLAN.md")?,
+        || fs::read_to_string(&plan_path).context("re-reading PLAN.md after revision"),
     )?;
 
     {
@@ -161,7 +161,7 @@ fn save_review_report(
     reviewer_name: &str,
     verdict: &ReviewVerdict,
 ) -> Result<PathBuf> {
-    let path = reviews_dir.join(format!("plan-r{round_number}.md"));
+    let path = reviews_dir.join(format!("PLAN-R{round_number}.md"));
     let issues = if verdict.issues.is_empty() {
         "(none)".to_string()
     } else {

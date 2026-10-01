@@ -101,7 +101,7 @@ explain why.",
 
             let log_dir = repo_root.join(".aic").join("dev").join(slug);
             fs::create_dir_all(&log_dir)?;
-            let log_path = log_dir.join("execution-log.md");
+            let log_path = log_dir.join("EXECUTION-LOG.md");
             append_execution_log(&log_path, result.success, &result.text)?;
 
             if !result.success {
@@ -352,9 +352,9 @@ fn save_review_report(
     is_adhoc: bool,
 ) -> Result<PathBuf> {
     let filename = if is_adhoc {
-        format!("{}-r{round_number}.md", Utc::now().format("%Y%m%dT%H%M%S"))
+        format!("{}-R{round_number}.md", Utc::now().format("%Y%m%dT%H%M%S"))
     } else {
-        format!("code-r{round_number}.md")
+        format!("CODE-R{round_number}.md")
     };
     let path = reviews_dir.join(filename);
     let issues = if verdict.issues.is_empty() {

@@ -10,7 +10,7 @@ allowed-tools:
 ---
 
 <objective>
-Start a new feature plan tracked by `aic`: create `.aic/plans/<slug>/plan.md` if it
+Start a new feature plan tracked by `aic`: create `.aic/plans/<slug>/PLAN.md` if it
 doesn't exist yet, then interview the user conversationally to fill in its sections,
 editing the file directly as answers come in. Leaves the plan ready for `/aic-plan-review`.
 </objective>
@@ -25,7 +25,7 @@ optional `--title` value to pass through.
 2. Run `aic plan new <slug>` (add `--title "<title>"` if one was given). If it fails
    because the plan already exists, that's fine — just continue to step 3 with the
    existing file instead of treating it as an error.
-3. Read `.aic/plans/<slug>/plan.md`.
+3. Read `.aic/plans/<slug>/PLAN.md`.
 4. Interview the user, section by section, to fill in whatever is still just the
    template's HTML comment placeholder (`<!-- ... -->`) — skip sections that already
    have real content (e.g. on a plan you're resuming):
@@ -40,7 +40,7 @@ optional `--title` value to pass through.
    discrete choices, so plain chat turns fit better than AskUserQuestion here. Use your
    own judgment on follow-up questions when an answer is vague or incomplete.
 5. After each section is answered, use Edit to write it into the corresponding heading
-   in `plan.md`, replacing the placeholder comment. Keep the user's own words and
+   in `PLAN.md`, replacing the placeholder comment. Keep the user's own words and
    framing — don't rewrite them into corporate-speak.
 6. Once all sections have real content, tell the user the plan is ready and suggest
    running `/aic-plan-review <slug>` next. Don't run the review yourself — that's a

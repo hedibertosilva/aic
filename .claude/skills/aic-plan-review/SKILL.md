@@ -1,6 +1,6 @@
 ---
 name: aic-plan-review
-description: "AIC: Run aic plan review, and auto-fix the plan.md if the reviewer requests changes (up to 2 fix cycles)"
+description: "AIC: Run aic plan review, and auto-fix PLAN.md if the reviewer requests changes (up to 2 fix cycles)"
 argument-hint: "<slug>"
 allowed-tools:
   - Bash
@@ -9,7 +9,7 @@ allowed-tools:
 ---
 
 <objective>
-Get a feature's `plan.md` reviewed via `aic plan review`, and close the loop yourself
+Get a feature's `PLAN.md` reviewed via `aic plan review`, and close the loop yourself
 when the reviewer (by default, Gemini via `agy`) requests changes: read the issues, fix
 the plan directly, and re-review — without relying on `aic`'s own `--mode auto` (which
 would spawn a separate executor subprocess instead of using this conversation).
@@ -30,7 +30,7 @@ Arguments: $ARGUMENTS — the feature slug (required).
    to execution (in the normal chat, not via `aic` — `dev execute` is intentionally not
    wrapped by a skill). Stop here.
 4. If not approved:
-   a. Read the current `.aic/plans/<slug>/plan.md`.
+   a. Read the current `.aic/plans/<slug>/PLAN.md`.
    b. Address every issue from the report directly in the plan, using Edit. Don't ask
       the user for permission to fix obvious issues (typos, missing sections, vague
       wording) — just fix them. If an issue requires a judgment call only the user can
