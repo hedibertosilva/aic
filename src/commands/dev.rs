@@ -10,6 +10,7 @@ use chrono::Utc;
 use crate::agent::{CliAgent, RunOpts};
 use crate::cli::{ExecuteModeArg, TargetArg};
 use crate::config::{Config, Mode};
+use crate::diff_filter;
 use crate::git;
 use crate::review::{run_review_loop, LoopOutcome, ReviewVerdict};
 use crate::state::{DevStatus, State};
@@ -160,14 +161,21 @@ pub struct ReviewOverrides {
     pub executor: Option<String>,
     pub mode: Option<Mode>,
     pub max_rounds: Option<u32>,
+    pub no_filter: bool,
 }
 
 pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
     let mut state = State::load(repo_root)?;
 
-    let (target_desc, diff, anchor) = resolve_diff(repo_root, &config, &state, slug, &overrides)?;
+    let no_filter = overrides.no_filter;
+    let (target_desc, diff_args, anchor) = resolve_diff(repo_root, &config, &state, slug, &overrides)?;
+    let diff = diff_filter::filtered_diff(repo_root, &config, &diff_args, no_filter)?;
     if diff.trim().is_empty() {
+        if !no_filter && !git::diff_paths_unfiltered(repo_root, &diff_args)?.trim().is_empty() {
+            println!("Nothing to review: all changes in {target_desc} were filtered out (use --no-filter to include them).");
+            return Ok(());
+        }
         println!("Nothing to review ({target_desc} is empty).");
         return Ok(());
     }
@@ -208,6 +216,7 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
     let target_desc_owned = target_desc.clone();
 
     let repo_root_for_refresh = repo_root.to_path_buf();
+    let config_for_refresh = config.clone();
 
     let outcome = run_review_loop(
         &reviewer,
@@ -230,14 +239,10 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
             Ok(repo_relative(&repo_root_owned, &path))
         },
         diff,
-        // The executor edits the working tree but doesn't necessarily stage
-        // or commit, so re-running the original target selection (staged /
-        // commit range / branch) could show the exact same diff as before
-        // and the loop would never converge. `diff_since_head` always
-        // reflects whatever is different right now, staged or not.
-        move || match &anchor {
-            Some(anchor) => git::diff_from_anchor(&repo_root_for_refresh, anchor),
-            None => git::diff_staged(&repo_root_for_refresh),
+        // Re-run the filtered diff so the next round sees the executor's edits.
+        move || {
+            let args = vec![anchor.clone().unwrap_or_else(|| "--staged".to_string())];
+            diff_filter::filtered_diff(&repo_root_for_refresh, &config_for_refresh, &args, no_filter)
         },
     )?;
 
@@ -258,7 +263,7 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
     Ok(())
 }
 
-/// Figures out which diff to review, in order: an explicit `--target`;
+/// Figures out which diff to review (as `git diff` arguments), in order: an explicit `--target`;
 /// otherwise staged changes if there are any; otherwise commits since
 /// `dev execute`'s recorded start sha; otherwise a diff against the
 /// auto-detected default branch.
@@ -277,7 +282,7 @@ fn resolve_diff(
     state: &State,
     slug: Option<&str>,
     overrides: &ReviewOverrides,
-) -> Result<(String, String, Option<String>)> {
+) -> Result<(String, Vec<String>, Option<String>)> {
     let start_sha = slug.and_then(|s| state.feature(s)).and_then(|f| f.dev.start_sha.clone());
 
     let target = overrides.target.unwrap_or_else(|| {
@@ -293,7 +298,7 @@ fn resolve_diff(
     match target {
         TargetArg::Staged => {
             let anchor = git::head_sha(repo_root).ok();
-            Ok(("staged changes".to_string(), git::diff_staged(repo_root)?, anchor))
+            Ok(("staged changes".to_string(), vec!["--staged".to_string()], anchor))
         }
         TargetArg::Commits => {
             if let Some(range) = &overrides.range {
@@ -302,7 +307,7 @@ fn resolve_diff(
                     .with_context(|| format!("--range '{range}' isn't in '<from>..<to>' form"))?;
                 return Ok((
                     format!("commits {range}"),
-                    git::diff_range(repo_root, from, to)?,
+                    vec![format!("{from}..{to}")],
                     Some(from.to_string()),
                 ));
             }
@@ -310,7 +315,7 @@ fn resolve_diff(
                 .context("no start sha recorded for this feature; run `aic dev execute` first, or pass --range")?;
             Ok((
                 format!("commits since {start}"),
-                git::diff_range(repo_root, &start, "HEAD")?,
+                vec![format!("{start}..HEAD")],
                 Some(start),
             ))
         }
@@ -319,7 +324,7 @@ fn resolve_diff(
             let anchor = git::merge_base(repo_root, &branch)?;
             Ok((
                 format!("diff against {branch}"),
-                git::diff_against_branch(repo_root, &branch)?,
+                vec![format!("{branch}...HEAD")],
                 Some(anchor),
             ))
         }

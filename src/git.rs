@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
@@ -31,6 +32,129 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Runs git with `input` on stdin and returns raw stdout. Exit status 1 is
+/// tolerated (`check-ignore` uses it for "nothing matched"); anything else
+/// non-zero is an error.
+fn run_git_stdin(repo_root: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let mut child = Command::new(git_binary())
+        .arg("-C")
+        .arg(repo_root)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+
+    // Feed stdin from a thread so a large path list can't deadlock against
+    // git filling its stdout pipe.
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    let _ = writer.join();
+
+    match output.status.code() {
+        Some(0) | Some(1) => Ok(output.stdout),
+        _ => bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+fn split_nul(bytes: &[u8]) -> Vec<String> {
+    bytes
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
+/// Paths changed by `git diff <diff_args>`, relative to the repo root.
+/// Renames are reported as a delete plus an add so both sides show up.
+pub fn changed_files(repo_root: &Path, diff_args: &[String]) -> Result<Vec<String>> {
+    let mut args: Vec<&str> = vec!["diff", "--name-only", "-z", "--no-renames"];
+    args.extend(diff_args.iter().map(String::as_str));
+    // `run_git` trims, which is harmless for NUL-separated output.
+    Ok(split_nul(run_git(repo_root, &args)?.as_bytes()))
+}
+
+/// `git diff <diff_args>` restricted to `paths`, with renames split like
+/// `changed_files`. Paths go via stdin as literal pathspecs, so magic
+/// characters in file names stay literal and the argv size limit doesn't
+/// apply. An empty `paths` yields an empty diff rather than git's "no
+/// pathspec means everything".
+pub fn diff_paths(repo_root: &Path, diff_args: &[String], paths: &[String]) -> Result<String> {
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let mut args: Vec<&str> = vec!["diff", "--no-renames"];
+    args.extend(diff_args.iter().map(String::as_str));
+    args.extend(["--pathspec-from-file=-", "--pathspec-file-nul"]);
+    let input: String = paths.iter().map(|p| format!(":(literal){p}\0")).collect();
+    let out = run_git_stdin(repo_root, &args, input.as_bytes())?;
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// `git diff <diff_args>` with no path filtering, rename detection left at
+/// git's default.
+pub fn diff_paths_unfiltered(repo_root: &Path, diff_args: &[String]) -> Result<String> {
+    let mut args: Vec<&str> = vec!["diff"];
+    args.extend(diff_args.iter().map(String::as_str));
+    run_git(repo_root, &args)
+}
+
+/// The subset of `paths` that git considers ignored by `.gitignore`
+/// rules (`--no-index` so already-tracked files are still checked).
+pub fn ignored_paths(repo_root: &Path, paths: &[String]) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = paths.join("\0") + "\0";
+    let out = run_git_stdin(
+        repo_root,
+        &["check-ignore", "--no-index", "--stdin", "-z"],
+        input.as_bytes(),
+    )?;
+    Ok(split_nul(&out))
+}
+
+/// The subset of `paths` marked `linguist-generated` in `.gitattributes`.
+pub fn generated_paths(repo_root: &Path, paths: &[String]) -> Result<Vec<String>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = paths.join("\0") + "\0";
+    let out = run_git_stdin(
+        repo_root,
+        &["check-attr", "linguist-generated", "--stdin", "-z"],
+        input.as_bytes(),
+    )?;
+    // Output is repeating `path NUL attribute NUL value NUL` triples.
+    let fields = split_nul_keep_empty(&out);
+    Ok(fields
+        .chunks(3)
+        .filter(|c| c.len() == 3 && matches!(c[2].as_str(), "set" | "true"))
+        .map(|c| c[0].clone())
+        .collect())
+}
+
+fn split_nul_keep_empty(bytes: &[u8]) -> Vec<String> {
+    let mut fields: Vec<String> = bytes
+        .split(|b| *b == 0)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect();
+    // trailing NUL leaves one empty tail element
+    if fields.last().is_some_and(|f| f.is_empty()) {
+        fields.pop();
+    }
+    fields
+}
+
 pub fn is_repo(dir: &Path) -> bool {
     Command::new(git_binary())
         .arg("-C")
@@ -57,39 +181,6 @@ pub fn diff_staged(repo_root: &Path) -> Result<String> {
 
 pub fn has_staged_changes(repo_root: &Path) -> Result<bool> {
     Ok(!diff_staged(repo_root)?.is_empty())
-}
-
-/// Everything different from the last commit — staged AND unstaged — as a
-/// single diff. Used to refresh a code review's content after an auto-mode
-/// executor run: the executor edits the working tree but doesn't
-/// necessarily stage or commit, so re-running the *original* target
-/// (`diff --staged`, or a commit range) would miss its changes entirely.
-/// Falls back to the staged diff on a repo with no commits yet, where
-/// `HEAD` doesn't resolve.
-pub fn diff_since_head(repo_root: &Path) -> Result<String> {
-    if head_sha(repo_root).is_err() {
-        return diff_staged(repo_root);
-    }
-    run_git(repo_root, &["diff", "HEAD"])
-}
-
-pub fn diff_range(repo_root: &Path, from: &str, to: &str) -> Result<String> {
-    let range = format!("{from}..{to}");
-    run_git(repo_root, &["diff", &range])
-}
-
-pub fn diff_against_branch(repo_root: &Path, branch: &str) -> Result<String> {
-    run_git(repo_root, &["diff", &format!("{branch}...HEAD")])
-}
-
-/// Diffs a single ref against the current working tree (staged, unstaged,
-/// and anything committed since that ref — everything). Used to re-read a
-/// code review's full diff after an auto-mode executor run, anchored at
-/// whichever ref the review's target originally used (so a `commits` or
-/// `branch` review doesn't shrink down to only the executor's latest
-/// uncommitted edit on later rounds).
-pub fn diff_from_anchor(repo_root: &Path, anchor: &str) -> Result<String> {
-    run_git(repo_root, &["diff", anchor])
 }
 
 /// The commit `branch` and `HEAD` last had in common — the right anchor for
@@ -201,34 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_since_head_falls_back_to_staged_without_any_commits() {
-        let dir = init_repo();
-        fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
-        run_git(dir.path(), &["add", "a.txt"]).unwrap();
-
-        assert!(diff_since_head(dir.path()).unwrap().contains("hello"));
-    }
-
-    #[test]
-    fn diff_since_head_sees_both_staged_and_unstaged_changes() {
-        let dir = init_repo();
-        fs::write(dir.path().join("a.txt"), "v1\n").unwrap();
-        fs::write(dir.path().join("b.txt"), "v1\n").unwrap();
-        commit_all(dir.path(), "v1");
-
-        // staged change to a.txt
-        fs::write(dir.path().join("a.txt"), "v2\n").unwrap();
-        run_git(dir.path(), &["add", "a.txt"]).unwrap();
-        // unstaged change to the already-tracked b.txt
-        fs::write(dir.path().join("b.txt"), "v2\n").unwrap();
-
-        let diff = diff_since_head(dir.path()).unwrap();
-        assert!(diff.contains("a.txt"));
-        assert!(diff.contains("b.txt"));
-    }
-
-    #[test]
-    fn diff_range_covers_commits_between_two_shas() {
+    fn range_diff_covers_commits_between_two_shas() {
         let dir = init_repo();
         fs::write(dir.path().join("a.txt"), "v1\n").unwrap();
         commit_all(dir.path(), "v1");
@@ -238,7 +302,7 @@ mod tests {
         commit_all(dir.path(), "v2");
         let end = head_sha(dir.path()).unwrap();
 
-        let diff = diff_range(dir.path(), &start, &end).unwrap();
+        let diff = diff_paths_unfiltered(dir.path(), &[format!("{start}..{end}")]).unwrap();
         assert!(diff.contains("-v1"));
         assert!(diff.contains("+v2"));
     }
@@ -271,5 +335,70 @@ mod tests {
         run_git(dir.path(), &["checkout", "-q", "-b", "feature/My_Thing"]).unwrap();
 
         assert_eq!(current_branch_slug(dir.path()).unwrap(), "feature-my-thing");
+    }
+}
+
+#[cfg(test)]
+mod filter_tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::diff_filter::filtered_diff;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn setup() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        run_git(p, &["init", "-q"]).unwrap();
+        run_git(p, &["config", "user.email", "t@example.com"]).unwrap();
+        run_git(p, &["config", "user.name", "T"]).unwrap();
+        fs::write(p.join(".gitattributes"), "gen/** linguist-generated\n").unwrap();
+        fs::create_dir(p.join("gen")).unwrap();
+        fs::write(p.join("gen/out.txt"), "generated\n").unwrap();
+        fs::write(p.join("Cargo.lock"), "lock\n").unwrap();
+        fs::write(p.join("keep.rs"), "fn main() {}\n").unwrap();
+        fs::write(p.join("skip.txt"), "skipme\n").unwrap();
+        run_git(p, &["add", "-A"]).unwrap();
+        dir
+    }
+
+    #[test]
+    fn filters_defaults_generated_and_config_excludes() {
+        let dir = setup();
+        let mut config = Config::default();
+        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        let args = vec!["--staged".to_string()];
+
+        let diff = filtered_diff(dir.path(), &config, &args, false).unwrap();
+        assert!(diff.contains("keep.rs"));
+        assert!(!diff.contains("Cargo.lock"));
+        assert!(!diff.contains("gen/out.txt"));
+        assert!(!diff.contains("skip.txt"));
+
+        let full = filtered_diff(dir.path(), &config, &args, true).unwrap();
+        assert!(full.contains("Cargo.lock") && full.contains("gen/out.txt"));
+    }
+
+    #[test]
+    fn include_patterns_win_over_every_exclusion() {
+        let dir = setup();
+        let mut config = Config::default();
+        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        config.git_diff_include_patterns = vec!["Cargo.lock".into(), "gen/**".into(), "skip.txt".into()];
+        let diff = filtered_diff(dir.path(), &config, &["--staged".to_string()], false).unwrap();
+        assert!(diff.contains("Cargo.lock"));
+        assert!(diff.contains("gen/out.txt"));
+        assert!(diff.contains("skip.txt"));
+    }
+
+    #[test]
+    fn everything_excluded_gives_an_empty_diff() {
+        let dir = tempdir().unwrap();
+        let p = dir.path();
+        run_git(p, &["init", "-q"]).unwrap();
+        fs::write(p.join("Cargo.lock"), "lock\n").unwrap();
+        run_git(p, &["add", "-A"]).unwrap();
+        let diff = filtered_diff(p, &Config::default(), &["--staged".to_string()], false).unwrap();
+        assert!(diff.is_empty());
     }
 }

@@ -49,7 +49,9 @@ aic config set mode auto
 aic config set max_rounds 5
 ```
 
-Todo comando abaixo aceita flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`, `--permission-mode`, `--target`) para sobrescrever a config numa chamada pontual — mas no uso normal eles não são necessários.
+Todo comando abaixo aceita flags (`--reviewer`, `--executor`, `--mode`, `--max-rounds`, `--permission-mode`, `--target`, `--no-filter`) para sobrescrever a config numa chamada pontual — mas no uso normal eles não são necessários.
+
+**`git_diff_exclude_patterns` / `git_diff_include_patterns`**: `aic dev review` filtra o diff antes de mandar pro reviewer, removendo lockfiles comuns (`Cargo.lock`, `package-lock.json`, `yarn.lock`, ...), arquivos ignorados pelo `.gitignore` e marcados como `linguist-generated` no `.gitattributes`. `git_diff_exclude_patterns` (lista, default `[]`) soma exclusões; `git_diff_include_patterns` re-inclui o que bater, com precedência sobre qualquer exclusão. Os padrões usam um subconjunto da sintaxe do gitignore: `*` e `?` (dentro de um segmento do caminho) e `**` (cruza `/`). Sem `/`, o padrão casa com qualquer segmento do caminho (`node_modules`, `*.min.js`); com `/`, é ancorado na raiz do repo e também cobre tudo dentro do diretório casado. Uma `/` final é ignorada. Não há negação com `!` (use `git_diff_include_patterns`) nem classes `[...]`. Use `aic dev review --no-filter` para ver o diff completo numa chamada.
 
 **`skip_permissions`**: fica desligado por padrão. Sem ele, se o reviewer ou executor tentar usar uma ferramenta (ler um arquivo, rodar um comando) em modo headless, a chamada é negada e falha com um erro claro em vez de devolver uma resposta vazia silenciosa. Só ative se você confia nos agentes configurados para rodar sem supervisão nesse repositório.
 

@@ -146,6 +146,11 @@ pub enum DevCommands {
         /// `max_rounds`.
         #[arg(long = "max-rounds")]
         max_rounds: Option<u32>,
+        /// Review the full, unfiltered diff: skip the built-in lockfile
+        /// list, `.gitignore`/`.gitattributes` (linguist-generated) and the
+        /// git_diff_*_patterns config, for this run only.
+        #[arg(long = "no-filter")]
+        no_filter: bool,
     },
 }
 

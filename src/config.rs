@@ -44,6 +44,12 @@ pub struct Config {
     /// on if you trust the configured agents to run unattended on this
     /// repo.
     pub skip_permissions: bool,
+    /// Extra patterns (on top of the built-in lockfile list) to drop from
+    /// the diff sent to the reviewer in `aic dev review`.
+    pub git_diff_exclude_patterns: Vec<String>,
+    /// Patterns that re-include a path even if an exclusion above (built-in,
+    /// config, `.gitignore`, `linguist-generated`) dropped it.
+    pub git_diff_include_patterns: Vec<String>,
     pub agents: HashMap<String, AgentConfig>,
 }
 
@@ -74,6 +80,8 @@ impl Default for Config {
             permission_mode: "acceptEdits".to_string(),
             default_base_branch: String::new(),
             skip_permissions: false,
+            git_diff_exclude_patterns: Vec::new(),
+            git_diff_include_patterns: Vec::new(),
             agents,
         }
     }
@@ -90,6 +98,8 @@ pub struct ConfigOverrides {
     pub permission_mode: Option<String>,
     pub default_base_branch: Option<String>,
     pub skip_permissions: Option<bool>,
+    pub git_diff_exclude_patterns: Option<Vec<String>>,
+    pub git_diff_include_patterns: Option<Vec<String>>,
     pub agents: Option<HashMap<String, AgentConfig>>,
 }
 
@@ -115,6 +125,12 @@ impl Config {
         }
         if let Some(v) = overrides.skip_permissions {
             self.skip_permissions = v;
+        }
+        if let Some(v) = overrides.git_diff_exclude_patterns {
+            self.git_diff_exclude_patterns = v;
+        }
+        if let Some(v) = overrides.git_diff_include_patterns {
+            self.git_diff_include_patterns = v;
         }
         if let Some(agents) = overrides.agents {
             for (name, agent) in agents {

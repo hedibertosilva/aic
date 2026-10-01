@@ -2,6 +2,7 @@ mod agent;
 mod cli;
 mod commands;
 mod config;
+mod diff_filter;
 mod git;
 mod review;
 mod state;
@@ -83,6 +84,7 @@ fn run() -> Result<()> {
                 executor,
                 mode,
                 max_rounds,
+                no_filter,
             } => {
                 let repo_root = resolve_repo_root()?;
                 let explicit = slug.is_some();
@@ -110,6 +112,7 @@ fn run() -> Result<()> {
                         executor,
                         mode: mode.map(Into::into),
                         max_rounds,
+                        no_filter,
                     },
                 )
             }
