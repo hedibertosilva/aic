@@ -1,6 +1,6 @@
 ---
-name: plan
-description: "Scaffold a new aic feature plan and interview the user to fill it in"
+name: aic-plan
+description: "AIC: Scaffold a new aic feature plan and interview the user to fill it in"
 argument-hint: "<slug> [title]"
 allowed-tools:
   - Bash
@@ -12,7 +12,7 @@ allowed-tools:
 <objective>
 Start a new feature plan tracked by `aic`: create `.aic/plans/<slug>/plan.md` if it
 doesn't exist yet, then interview the user conversationally to fill in its sections,
-editing the file directly as answers come in. Leaves the plan ready for `/plan-review`.
+editing the file directly as answers come in. Leaves the plan ready for `/aic-plan-review`.
 </objective>
 
 <context>
@@ -43,6 +43,6 @@ optional `--title` value to pass through.
    in `plan.md`, replacing the placeholder comment. Keep the user's own words and
    framing — don't rewrite them into corporate-speak.
 6. Once all sections have real content, tell the user the plan is ready and suggest
-   running `/plan-review <slug>` next. Don't run the review yourself — that's a
+   running `/aic-plan-review <slug>` next. Don't run the review yourself — that's a
    separate, deliberate step.
 </process>

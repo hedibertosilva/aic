@@ -1,6 +1,6 @@
 ---
-name: plan-review
-description: "Run aic plan review, and auto-fix the plan.md if the reviewer requests changes (up to 2 fix cycles)"
+name: aic-plan-review
+description: "AIC: Run aic plan review, and auto-fix the plan.md if the reviewer requests changes (up to 2 fix cycles)"
 argument-hint: "<slug>"
 allowed-tools:
   - Bash

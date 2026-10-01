@@ -1,6 +1,6 @@
 ---
-name: dev-review
-description: "Run aic dev review on the current code changes, and auto-fix if the reviewer requests changes (up to 2 fix cycles)"
+name: aic-dev-review
+description: "AIC: Run aic dev review on the current code changes, and auto-fix if the reviewer requests changes (up to 2 fix cycles)"
 argument-hint: "[slug]"
 allowed-tools:
   - Bash
