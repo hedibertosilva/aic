@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::agent::CliAgent;
+use crate::sandbox::Sandbox;
 use crate::config::{Config, Mode};
 use crate::review::{run_review_loop, LoopOutcome, ReviewVerdict};
 use crate::state::{PlanStatus, State};
@@ -49,7 +50,8 @@ pub fn new(repo_root: &Path, slug: &str, title: Option<String>, no_open: bool) -
         "Let's discuss the plan in {}. Read it, then interview me to fill in its sections.",
         plan_path.display()
     );
-    super::dev::exec_interactive(&binary, &prompt, &config.permission_mode, repo_root)
+    let sandbox = Sandbox::from_config(&config)?;
+    super::dev::exec_interactive(&binary, &prompt, &config.permission_mode, repo_root, sandbox.as_ref())
 }
 
 #[derive(Default)]
@@ -85,14 +87,16 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
         reviewer_cfg.binary.clone(),
         reviewer_cfg.model.clone(),
         reviewer_cfg.effort.clone(),
-    );
+    )
+    .with_sandbox(Sandbox::from_config(&config)?);
     let executor_cfg = config.agent(&executor_name)?;
     let executor = CliAgent::with_defaults(
         executor_name.clone(),
         executor_cfg.binary.clone(),
         executor_cfg.model.clone(),
         executor_cfg.effort.clone(),
-    );
+    )
+    .with_sandbox(Sandbox::from_config(&config)?);
 
     let reviews_dir = plan_path.parent().unwrap().join("reviews");
     fs::create_dir_all(&reviews_dir)?;

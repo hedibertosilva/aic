@@ -193,6 +193,16 @@ pub fn repo_root(dir: &Path) -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(out))
 }
 
+/// Absolute path of the git dir shared by all worktrees of the repo at
+/// `repo_root` (`git rev-parse --git-common-dir`). For a linked worktree,
+/// this is the main repo's `.git`, not the pointer file in the worktree.
+pub fn git_common_dir(repo_root: &Path) -> Result<std::path::PathBuf> {
+    let out = run_git(repo_root, &["rev-parse", "--git-common-dir"])?;
+    let path = std::path::PathBuf::from(out);
+    let abs = if path.is_absolute() { path } else { repo_root.join(path) };
+    Ok(abs.canonicalize().unwrap_or(abs))
+}
+
 pub fn head_sha(repo_root: &Path) -> Result<String> {
     run_git(repo_root, &["rev-parse", "HEAD"])
 }

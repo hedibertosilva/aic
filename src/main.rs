@@ -5,6 +5,7 @@ mod config;
 mod diff_filter;
 mod git;
 mod review;
+mod sandbox;
 mod state;
 mod templates;
 
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use cli::{Cli, Commands, ConfigCommands, DevCommands, PlanCommands};
+use cli::{Cli, Commands, ConfigCommands, DevCommands, PlanCommands, SandboxCommands};
 
 fn main() {
     if let Err(err) = run() {
@@ -126,6 +127,15 @@ fn run() -> Result<()> {
             let repo_root = resolve_repo_root()?;
             commands::status::run(&repo_root, slug)
         }
+
+        Commands::Sandbox { command } => match command {
+            SandboxCommands::Build { tag, claude_version } => {
+                let repo_root = resolve_repo_root()
+                    .or_else(|_| std::env::current_dir().context("reading current directory"))?;
+                let config = config::Config::load_merged(&repo_root)?;
+                commands::sandbox::build(&config, tag, claude_version)
+            }
+        },
 
         Commands::Config { command } => match command {
             None => commands::config_cmd::interactive(),

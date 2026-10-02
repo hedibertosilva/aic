@@ -1,0 +1,376 @@
+//! Container isolation for agent invocations.
+//!
+//! Every `claude`/`agy` run can be wrapped as `<runtime> run … <image>
+//! <binary> <args>` so an agent running unattended can only touch the
+//! mounted repo (plus any `sandbox_mounts`), not the rest of `$HOME`. The
+//! threat model is *accidental* destructive commands: the network stays open
+//! and agent credentials are mounted in, so this is not a confidentiality
+//! boundary.
+
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use anyhow::{bail, Context, Result};
+
+use crate::config::{Config, SandboxKind};
+
+/// `$HOME` inside the container. The image provides it writable by any uid.
+const CONTAINER_HOME: &str = "/home/aic";
+
+/// Whether the repo is mounted writable (executor) or read-only (reviewer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    ReadWrite,
+    ReadOnly,
+}
+
+/// Per-invocation inputs to `Sandbox::run_args`.
+#[derive(Debug, Clone)]
+pub struct RunSpec {
+    pub repo_root: PathBuf,
+    /// Shared git dir, mounted too when it lives outside `repo_root`
+    /// (linked worktrees).
+    pub git_dir: Option<PathBuf>,
+    /// Working directory inside the container; must be under `repo_root`.
+    pub workdir: PathBuf,
+    pub access: Access,
+    pub interactive: bool,
+    /// File name of the agent binary (`claude`, `agy`, ...), which picks
+    /// which credential mounts apply.
+    pub agent: String,
+    /// Agent argv, after the binary name.
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Sandbox {
+    pub kind: SandboxKind,
+    pub image: String,
+    pub mounts: Vec<String>,
+    pub env: Vec<String>,
+    host_home: PathBuf,
+    data_dir: PathBuf,
+    uid: u32,
+    gid: u32,
+}
+
+impl Sandbox {
+    /// `None` when the config says `sandbox = "none"`.
+    pub fn from_config(config: &Config) -> Result<Option<Sandbox>> {
+        if config.sandbox == SandboxKind::None {
+            return Ok(None);
+        }
+        let host_home = PathBuf::from(std::env::var("HOME").context("HOME environment variable is not set")?);
+        let data_dir = match std::env::var("XDG_DATA_HOME") {
+            Ok(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
+            _ => host_home.join(".local").join("share"),
+        }
+        .join("aic")
+        .join("sandbox");
+        let meta = std::fs::metadata(&host_home)
+            .with_context(|| format!("reading {}", host_home.display()))?;
+        Ok(Some(Sandbox {
+            kind: config.sandbox,
+            image: config.sandbox_image.clone(),
+            mounts: config.sandbox_mounts.clone(),
+            env: config.sandbox_env.clone(),
+            host_home,
+            data_dir,
+            uid: meta.uid(),
+            gid: meta.gid(),
+        }))
+    }
+
+    fn runtime(&self) -> &'static str {
+        self.kind.label()
+    }
+
+    /// Fails with a clear message if the runtime binary is missing or the
+    /// image hasn't been built. Run before starting any agent.
+    pub fn preflight(&self) -> Result<()> {
+        let status = Command::new(self.runtime())
+            .args(["image", "inspect", &self.image])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
+                "sandbox runtime '{rt}' not found on PATH; install it or set sandbox = \"none\"",
+                rt = self.runtime()
+            ),
+            Err(err) => Err(err).with_context(|| format!("running '{} image inspect'", self.runtime())),
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => bail!(
+                "sandbox image '{img}' not found; run 'aic sandbox build' or set sandbox = \"none\"",
+                img = self.image
+            ),
+        }
+    }
+
+    /// Creates host-side state dirs that get bind-mounted, so the runtime
+    /// doesn't create them root-owned.
+    fn prepare(&self, agent: &str) -> Result<()> {
+        if agent == "claude" {
+            let dir = self.claude_state_dir();
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        Ok(())
+    }
+
+    fn claude_state_dir(&self) -> PathBuf {
+        self.data_dir.join("claude")
+    }
+
+    /// Builds the full `<runtime> run …` command for `spec`, creating any
+    /// needed host state dirs first.
+    pub fn command(&self, spec: &RunSpec) -> Result<Command> {
+        self.prepare(&spec.agent)?;
+        let mut cmd = Command::new(self.runtime());
+        cmd.args(self.run_args(spec));
+        Ok(cmd)
+    }
+
+    /// The argument list after `<runtime>`. Pure, so it can be unit-tested
+    /// without a container.
+    pub fn run_args(&self, spec: &RunSpec) -> Vec<String> {
+        let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+        if spec.interactive {
+            args.push("-it".into());
+        }
+        // SELinux: disable labeling for this container rather than
+        // relabeling the user's repo and $HOME files with :z/:Z.
+        args.push("--security-opt".into());
+        args.push("label=disable".into());
+
+        match self.kind {
+            SandboxKind::Podman => args.push("--userns=keep-id".into()),
+            _ => {
+                args.push("--user".into());
+                args.push(format!("{}:{}", self.uid, self.gid));
+            }
+        }
+        args.push("-e".into());
+        args.push(format!("HOME={CONTAINER_HOME}"));
+
+        let root = path_str(&spec.repo_root);
+        let suffix = if spec.access == Access::ReadOnly { ":ro" } else { "" };
+        args.push("-v".into());
+        args.push(format!("{root}:{root}{suffix}"));
+        if spec.access == Access::ReadOnly {
+            args.push("--tmpfs".into());
+            args.push("/tmp".into());
+        }
+        if let Some(git_dir) = &spec.git_dir {
+            if !git_dir.starts_with(&spec.repo_root) {
+                let g = path_str(git_dir);
+                args.push("-v".into());
+                args.push(format!("{g}:{g}{suffix}"));
+            }
+        }
+
+        let gitconfig = self.host_home.join(".gitconfig");
+        if gitconfig.exists() {
+            args.push("-v".into());
+            args.push(format!("{}:{CONTAINER_HOME}/.gitconfig:ro", path_str(&gitconfig)));
+        }
+        self.push_credential_mounts(&mut args, &spec.agent);
+
+        for mount in &self.mounts {
+            args.push("-v".into());
+            args.push(mount.clone());
+        }
+        for name in &self.env {
+            args.push("-e".into());
+            args.push(name.clone());
+        }
+
+        args.push("-w".into());
+        args.push(path_str(&spec.workdir));
+        args.push(self.image.clone());
+        args.push(spec.agent.clone());
+        args.extend(spec.args.iter().cloned());
+        args
+    }
+
+    /// Agent login state. `claude` gets a container-owned state dir (it
+    /// writes sessions/history there, so a plain RO bind of `~/.claude`
+    /// would break it) with only the credentials file bound in from the
+    /// host, writable so token refreshes persist. `agy` gets `~/.gemini`.
+    fn push_credential_mounts(&self, args: &mut Vec<String>, agent: &str) {
+        match agent {
+            "claude" => {
+                let state = path_str(&self.claude_state_dir());
+                args.push("-v".into());
+                args.push(format!("{state}:{CONTAINER_HOME}/.claude"));
+                // Keeps `.claude.json` inside the persisted state dir.
+                args.push("-e".into());
+                args.push(format!("CLAUDE_CONFIG_DIR={CONTAINER_HOME}/.claude"));
+                let creds = self.host_home.join(".claude").join(".credentials.json");
+                if creds.exists() {
+                    args.push("-v".into());
+                    args.push(format!(
+                        "{}:{CONTAINER_HOME}/.claude/.credentials.json",
+                        path_str(&creds)
+                    ));
+                }
+            }
+            "agy" => {
+                let gemini = self.host_home.join(".gemini");
+                if gemini.exists() {
+                    args.push("-v".into());
+                    args.push(format!("{}:{CONTAINER_HOME}/.gemini", path_str(&gemini)));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `<runtime> build` arguments for `aic sandbox build`.
+    pub fn build_args(&self, tag: &str, context: &Path, build_args: &[(String, String)]) -> Vec<String> {
+        let mut args = vec!["build".to_string(), "-t".into(), tag.into()];
+        for (k, v) in build_args {
+            args.push("--build-arg".into());
+            args.push(format!("{k}={v}"));
+        }
+        args.push(path_str(context));
+        args
+    }
+
+    pub fn runtime_name(&self) -> &'static str {
+        self.runtime()
+    }
+}
+
+fn path_str(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sandbox(kind: SandboxKind) -> Sandbox {
+        Sandbox {
+            kind,
+            image: "aic-sandbox".into(),
+            mounts: vec!["/cache:/cache:ro".into()],
+            env: vec!["ANTHROPIC_API_KEY".into()],
+            host_home: PathBuf::from("/nonexistent-home"),
+            data_dir: PathBuf::from("/nonexistent-home/.local/share/aic/sandbox"),
+            uid: 1000,
+            gid: 1001,
+        }
+    }
+
+    fn spec(access: Access, interactive: bool) -> RunSpec {
+        RunSpec {
+            repo_root: PathBuf::from("/work/repo"),
+            git_dir: Some(PathBuf::from("/work/repo/.git")),
+            workdir: PathBuf::from("/work/repo"),
+            access,
+            interactive,
+            agent: "claude".into(),
+            args: vec!["-p".into(), "hi".into()],
+        }
+    }
+
+    fn has_pair(args: &[String], a: &str, b: &str) -> bool {
+        args.windows(2).any(|w| w[0] == a && w[1] == b)
+    }
+
+    #[test]
+    fn podman_uses_keep_id_and_docker_uses_user() {
+        let podman = sandbox(SandboxKind::Podman).run_args(&spec(Access::ReadWrite, false));
+        assert!(podman.contains(&"--userns=keep-id".to_string()));
+        assert!(!podman.contains(&"--user".to_string()));
+
+        let docker = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert!(has_pair(&docker, "--user", "1000:1001"));
+        assert!(!docker.contains(&"--userns=keep-id".to_string()));
+    }
+
+    #[test]
+    fn common_flags_home_and_selinux() {
+        let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert_eq!(&args[..2], ["run", "--rm"]);
+        assert!(has_pair(&args, "--security-opt", "label=disable"));
+        assert!(has_pair(&args, "-e", "HOME=/home/aic"));
+        assert!(has_pair(&args, "-w", "/work/repo"));
+        assert!(!args.contains(&"-it".to_string()));
+    }
+
+    #[test]
+    fn executor_mounts_repo_read_write_and_reviewer_read_only_with_tmpfs() {
+        let rw = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert!(has_pair(&rw, "-v", "/work/repo:/work/repo"));
+        assert!(!rw.contains(&"--tmpfs".to_string()));
+
+        let ro = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadOnly, false));
+        assert!(has_pair(&ro, "-v", "/work/repo:/work/repo:ro"));
+        assert!(has_pair(&ro, "--tmpfs", "/tmp"));
+    }
+
+    #[test]
+    fn worktree_git_dir_outside_repo_is_mounted_with_same_access() {
+        let mut s = spec(Access::ReadOnly, false);
+        s.git_dir = Some(PathBuf::from("/main/.git"));
+        let ro = sandbox(SandboxKind::Docker).run_args(&s);
+        assert!(has_pair(&ro, "-v", "/main/.git:/main/.git:ro"));
+
+        s.access = Access::ReadWrite;
+        let rw = sandbox(SandboxKind::Docker).run_args(&s);
+        assert!(has_pair(&rw, "-v", "/main/.git:/main/.git"));
+    }
+
+    #[test]
+    fn git_dir_inside_repo_is_not_mounted_twice() {
+        let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert!(!args.iter().any(|a| a.starts_with("/work/repo/.git")));
+    }
+
+    #[test]
+    fn interactive_adds_tty_flags() {
+        let args = sandbox(SandboxKind::Podman).run_args(&spec(Access::ReadWrite, true));
+        assert!(args.contains(&"-it".to_string()));
+    }
+
+    #[test]
+    fn extra_mounts_and_env_names_are_forwarded() {
+        let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert!(has_pair(&args, "-v", "/cache:/cache:ro"));
+        assert!(has_pair(&args, "-e", "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn claude_gets_state_dir_and_config_dir_but_not_host_claude_dir() {
+        let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        assert!(has_pair(
+            &args,
+            "-v",
+            "/nonexistent-home/.local/share/aic/sandbox/claude:/home/aic/.claude"
+        ));
+        assert!(has_pair(&args, "-e", "CLAUDE_CONFIG_DIR=/home/aic/.claude"));
+        assert!(!args.iter().any(|a| a.starts_with("/nonexistent-home/.claude:")));
+    }
+
+    #[test]
+    fn image_binary_and_agent_args_come_last() {
+        let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
+        let n = args.len();
+        assert_eq!(&args[n - 4..], ["aic-sandbox", "claude", "-p", "hi"]);
+    }
+
+    #[test]
+    fn build_args_include_tag_build_args_and_context() {
+        let args = sandbox(SandboxKind::Docker).build_args(
+            "mytag",
+            Path::new("/ctx"),
+            &[("CLAUDE_VERSION".into(), "1.2.3".into())],
+        );
+        assert_eq!(
+            args,
+            ["build", "-t", "mytag", "--build-arg", "CLAUDE_VERSION=1.2.3", "/ctx"]
+        );
+    }
+}

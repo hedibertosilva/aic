@@ -3,6 +3,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
+use crate::git;
+use crate::sandbox::{Access, RunSpec, Sandbox};
+
 /// What a `CliAgent::run` call should do.
 #[derive(Debug, Clone, Default)]
 pub struct RunOpts {
@@ -23,10 +26,14 @@ pub struct RunOpts {
     /// permission prompt, so without this, any tool call outside what
     /// `permission` already allows is silently denied — the agent then
     /// reports `status: SUCCESS` with an empty response instead of failing
-    /// loudly. `aic` sets this on every headless call: it's a personal
-    /// automation tool operating on the user's own trusted repos, not a
-    /// sandbox for untrusted input.
+    /// loudly. Only set when the user opted in via `skip_permissions`;
+    /// with a sandbox configured, the damage a skipped prompt can do is
+    /// limited to the mounted repo, otherwise the agent has the user's full
+    /// privileges on the host.
     pub skip_permissions: bool,
+    /// Mount the repo read-only in the sandbox (reviewer calls). Ignored
+    /// when no sandbox is configured.
+    pub read_only: bool,
 }
 
 /// Normalized result of a headless agent run, regardless of which CLI
@@ -53,6 +60,8 @@ pub struct CliAgent {
     /// doesn't already specify its own `model`/`effort`.
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// When set, every run happens inside this container sandbox.
+    pub sandbox: Option<Sandbox>,
 }
 
 impl CliAgent {
@@ -62,7 +71,13 @@ impl CliAgent {
             binary: binary.into(),
             model: None,
             effort: None,
+            sandbox: None,
         }
+    }
+
+    pub fn with_sandbox(mut self, sandbox: Option<Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     pub fn with_defaults(
@@ -76,6 +91,7 @@ impl CliAgent {
             binary: binary.into(),
             model: model.into().filter(|s| !s.is_empty()),
             effort: effort.into().filter(|s| !s.is_empty()),
+            sandbox: None,
         }
     }
 
@@ -89,11 +105,17 @@ impl CliAgent {
     }
 
     pub fn run(&self, opts: &RunOpts) -> Result<AgentRunResult> {
-        let mut cmd = Command::new(&self.binary);
-        self.push_args(&mut cmd, opts);
-        if let Some(cwd) = &opts.cwd {
-            cmd.current_dir(cwd);
-        }
+        let mut cmd = match &self.sandbox {
+            Some(sandbox) => self.sandboxed_command(sandbox, opts)?,
+            None => {
+                let mut cmd = Command::new(&self.binary);
+                self.push_args(&mut cmd, opts);
+                if let Some(cwd) = &opts.cwd {
+                    cmd.current_dir(cwd);
+                }
+                cmd
+            }
+        };
 
         let output = cmd.output().with_context(|| {
             format!(
@@ -119,6 +141,29 @@ impl CliAgent {
         }
 
         self.parse_envelope(&stdout)
+    }
+
+    /// Wraps this agent's invocation as `<runtime> run … <image> <binary>
+    /// <args>`. Fails before starting anything if the runtime or image is
+    /// missing.
+    fn sandboxed_command(&self, sandbox: &Sandbox, opts: &RunOpts) -> Result<Command> {
+        sandbox.preflight()?;
+        let repo_root = opts
+            .cwd
+            .clone()
+            .context("a sandboxed run needs a working directory inside the repo")?;
+        let mut argv = Command::new(&self.binary);
+        self.push_args(&mut argv, opts);
+        let spec = RunSpec {
+            git_dir: git::git_common_dir(&repo_root).ok(),
+            workdir: repo_root.clone(),
+            repo_root,
+            access: if opts.read_only { Access::ReadOnly } else { Access::ReadWrite },
+            interactive: false,
+            agent: self.binary_stem().to_string(),
+            args: argv.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+        };
+        sandbox.command(&spec)
     }
 
     /// Builds the subprocess args. `claude` and `agy` share `-p`,

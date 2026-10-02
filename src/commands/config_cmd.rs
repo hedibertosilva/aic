@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use dialoguer::{Input, Select};
 
-use crate::config::{Config, Mode};
+use crate::config::{Config, Mode, SandboxKind};
 
 /// Prints the *effective* config: global, with the current repo's
 /// `.aic/config.toml` override (if any) applied on top — matching what
@@ -40,7 +40,12 @@ pub fn set(key: &str, value: &str) -> Result<()> {
                 other => bail!("'{other}' isn't 'true' or 'false'"),
             };
         }
-        other => bail!("unknown config key '{other}' (executor, reviewer, mode, max_rounds, permission_mode, default_base_branch, skip_permissions)"),
+        "sandbox" => {
+            config.sandbox = SandboxKind::parse(value)
+                .with_context(|| format!("unknown sandbox '{value}', expected 'docker', 'podman' or 'none'"))?;
+        }
+        "sandbox_image" => config.sandbox_image = value.to_string(),
+        other => bail!("unknown config key '{other}' (executor, reviewer, mode, max_rounds, permission_mode, default_base_branch, skip_permissions, sandbox, sandbox_image)"),
     }
     config.save_global()?;
     println!("Set {key} = {value}");
@@ -71,6 +76,8 @@ pub fn interactive() -> Result<()> {
                 "skip_permissions = {} (opt-in: auto-approves every tool request in headless runs)",
                 config.skip_permissions
             ),
+            format!("sandbox = {} (docker | podman | none)", config.sandbox.label()),
+            format!("sandbox_image = {}", config.sandbox_image),
             "Save and exit".to_string(),
             "Exit without saving".to_string(),
         ];
@@ -128,6 +135,22 @@ pub fn interactive() -> Result<()> {
                 config.skip_permissions = !config.skip_permissions;
             }
             7 => {
+                let kinds = ["docker", "podman", "none"];
+                let current = kinds.iter().position(|k| *k == config.sandbox.label()).unwrap_or(0);
+                let picked = Select::new()
+                    .with_prompt("sandbox")
+                    .items(&kinds)
+                    .default(current)
+                    .interact()?;
+                config.sandbox = SandboxKind::parse(kinds[picked]).unwrap_or(config.sandbox);
+            }
+            8 => {
+                config.sandbox_image = Input::new()
+                    .with_prompt("sandbox_image")
+                    .default(config.sandbox_image.clone())
+                    .interact_text()?;
+            }
+            9 => {
                 config.save_global()?;
                 println!("Saved.");
                 break;

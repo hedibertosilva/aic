@@ -95,6 +95,7 @@ pub fn run_review_loop(
                 prompt: review_prompt(&content),
                 json_schema: Some(REVIEW_JSON_SCHEMA.to_string()),
                 skip_permissions,
+                read_only: true,
                 cwd: Some(cwd.to_path_buf()),
                 ..Default::default()
             })

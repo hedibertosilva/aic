@@ -17,6 +17,37 @@ impl Default for Mode {
     }
 }
 
+/// Container runtime used to isolate agent invocations (see `sandbox.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxKind {
+    Docker,
+    Podman,
+    /// Run agents directly on the host, with no isolation.
+    None,
+}
+
+impl SandboxKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SandboxKind::Docker => "docker",
+            SandboxKind::Podman => "podman",
+            SandboxKind::None => "none",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "docker" => Some(SandboxKind::Docker),
+            "podman" => Some(SandboxKind::Podman),
+            "none" => Some(SandboxKind::None),
+            _ => None,
+        }
+    }
+}
+
+pub const DEFAULT_SANDBOX_IMAGE: &str = "aic-sandbox";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     pub binary: String,
@@ -50,6 +81,15 @@ pub struct Config {
     /// Patterns that re-include a path even if an exclusion above (built-in,
     /// config, `.gitignore`, `linguist-generated`) dropped it.
     pub git_diff_include_patterns: Vec<String>,
+    /// Container runtime every agent invocation runs in. `none` keeps the
+    /// pre-sandbox behavior of running agents directly on the host.
+    pub sandbox: SandboxKind,
+    /// Image the sandbox runs; `aic sandbox build` produces the default.
+    pub sandbox_image: String,
+    /// Extra `host:container[:ro]` binds (caches, toolchains).
+    pub sandbox_mounts: Vec<String>,
+    /// Names of host environment variables forwarded into the sandbox.
+    pub sandbox_env: Vec<String>,
     pub agents: HashMap<String, AgentConfig>,
 }
 
@@ -82,6 +122,10 @@ impl Default for Config {
             skip_permissions: false,
             git_diff_exclude_patterns: Vec::new(),
             git_diff_include_patterns: Vec::new(),
+            sandbox: SandboxKind::Docker,
+            sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
+            sandbox_mounts: Vec::new(),
+            sandbox_env: Vec::new(),
             agents,
         }
     }
@@ -100,6 +144,10 @@ pub struct ConfigOverrides {
     pub skip_permissions: Option<bool>,
     pub git_diff_exclude_patterns: Option<Vec<String>>,
     pub git_diff_include_patterns: Option<Vec<String>>,
+    pub sandbox: Option<SandboxKind>,
+    pub sandbox_image: Option<String>,
+    pub sandbox_mounts: Option<Vec<String>>,
+    pub sandbox_env: Option<Vec<String>>,
     pub agents: Option<HashMap<String, AgentConfig>>,
 }
 
@@ -131,6 +179,18 @@ impl Config {
         }
         if let Some(v) = overrides.git_diff_include_patterns {
             self.git_diff_include_patterns = v;
+        }
+        if let Some(v) = overrides.sandbox {
+            self.sandbox = v;
+        }
+        if let Some(v) = overrides.sandbox_image {
+            self.sandbox_image = v;
+        }
+        if let Some(v) = overrides.sandbox_mounts {
+            self.sandbox_mounts = v;
+        }
+        if let Some(v) = overrides.sandbox_env {
+            self.sandbox_env = v;
         }
         if let Some(agents) = overrides.agents {
             for (name, agent) in agents {
@@ -208,6 +268,29 @@ mod tests {
         assert_eq!(config.agent("gemini").unwrap().binary, "agy");
         assert_eq!(config.mode, Mode::Manual);
         assert_eq!(config.max_rounds, 3);
+    }
+
+    #[test]
+    fn sandbox_defaults_to_docker_and_parses_from_toml() {
+        let config = Config::default();
+        assert_eq!(config.sandbox, SandboxKind::Docker);
+        assert_eq!(config.sandbox_image, "aic-sandbox");
+        let parsed: Config = toml::from_str("sandbox = \"podman\"\nsandbox_env = [\"A\"]").unwrap();
+        assert_eq!(parsed.sandbox, SandboxKind::Podman);
+        assert_eq!(parsed.sandbox_env, vec!["A"]);
+        let none: Config = toml::from_str("sandbox = \"none\"").unwrap();
+        assert_eq!(none.sandbox, SandboxKind::None);
+    }
+
+    #[test]
+    fn repo_override_can_disable_sandbox() {
+        let mut config = Config::default();
+        config.apply_overrides(ConfigOverrides {
+            sandbox: Some(SandboxKind::None),
+            ..Default::default()
+        });
+        assert_eq!(config.sandbox, SandboxKind::None);
+        assert_eq!(config.sandbox_image, "aic-sandbox");
     }
 
     #[test]

@@ -33,6 +33,11 @@ pub enum Commands {
         /// them instead of erroring.
         slug: Option<String>,
     },
+    /// Manage the container sandbox agents run in.
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommands,
+    },
     /// View or edit aic's configuration (defaults for every other command).
     Config {
         #[command(subcommand)]
@@ -158,6 +163,21 @@ pub enum DevCommands {
 }
 
 #[derive(Subcommand)]
+pub enum SandboxCommands {
+    /// Build the sandbox image from the Dockerfile embedded in aic.
+    ///
+    /// Also the upgrade path: the image's agent versions win over the
+    /// host's inside the sandbox, so rebuild to pick up newer ones.
+    Build {
+        /// Image tag to build. Defaults to the configured `sandbox_image`.
+        tag: Option<String>,
+        /// Version of @anthropic-ai/claude-code to install in the image.
+        #[arg(long = "claude-version")]
+        claude_version: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ConfigCommands {
     /// Print the effective configuration (global + repo override).
     Show,
@@ -165,7 +185,8 @@ pub enum ConfigCommands {
     ///
     /// Keys: executor, reviewer, mode (manual|auto), max_rounds,
     /// permission_mode (acceptEdits|plan), default_base_branch,
-    /// skip_permissions (true|false).
+    /// skip_permissions (true|false), sandbox (docker|podman|none),
+    /// sandbox_image.
     Set {
         /// Config key to set (see above for the full list).
         key: String,

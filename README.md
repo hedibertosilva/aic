@@ -27,6 +27,10 @@ max_rounds = 3                   # cap for auto mode
 permission_mode = "acceptEdits"  # "acceptEdits" | "plan"
 default_base_branch = ""         # empty = auto-detect via origin/HEAD
 skip_permissions = false         # opt-in: auto-approve every tool in headless runs
+sandbox = "docker"               # "docker" | "podman" | "none" — run agents in a container
+sandbox_image = "aic-sandbox"    # image built by `aic sandbox build`
+sandbox_mounts = []              # extra "host:container[:ro]" binds (e.g. cargo registry)
+sandbox_env = []                 # host env var names to forward (e.g. "ANTHROPIC_API_KEY")
 
 [agents.claude]
 binary = "claude"
@@ -55,6 +59,24 @@ Every command below accepts flags (`--reviewer`, `--executor`, `--mode`, `--max-
 
 **`skip_permissions`**: off by default. Without it, if the reviewer or executor tries to use a tool (read a file, run a command) in headless mode, the call is denied and fails with a clear error instead of silently returning an empty response. Only enable it if you trust the configured agents to run unattended in that repository.
 
+## Sandbox
+
+By default every agent invocation (executor and reviewer, headless and interactive) runs in a Docker or Podman container, so an agent running unattended can only modify the mounted repo, not the rest of your `$HOME`. The runtime must be installed on the **host** where `aic` runs (not inside distrobox).
+
+One-time setup, then it is transparent:
+
+```
+aic sandbox build [tag] [--claude-version X.Y.Z]
+```
+
+Or set `sandbox = "none"` (globally or in `.aic/config.toml`) to keep running agents directly on the host. If the image is missing, `aic` fails before starting any agent and tells you to build it.
+
+- **Mounts:** the repo root at the same absolute path (read-write for the executor, read-only plus a tmpfs `/tmp` for the reviewer); the shared git dir when it lives outside the repo (worktrees); `~/.gitconfig` read-only. Nothing else from `$HOME` is visible. Add more with `sandbox_mounts`, and forward environment variables by name with `sandbox_env`.
+- **Credentials:** `claude` runs with a container-owned state dir (`~/.local/share/aic/sandbox/claude`, as `CLAUDE_CONFIG_DIR`) with only `~/.claude/.credentials.json` bound in from the host; `agy` gets your `~/.gemini` mounted read-write.
+- **Image upgrades:** the image's agent versions win over the host's inside the sandbox. `claude` is installed at a pinned version (`--claude-version` bumps it); `agy` is copied from the host `PATH` at build time. Re-run `aic sandbox build` to upgrade either.
+- **SELinux:** containers run with `--security-opt label=disable` instead of relabeling (`:z`/`:Z`) your repo and home files, which has lasting side effects. The tradeoff is that SELinux does not confine these containers.
+- **Threat model:** this limits the blast radius of *accidental* destructive commands on the filesystem. The network is open and agent credentials are mounted, so a malicious agent or prompt injection could still read and send them.
+
 ## Commands
 
 | Command | What it does |
@@ -65,6 +87,7 @@ Every command below accepts flags (`--reviewer`, `--executor`, `--mode`, `--max-
 | `aic dev execute <slug> [--mode interactive\|headless]` | Runs the executor against the approved plan. `interactive` (default) takes over the terminal (`exec`), like a normal session; `headless` runs via `-p` and logs to `.aic/dev/<slug>/EXECUTION-LOG.md`. |
 | `aic dev review [<slug>]` | Reviews a diff: staged, commits since `dev execute`, or against the base branch — chosen automatically, or via `--target`. With `<slug>`, saves to `.aic/dev/<slug>/reviews/CODE-RN.md`. Without `<slug>`, it's an ad-hoc review saved under `.aic/adhoc/reviews/`. |
 | `aic status [<slug>]` | Shows the state (plan/dev, rounds) of one feature or all of them. With no argument, tries to infer the feature from the current branch name. |
+| `aic sandbox build [tag]` | Builds the container image agents run in (see [Sandbox](#sandbox)). |
 | `aic config` / `config show` / `config set` | View/edit the defaults. |
 
 `.aic/` stays out of git (it's in `.gitignore`): plan, reports and logs live only on your machine — manually copy whatever is useful into the PR.

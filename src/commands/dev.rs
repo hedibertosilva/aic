@@ -12,6 +12,7 @@ use crate::cli::{ExecuteModeArg, TargetArg};
 use crate::config::{Config, Mode};
 use crate::diff_filter;
 use crate::git;
+use crate::sandbox::{Access, RunSpec, Sandbox};
 use crate::review::{run_review_loop, LoopOutcome, ReviewVerdict};
 use crate::state::{DevStatus, State};
 
@@ -75,10 +76,12 @@ explain why.",
 
     match mode {
         ExecuteModeArg::Interactive => {
-            exec_interactive(&executor_binary, &prompt, &permission_mode, repo_root)
+            let sandbox = Sandbox::from_config(&config)?;
+            exec_interactive(&executor_binary, &prompt, &permission_mode, repo_root, sandbox.as_ref())
         }
         ExecuteModeArg::Headless => {
-            let agent = CliAgent::with_defaults(executor_name, executor_binary, executor_model, executor_effort);
+            let agent = CliAgent::with_defaults(executor_name, executor_binary, executor_model, executor_effort)
+                .with_sandbox(Sandbox::from_config(&config)?);
             let result = agent.run(&RunOpts {
                 prompt,
                 permission: Some(permission_mode),
@@ -108,12 +111,15 @@ explain why.",
 }
 
 /// Replaces the current process with `binary` running an interactive session
-/// seeded with `prompt`. Only returns on failure.
+/// seeded with `prompt` — inside the container when `sandbox` is set (the
+/// runtime client is what gets exec'd, so TTY and signals pass through and
+/// `--rm` cleans up on exit). Only returns on failure.
 pub fn exec_interactive(
     binary: &str,
     prompt: &str,
     permission_mode: &str,
     cwd: &Path,
+    sandbox: Option<&Sandbox>,
 ) -> Result<()> {
     let mut cmd = Command::new(binary);
     // `claude` takes the initial prompt as a bare positional
@@ -126,6 +132,21 @@ pub fn exec_interactive(
         cmd.arg(prompt);
     }
     apply_permission_flag(&mut cmd, binary, permission_mode);
+    if let Some(sandbox) = sandbox {
+        sandbox.preflight()?;
+        let spec = RunSpec {
+            repo_root: cwd.to_path_buf(),
+            git_dir: git::git_common_dir(cwd).ok(),
+            workdir: cwd.to_path_buf(),
+            access: Access::ReadWrite,
+            interactive: true,
+            agent: binary_stem(binary).to_string(),
+            args: cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+        };
+        let mut sandboxed = sandbox.command(&spec)?;
+        let err = sandboxed.exec();
+        bail!("failed to exec '{}': {err}", sandbox.runtime_name());
+    }
     cmd.current_dir(cwd);
     let err = cmd.exec();
     bail!("failed to exec '{binary}': {err}");
@@ -202,14 +223,16 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
         reviewer_cfg.binary.clone(),
         reviewer_cfg.model.clone(),
         reviewer_cfg.effort.clone(),
-    );
+    )
+    .with_sandbox(Sandbox::from_config(&config)?);
     let executor_cfg = config.agent(&executor_name)?;
     let executor = CliAgent::with_defaults(
         executor_name.clone(),
         executor_cfg.binary.clone(),
         executor_cfg.model.clone(),
         executor_cfg.effort.clone(),
-    );
+    )
+    .with_sandbox(Sandbox::from_config(&config)?);
 
     let (reviews_dir, is_adhoc) = match slug {
         Some(slug) => (repo_root.join(".aic").join("dev").join(slug).join("reviews"), false),
