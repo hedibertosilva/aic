@@ -91,7 +91,7 @@ Or set `sandbox = "none"` (globally or in `.aic/config.toml`) to keep running ag
 ## Web chat
 
 ```
-aic server [--host 127.0.0.1] [--port 7878]
+aic chat [--host 127.0.0.1] [--port 7878]
 ```
 
 Serves a local chat page where one conversation can have several participants — each a named instance of any agent under `[agents]` (e.g. two `claude`s with different roles, plus `gemini`) — and every message goes to them in parallel, with replies side by side, one fixed column per participant. The **To:** pills under the message box show who receives it (all by default; typing `@name` at the start picks them too). When a round is done, **Ask them to comment on each other's replies** under the replies lets them answer what the others said since their last turn, for debate or cross-review (so does sending an empty message). Conversations live in the browser's `localStorage`; the server is stateless and continues each participant by passing the agent's own session id back (`claude --resume`, `agy --conversation`).

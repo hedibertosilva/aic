@@ -129,7 +129,7 @@ fn run() -> Result<()> {
             commands::status::run(&repo_root, slug)
         }
 
-        Commands::Server { host, port } => {
+        Commands::Chat { host, port } => {
             let repo_root = resolve_repo_root()?;
             commands::server::run(&repo_root, &host, port)
         }

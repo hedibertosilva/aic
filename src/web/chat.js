@@ -148,13 +148,14 @@ function writeBadge() {
 /* ---------- participants / conversations ---------- */
 const NAME_OK = /^[\w-]+$/;
 const cleanName = (s) => s.trim().replace(/\s+/g, "-").replace(/[^\w-]/g, "");
+const agentLabel = (a) => a.charAt(0).toUpperCase() + a.slice(1); // "claude" -> "Claude"
 function uniqueName(c, base) {
   let name = base, n = 2;
   while (c.participants.some((p) => p.name === name)) name = base + "-" + n++;
   return name;
 }
 function addParticipant(c, f) {
-  const p = { name: uniqueName(c, cleanName(f.name || f.agent) || "agent"), agent: f.agent, role: f.role || "", write: !!f.write,
+  const p = { name: uniqueName(c, cleanName(f.name || agentLabel(f.agent)) || "agent"), agent: f.agent, role: f.role || "", write: !!f.write,
     model: f.model || "", effort: f.effort || "", session: "", seen: 0 };
   p.hue = typeof f.hue === "number" ? f.hue : pickHue(c);
   c.participants.push(p);
@@ -164,7 +165,7 @@ const defaultAgent = () => (meta.agents.includes(meta.default) ? meta.default : 
 function newConv() {
   const c = { id: crypto.randomUUID(), title: "New conversation", participants: [], log: [], round: 0, updated: Date.now(), sendTo: null };
   const agent = defaultAgent();
-  if (agent) addParticipant(c, { name: agent, agent });
+  if (agent) addParticipant(c, { agent });
   state.convs.unshift(c);
   $("search").value = "";
   switchTo(c.id);
@@ -419,7 +420,7 @@ function exportConv(c, kind) {
   let text, type;
   if (kind === "json") { text = JSON.stringify(c, null, 2); type = "application/json"; }
   else {
-    const who = (name) => { const p = c.participants.find((x) => x.name === name); return p ? `${name} (${p.agent}${p.model ? ", " + p.model : ""})` : name; };
+    const who = (name) => { const p = c.participants.find((x) => x.name === name); return p ? `${name} (${agentLabel(p.agent)}${p.model ? ", " + p.model : ""})` : name; };
     const out = [`# ${c.title}`, "", "Participants: " + c.participants.map((p) => who(p.name)).join(", "), ""];
     c.log.forEach((e) => {
       const head = e.from === "you" ? "you" + (e.to ? " → " + e.to.join(", ") : "") : who(e.from);
@@ -442,7 +443,7 @@ function renderBar() {
     chip.title = (p.role ? p.role + "\n\n" : "") + "Edit " + p.name;
     chip.appendChild(avatar(c, p.name));
     chip.appendChild(el("span", "", p.name));
-    chip.appendChild(el("small", "", p.agent + (p.model ? " · " + p.model : "")));
+    chip.appendChild(el("small", "", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
     if (p.write) chip.appendChild(writeBadge());
     chip.onclick = () => openDialog(p);
     chips.appendChild(chip);
@@ -510,7 +511,7 @@ function paintCard(c, e) {
     k.card.style.setProperty("--h", hueFor(c, e.from));
     k.head.textContent = "";
     k.head.append(avatar(c, e.from), el("span", "name", e.from));
-    if (p) k.head.appendChild(el("span", "badge", p.agent + (p.model ? " · " + p.model : "")));
+    if (p) k.head.appendChild(el("span", "badge", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
     if (p?.write) k.head.appendChild(writeBadge());
     if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
     k.head.appendChild(el("span", "grow"));
@@ -582,7 +583,7 @@ setInterval(() => {
 }, 1000);
 
 function userBubble(c, e) {
-  const u = el("div", "user" + (c.participants.length > 1 ? " center" : ""));
+  const u = el("div", "user");
   const fill = () => {
     u.textContent = "";
     if (e.to) u.appendChild(el("span", "to", "→ " + e.to.join(", ")));
@@ -685,6 +686,8 @@ function appendEntry(c, e) {
   if (r.group) node.style.gridColumn = cell.col;
   if (cell.node) cell.node.replaceWith(node); else r.el.appendChild(node);
   cell.node = node; cell.taken = true;
+  // Columns only pay off once two replies sit side by side; a lone reply gets the full reading width.
+  r.el.classList.toggle("solo", [...r.cells.values()].filter((x) => x.taken).length < 2);
 }
 // One column per participant, in participant order, so replies line up
 // round after round; someone not addressed gets a quiet placeholder.
@@ -732,13 +735,13 @@ function emptyState(c) {
   d.appendChild(el("h1", "", group ? "Talk to several agents at once" : "Start a conversation"));
   d.appendChild(el("p", "", group
     ? "Your message goes to everyone in “To:”. Once they've answered, you can ask them to comment on each other's replies."
-    : "Ask anything about this repository. Add a participant (even a second claude) to compare answers side by side."));
+    : "Ask anything about this repository. Add a participant (even a second Claude) to compare answers side by side."));
   const people = el("div", "people");
   c.participants.forEach((p) => {
     const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
     b.style.setProperty("--h", hueOf(p));
     b.append(avatar(c, p.name, true), el("span", "name", p.name));
-    const tags = el("span"); tags.appendChild(el("span", "badge", p.agent + (p.model ? " · " + p.model : "")));
+    const tags = el("span"); tags.appendChild(el("span", "badge", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
     if (p.write) { tags.append(" "); tags.appendChild(writeBadge()); }
     b.appendChild(tags);
     if (p.role) b.appendChild(el("span", "role", p.role));
@@ -950,7 +953,7 @@ async function turn(c, { p, text: prompt, entry }) {
     if (!res.ok) throw new Error(await res.text());
     const reader = res.body.getReader();
     const dec = new TextDecoder();
-    let buf = "";
+    let buf = "", gap = false;
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -963,10 +966,14 @@ async function turn(c, { p, text: prompt, entry }) {
         if (ev.type === "session") p.session = ev.id;
         else if (ev.type === "activity") {
           entry.activity = ev.text.split(meta.repo + "/").join("");
+          gap = true;
           if (entry.actions.length < 500) entry.actions.push(entry.activity);
           paint();
-        } else if (ev.type === "delta") { entry.text += ev.text; paint(); }
-        else if (ev.type === "done") {
+        } else if (ev.type === "delta") {
+          // text said before and after a tool call arrives as separate blocks; keep them apart
+          if (gap && entry.text && !/\s$/.test(entry.text)) entry.text += "\n\n";
+          gap = false; entry.text += ev.text; paint();
+        } else if (ev.type === "done") {
           if (ev.usage) entry.usage = ev.usage;
           if (!ev.ok) fail(ev.error || "agent failed");
           else if (!entry.text) entry.text = ev.text;
@@ -1036,7 +1043,7 @@ function acUpdate() {
     const used = m[1].trim().split(/\s+/).filter(Boolean).map((n) => n.slice(1));
     const q = m[2].toLowerCase();
     acItems = c.participants.filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
-      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: p.agent + (p.role ? " · " + p.role : "") }));
+      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: agentLabel(p.agent) + (p.role ? " · " + p.role : "") }));
   } else if (c && skills.length && (m = before.match(SKILL_Q))) {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
@@ -1177,7 +1184,7 @@ $("pform").onsubmit = (e) => {
   e.preventDefault();
   const c = cur(); if (!c) return;
   const agent = $("pagent").value;
-  const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(agent) || "agent"));
+  const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(agentLabel(agent)) || "agent"));
   if (!NAME_OK.test(name)) return dialogError("Use letters, digits, - and _ in the name.");
   if (c.participants.some((q) => q !== editing && q.name === name)) return dialogError(`There's already a participant called ${name}.`);
   const fields = { agent, role: $("prole").value.trim(), write: access() === "write", model: $("pmodel").value.trim(), effort: $("peffort").value.trim(), hue: dlgHue };
@@ -1231,10 +1238,10 @@ document.addEventListener("keydown", (e) => {
   try {
     meta = Object.assign(meta, await (await fetch("/api/agents")).json());
   } catch (err) {
-    $("msgs").textContent = "Couldn't reach the aic server: " + err.message; return;
+    $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
   }
   try { skills = await (await fetch("/api/skills")).json(); } catch { skills = []; }
-  meta.agents.forEach((a) => { const o = el("option", "", a); o.value = a; $("pagent").appendChild(o); });
+  meta.agents.forEach((a) => { const o = el("option", "", agentLabel(a)); o.value = a; $("pagent").appendChild(o); });
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
 })();

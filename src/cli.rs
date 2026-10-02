@@ -33,8 +33,8 @@ pub enum Commands {
         /// them instead of erroring.
         slug: Option<String>,
     },
-    /// Run a local web chat server that talks to the configured agents.
-    Server {
+    /// Run a local web chat that talks to the configured agents.
+    Chat {
         /// Address to listen on. Anything but loopback exposes your agents
         /// to the network.
         #[arg(long, default_value = "127.0.0.1")]
