@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
-use dialoguer::{Input, Select};
+use console::{Key, Term};
+use dialoguer::Select;
 
 use crate::config::{Config, Mode, SandboxKind};
 
@@ -90,46 +91,41 @@ pub fn interactive() -> Result<()> {
 
         match selection {
             0 => {
-                config.executor = Input::new()
-                    .with_prompt("executor")
-                    .default(config.executor.clone())
-                    .interact_text()?;
+                if let Some(v) = prompt_text("executor", &config.executor, false)? {
+                    config.executor = v;
+                }
             }
             1 => {
-                config.reviewer = Input::new()
-                    .with_prompt("reviewer")
-                    .default(config.reviewer.clone())
-                    .interact_text()?;
+                if let Some(v) = prompt_text("reviewer", &config.reviewer, false)? {
+                    config.reviewer = v;
+                }
             }
             2 => {
                 let mode_items = ["manual", "auto"];
                 let current = if config.mode == Mode::Manual { 0 } else { 1 };
                 let picked = Select::new()
-                    .with_prompt("mode")
+                    .with_prompt("mode (Esc to go back)")
                     .items(&mode_items)
                     .default(current)
-                    .interact()?;
-                config.mode = if picked == 0 { Mode::Manual } else { Mode::Auto };
+                    .interact_opt()?;
+                if let Some(picked) = picked {
+                    config.mode = if picked == 0 { Mode::Manual } else { Mode::Auto };
+                }
             }
             3 => {
-                let value: String = Input::new()
-                    .with_prompt("max_rounds")
-                    .default(config.max_rounds.to_string())
-                    .interact_text()?;
-                config.max_rounds = value.parse().unwrap_or(config.max_rounds);
+                if let Some(value) = prompt_text("max_rounds", &config.max_rounds.to_string(), false)? {
+                    config.max_rounds = value.parse().unwrap_or(config.max_rounds);
+                }
             }
             4 => {
-                config.permission_mode = Input::new()
-                    .with_prompt("permission_mode (acceptEdits|plan)")
-                    .default(config.permission_mode.clone())
-                    .interact_text()?;
+                if let Some(v) = prompt_text("permission_mode (acceptEdits|plan)", &config.permission_mode, false)? {
+                    config.permission_mode = v;
+                }
             }
             5 => {
-                config.default_base_branch = Input::new()
-                    .with_prompt("default_base_branch (empty = auto-detect)")
-                    .default(config.default_base_branch.clone())
-                    .allow_empty(true)
-                    .interact_text()?;
+                if let Some(v) = prompt_text("default_base_branch (empty = auto-detect)", &config.default_base_branch, true)? {
+                    config.default_base_branch = v;
+                }
             }
             6 => {
                 config.skip_permissions = !config.skip_permissions;
@@ -138,17 +134,18 @@ pub fn interactive() -> Result<()> {
                 let kinds = ["docker", "podman", "none"];
                 let current = kinds.iter().position(|k| *k == config.sandbox.label()).unwrap_or(0);
                 let picked = Select::new()
-                    .with_prompt("sandbox")
+                    .with_prompt("sandbox (Esc to go back)")
                     .items(&kinds)
                     .default(current)
-                    .interact()?;
-                config.sandbox = SandboxKind::parse(kinds[picked]).unwrap_or(config.sandbox);
+                    .interact_opt()?;
+                if let Some(picked) = picked {
+                    config.sandbox = SandboxKind::parse(kinds[picked]).unwrap_or(config.sandbox);
+                }
             }
             8 => {
-                config.sandbox_image = Input::new()
-                    .with_prompt("sandbox_image")
-                    .default(config.sandbox_image.clone())
-                    .interact_text()?;
+                if let Some(v) = prompt_text("sandbox_image", &config.sandbox_image, false)? {
+                    config.sandbox_image = v;
+                }
             }
             9 => {
                 config.save_global()?;
@@ -169,5 +166,42 @@ fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Manual => "manual",
         Mode::Auto => "auto",
+    }
+}
+
+/// Single-line text prompt that returns `None` on Esc (dialoguer's `Input`
+/// can't be cancelled). Enter on an empty line keeps `current` unless
+/// `allow_empty`, in which case it clears the value.
+fn prompt_text(prompt: &str, current: &str, allow_empty: bool) -> Result<Option<String>> {
+    let term = Term::stderr();
+    let mut buf = String::new();
+    let mut touched = false;
+    loop {
+        let shown = if touched { buf.as_str() } else { current };
+        term.write_str(&format!("{prompt} [Esc to go back]: {shown}"))?;
+        let key = term.read_key()?;
+        term.clear_line()?;
+        match key {
+            Key::Escape => return Ok(None),
+            Key::Enter => {
+                let keep = !touched || (buf.is_empty() && !allow_empty);
+                return Ok(Some(if keep { current.to_string() } else { buf }));
+            }
+            Key::Backspace => {
+                if !touched {
+                    touched = true;
+                    buf = current.to_string();
+                }
+                buf.pop();
+            }
+            Key::Char(c) if !c.is_control() => {
+                if !touched {
+                    touched = true;
+                    buf.clear();
+                }
+                buf.push(c);
+            }
+            _ => {}
+        }
     }
 }
