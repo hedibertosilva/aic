@@ -1,4 +1,5 @@
 mod agent;
+mod chat;
 mod cli;
 mod commands;
 mod config;
@@ -126,6 +127,11 @@ fn run() -> Result<()> {
         Commands::Status { slug } => {
             let repo_root = resolve_repo_root()?;
             commands::status::run(&repo_root, slug)
+        }
+
+        Commands::Server { host, port } => {
+            let repo_root = resolve_repo_root()?;
+            commands::server::run(&repo_root, &host, port)
         }
 
         Commands::Sandbox { command } => match command {

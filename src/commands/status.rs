@@ -6,6 +6,9 @@ use crate::git;
 use crate::state::{Feature, State};
 
 pub fn run(repo_root: &Path, slug_arg: Option<String>) -> Result<()> {
+    if crate::config::in_sandbox() {
+        println!("(running inside the aic sandbox)");
+    }
     let mut state = State::load(repo_root)?;
     // state.json can drift from .aic/ (files edited or removed by hand,
     // runs that died before saving), so re-read the disk on every status.

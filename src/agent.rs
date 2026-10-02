@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -34,6 +36,81 @@ pub struct RunOpts {
     /// Mount the repo read-only in the sandbox (reviewer calls). Ignored
     /// when no sandbox is configured.
     pub read_only: bool,
+    /// Continue an earlier conversation by the id the agent reported
+    /// (`session_id` for claude, `conversation_id` for agy).
+    pub resume: Option<String>,
+    /// Extra system prompt (claude's `--append-system-prompt`). `agy` has no
+    /// equivalent, so callers fold it into the prompt themselves.
+    pub system_prompt: Option<String>,
+    /// Emit `stream-json` events instead of one JSON envelope. Only
+    /// meaningful with `CliAgent::spawn_stream`.
+    pub stream: bool,
+}
+
+/// A streaming run from `CliAgent::spawn_stream`.
+pub struct AgentProcess {
+    pub child: Child,
+    pub killer: Killer,
+}
+
+/// Stops a streaming run and everything it started (nested `aic` runs and
+/// their agents included). Cheap to clone, so a watcher thread can hold one.
+#[derive(Clone)]
+pub struct Killer {
+    pgid: u32,
+    /// Sandbox and container name: killing the `run` client alone would
+    /// leave the container running.
+    container: Option<(Sandbox, String)>,
+}
+
+impl Killer {
+    pub fn kill(&self) {
+        if let Some((sandbox, name)) = &self.container {
+            let _ = sandbox.kill_command(name).status();
+        }
+        // The process group, plus every descendant found before killing
+        // anything (tools may start commands in groups of their own, and
+        // killed parents get their children reparented).
+        let mut targets = vec![format!("-{}", self.pgid)];
+        targets.extend(descendants(self.pgid).iter().map(u32::to_string));
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg("--")
+            .args(&targets)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Pids of every process below `root`, from `/proc`.
+fn descendants(root: u32) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let links: Vec<(u32, u32)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(entry.path().join("stat")).ok()?;
+            Some((pid, parent_pid(&stat)?))
+        })
+        .collect();
+    let mut found = Vec::new();
+    let mut queue = vec![root];
+    while let Some(parent) = queue.pop() {
+        for &(pid, ppid) in &links {
+            if ppid == parent && !found.contains(&pid) {
+                found.push(pid);
+                queue.push(pid);
+            }
+        }
+    }
+    found
+}
+
+/// The ppid field of a `/proc/<pid>/stat` line: `pid (comm) state ppid …`.
+/// `comm` may hold spaces and parens, so split after the last `)`.
+fn parent_pid(stat: &str) -> Option<u32> {
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// Normalized result of a headless agent run, regardless of which CLI
@@ -104,10 +181,22 @@ impl CliAgent {
             .unwrap_or(&self.binary)
     }
 
-    pub fn run(&self, opts: &RunOpts) -> Result<AgentRunResult> {
-        let mut cmd = match &self.sandbox {
-            Some(sandbox) => self.sandboxed_command(sandbox, opts)?,
+    /// Builds the (possibly sandboxed) command for one invocation.
+    /// `container` names the sandbox container, when there is one.
+    fn build_command(&self, opts: &RunOpts, container: Option<String>) -> Result<Command> {
+        Ok(match &self.sandbox {
+            Some(sandbox) => self.sandboxed_command(sandbox, opts, container)?,
             None => {
+                // Inside an aic sandbox there's no nested container to mount
+                // the repo read-only, so a read-only run falls back to plan
+                // mode.
+                let plan;
+                let opts = if opts.read_only && opts.permission.is_none() && crate::config::in_sandbox() {
+                    plan = RunOpts { permission: Some("plan".to_string()), ..opts.clone() };
+                    &plan
+                } else {
+                    opts
+                };
                 let mut cmd = Command::new(&self.binary);
                 self.push_args(&mut cmd, opts);
                 if let Some(cwd) = &opts.cwd {
@@ -115,14 +204,53 @@ impl CliAgent {
                 }
                 cmd
             }
-        };
+        })
+    }
 
-        let output = cmd.output().with_context(|| {
+    /// Starts the agent with piped stdout/stderr and returns immediately, so
+    /// the caller can read `stream-json` events as they arrive. Set
+    /// `opts.stream`. The agent gets its own process group, so the returned
+    /// `Killer` stops it together with everything it started.
+    pub fn spawn_stream(&self, opts: &RunOpts) -> Result<AgentProcess> {
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        let container = self.sandbox.as_ref().map(|_| {
+            format!("aic-{}-{}", std::process::id(), RUNS.fetch_add(1, Ordering::Relaxed))
+        });
+        let mut cmd = self.build_command(opts, container.clone())?;
+        cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.process_group(0);
+        let child = cmd.spawn().with_context(|| self.spawn_error())?;
+        let killer = Killer {
+            pgid: child.id(),
+            container: self.sandbox.clone().zip(container),
+        };
+        Ok(AgentProcess { child, killer })
+    }
+
+    fn spawn_error(&self) -> String {
+        if crate::config::in_sandbox() {
+            format!(
+                "'{}' (configured as agent '{}') isn't available inside the sandbox; \
+rebuild the image with it on the host PATH (`aic sandbox build`) or configure a different agent",
+                self.binary, self.name
+            )
+        } else {
             format!(
                 "running '{}' (configured as agent '{}'); is it installed and on PATH?",
                 self.binary, self.name
             )
-        })?;
+        }
+    }
+
+    /// Whether this agent speaks `agy`'s envelope rather than `claude`'s.
+    pub fn is_agy(&self) -> bool {
+        self.binary_stem() == "agy"
+    }
+
+    pub fn run(&self, opts: &RunOpts) -> Result<AgentRunResult> {
+        let mut cmd = self.build_command(opts, None)?;
+
+        let output = cmd.output().with_context(|| self.spawn_error())?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
@@ -146,7 +274,7 @@ impl CliAgent {
     /// Wraps this agent's invocation as `<runtime> run … <image> <binary>
     /// <args>`. Fails before starting anything if the runtime or image is
     /// missing.
-    fn sandboxed_command(&self, sandbox: &Sandbox, opts: &RunOpts) -> Result<Command> {
+    fn sandboxed_command(&self, sandbox: &Sandbox, opts: &RunOpts, name: Option<String>) -> Result<Command> {
         sandbox.preflight()?;
         let repo_root = opts
             .cwd
@@ -162,6 +290,7 @@ impl CliAgent {
             interactive: false,
             agent: self.binary_stem().to_string(),
             args: argv.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+            name,
         };
         sandbox.command(&spec)
     }
@@ -172,7 +301,21 @@ impl CliAgent {
     /// `--mode accept-edits`.
     fn push_args(&self, cmd: &mut Command, opts: &RunOpts) {
         cmd.arg("-p").arg(&opts.prompt);
-        cmd.arg("--output-format").arg("json");
+        cmd.arg("--output-format")
+            .arg(if opts.stream { "stream-json" } else { "json" });
+        if opts.stream && self.binary_stem() != "agy" {
+            // claude refuses stream-json under -p without --verbose.
+            cmd.arg("--verbose").arg("--include-partial-messages");
+        }
+        if let Some(system) = &opts.system_prompt {
+            if self.binary_stem() != "agy" {
+                cmd.arg("--append-system-prompt").arg(system);
+            }
+        }
+        if let Some(id) = &opts.resume {
+            cmd.arg(if self.binary_stem() == "agy" { "--conversation" } else { "--resume" })
+                .arg(id);
+        }
 
         if let Some(schema) = &opts.json_schema {
             cmd.arg("--json-schema").arg(schema);
@@ -307,6 +450,22 @@ mod tests {
     }
 
     #[test]
+    fn parent_pid_survives_odd_process_names() {
+        assert_eq!(parent_pid("42 (claude) S 7 42 42 0"), Some(7));
+        assert_eq!(parent_pid("42 (a (b) c) R 9 1"), Some(9));
+        assert_eq!(parent_pid("garbage"), None);
+    }
+
+    #[test]
+    fn descendants_finds_children_of_this_process() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let found = descendants(std::process::id());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found.contains(&child.id()));
+    }
+
+    #[test]
     fn accept_edits_uses_different_flag_per_agent() {
         let opts = RunOpts {
             prompt: "do something".to_string(),
@@ -342,6 +501,47 @@ mod tests {
         assert!(args_of(&claude_cmd)
             .windows(2)
             .any(|w| w == ["--permission-mode", "plan"]));
+    }
+
+    #[test]
+    fn resume_and_stream_flags_differ_per_agent() {
+        let opts = RunOpts {
+            prompt: "hi".to_string(),
+            resume: Some("abc".to_string()),
+            stream: true,
+            ..Default::default()
+        };
+
+        let mut claude_cmd = Command::new("claude");
+        CliAgent::new("claude", "claude").push_args(&mut claude_cmd, &opts);
+        let args = args_of(&claude_cmd);
+        assert!(args.windows(2).any(|w| w == ["--resume", "abc"]));
+        assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
+        assert!(args.iter().any(|a| a == "--verbose"));
+        assert!(args.iter().any(|a| a == "--include-partial-messages"));
+
+        let mut gemini_cmd = Command::new("agy");
+        CliAgent::new("gemini", "agy").push_args(&mut gemini_cmd, &opts);
+        let args = args_of(&gemini_cmd);
+        assert!(args.windows(2).any(|w| w == ["--conversation", "abc"]));
+        assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
+        assert!(!args.iter().any(|a| a == "--verbose"));
+    }
+
+    #[test]
+    fn system_prompt_is_claude_only() {
+        let opts = RunOpts {
+            prompt: "hi".to_string(),
+            system_prompt: Some("be brief".to_string()),
+            ..Default::default()
+        };
+        let mut claude_cmd = Command::new("claude");
+        CliAgent::new("claude", "claude").push_args(&mut claude_cmd, &opts);
+        assert!(args_of(&claude_cmd).windows(2).any(|w| w == ["--append-system-prompt", "be brief"]));
+
+        let mut gemini_cmd = Command::new("agy");
+        CliAgent::new("gemini", "agy").push_args(&mut gemini_cmd, &opts);
+        assert!(!args_of(&gemini_cmd).iter().any(|a| a == "--append-system-prompt"));
     }
 
     #[test]

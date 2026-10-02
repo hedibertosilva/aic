@@ -11,6 +11,9 @@ use crate::config::{Config, Mode, SandboxKind};
 /// every other command actually resolves and uses.
 pub fn show(repo_root: &Path) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
+    if crate::config::in_sandbox() {
+        println!("# running inside the aic sandbox: agents run directly (sandbox = \"none\")\n");
+    }
     println!("{}", toml::to_string_pretty(&config)?);
     Ok(())
 }

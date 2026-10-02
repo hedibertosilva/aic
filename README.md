@@ -15,6 +15,16 @@ cp target/release/aic ~/.local/bin/aic   # or another directory on your PATH
 
 > If you build inside a distrobox/container, copy the binary straight to the host instead of using `distrobox-export --bin` — the generated wrapper runs `aic` *inside* the container on every call, which can make its own tools (`git`, etc.) resolve inside the container too.
 
+The [sandbox](#sandbox) mounts this same binary into its containers, so it has to run there too. A static build runs on any image:
+
+```
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/aic ~/.local/bin/aic
+```
+
+A regular (glibc) build also works as long as your build host's glibc isn't newer than the image's (Debian trixie, glibc 2.41).
+
 ## Configuration
 
 `aic config` opens an interactive menu (like Claude Code's `/config`) to adjust the defaults, stored in `~/.config/aic/config.toml`:
@@ -73,9 +83,29 @@ Or set `sandbox = "none"` (globally or in `.aic/config.toml`) to keep running ag
 
 - **Mounts:** the repo root at the same absolute path (read-write for the executor, read-only plus a tmpfs `/tmp` for the reviewer); the shared git dir when it lives outside the repo (worktrees); `~/.gitconfig` read-only. Nothing else from `$HOME` is visible. Add more with `sandbox_mounts`, and forward environment variables by name with `sandbox_env`.
 - **Credentials:** `claude` runs with a container-owned state dir (`~/.local/share/aic/sandbox/claude`, as `CLAUDE_CONFIG_DIR`) with only `~/.claude/.credentials.json` bound in from the host; `agy` gets your `~/.gemini` mounted read-write.
+- **`aic` inside:** the running `aic` binary is mounted read-only at `/usr/local/bin/aic` and your global config dir at `/etc/aic` (as `AIC_CONFIG_DIR`), so agents — and the `aic-*` skills — can call `aic` with the same agents, models and permission mode as on the host, with no image rebuild after upgrading `aic`. Containers get `AIC_IN_SANDBOX=1`, which makes that `aic` run agents directly instead of nesting another sandbox (`aic status` and `aic config show` say so); its reviewer then falls back to `plan` mode instead of a read-only mount. Agents it starts must exist in the image: `claude` always does, `agy` only if it was on your `PATH` at `aic sandbox build`, otherwise `aic` says so. Images built before this change need a rebuild (the base moved to Debian trixie).
 - **Image upgrades:** the image's agent versions win over the host's inside the sandbox. `claude` is installed at a pinned version (`--claude-version` bumps it); `agy` is copied from the host `PATH` at build time. Re-run `aic sandbox build` to upgrade either.
 - **SELinux:** containers run with `--security-opt label=disable` instead of relabeling (`:z`/`:Z`) your repo and home files, which has lasting side effects. The tradeoff is that SELinux does not confine these containers.
 - **Threat model:** this limits the blast radius of *accidental* destructive commands on the filesystem. The network is open and agent credentials are mounted, so a malicious agent or prompt injection could still read and send them.
+
+## Web chat
+
+```
+aic server [--host 127.0.0.1] [--port 7878]
+```
+
+Serves a local chat page where one conversation can have several participants — each a named instance of any agent under `[agents]` (e.g. two `claude`s with different roles, plus `gemini`) — and every message goes to them in parallel, with replies side by side, one fixed column per participant. The **To:** pills under the message box show who receives it (all by default; typing `@name` at the start picks them too). When a round is done, **Ask them to comment on each other's replies** under the replies lets them answer what the others said since their last turn, for debate or cross-review (so does sending an empty message). Conversations live in the browser's `localStorage`; the server is stateless and continues each participant by passing the agent's own session id back (`claude --resume`, `agy --conversation`).
+
+- Runs in the repo you start it from, through the same sandbox and `skip_permissions` settings as the other commands.
+- **Participants** are added and edited in a dialog (click a participant's name): name, agent, model and effort (default: the agent's config), colour, role, and file access. Renaming rewrites the conversation's log; changing the agent starts it without this conversation's history.
+- **Roles** are sent as an appended system prompt on every turn for `claude`; `agy` has no such flag, so its role goes in the first message only.
+- **Read-only by default:** participants can read the repo but not change it (read-only mount in the sandbox, plan mode without one) and are told so, instead of hunting for workarounds. Set *Can edit* on a participant to let it write, with your `permission_mode`; it then shows a pencil badge.
+- While an agent works, the card shows what it is doing (`Read: src/agent.rs`, `Bash: Run tests`) and the elapsed time; afterwards a collapsible list keeps every action. The card footer shows time, duration, tokens and cost when the agent reports them, plus copy, regenerate and delete. Your last message can be edited and resent.
+- **Stop** (the ■ button, or Esc) ends the replies and kills the agents, including anything they started. Enter never stops anything. You can switch conversations while replies come in.
+- **Skills:** typing `/` lists the skills in the repo's `.claude/skills/` (plus `~/.claude/skills/` without a sandbox). A skill message must go to exactly one participant, which needs edit access if the skill writes files (`allowed-tools` with `Edit`/`Write`, or `aic-requires-write: true` in its frontmatter); `agy` participants can't run skills.
+- The sidebar groups conversations by date and searches titles and contents; the ⋯ menu renames, exports (Markdown or JSON) and deletes. Ctrl+Shift+O starts a new conversation.
+- Binds to loopback by default and rejects requests with a foreign `Host` or `Origin`. `--host 0.0.0.0` exposes your agents to anyone who can reach the port.
+- `agy` currently reports its reply only at the end of a turn, so Gemini answers appear in one piece rather than token by token.
 
 ## Commands
 

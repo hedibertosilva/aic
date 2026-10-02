@@ -13,10 +13,16 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
-use crate::config::{Config, SandboxKind};
+use crate::config::{Config, SandboxKind, CONFIG_DIR_ENV, IN_SANDBOX_ENV};
 
 /// `$HOME` inside the container. The image provides it writable by any uid.
 const CONTAINER_HOME: &str = "/home/aic";
+
+/// Where the host's `aic` binary shows up inside the container.
+const CONTAINER_AIC: &str = "/usr/local/bin/aic";
+
+/// Where the host's global aic config dir shows up inside the container.
+const CONTAINER_CONFIG: &str = "/etc/aic";
 
 /// Whether the repo is mounted writable (executor) or read-only (reviewer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +47,9 @@ pub struct RunSpec {
     pub agent: String,
     /// Agent argv, after the binary name.
     pub args: Vec<String>,
+    /// Container name, so the caller can `<runtime> kill` it: killing the
+    /// `run` client alone leaves the container running.
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +62,12 @@ pub struct Sandbox {
     data_dir: PathBuf,
     uid: u32,
     gid: u32,
+    /// The running `aic`, bind-mounted so agents (and the aic skills) can
+    /// call it inside. Always the host's version, no image rebuild needed.
+    aic_binary: Option<PathBuf>,
+    /// Host global config dir, mounted read-only so `aic` inside sees the
+    /// same agents, models and permission mode.
+    config_dir: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -79,7 +94,16 @@ impl Sandbox {
             data_dir,
             uid: meta.uid(),
             gid: meta.gid(),
+            aic_binary: std::env::current_exe().ok().filter(|p| p.is_file()),
+            config_dir: Config::global_dir().ok().filter(|p| p.is_dir()),
         }))
+    }
+
+    /// `<runtime> kill <name>` for a container started with `RunSpec::name`.
+    pub fn kill_command(&self, name: &str) -> Command {
+        let mut cmd = Command::new(self.runtime());
+        cmd.args(["kill", name]).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd
     }
 
     fn runtime(&self) -> &'static str {
@@ -138,6 +162,10 @@ impl Sandbox {
         if spec.interactive {
             args.push("-it".into());
         }
+        if let Some(name) = &spec.name {
+            args.push("--name".into());
+            args.push(name.clone());
+        }
         // SELinux: disable labeling for this container rather than
         // relabeling the user's repo and $HOME files with :z/:Z.
         args.push("--security-opt".into());
@@ -152,6 +180,9 @@ impl Sandbox {
         }
         args.push("-e".into());
         args.push(format!("HOME={CONTAINER_HOME}"));
+        // `aic` inside runs agents directly instead of nesting a sandbox.
+        args.push("-e".into());
+        args.push(format!("{IN_SANDBOX_ENV}=1"));
 
         let root = path_str(&spec.repo_root);
         let suffix = if spec.access == Access::ReadOnly { ":ro" } else { "" };
@@ -173,6 +204,18 @@ impl Sandbox {
         if gitconfig.exists() {
             args.push("-v".into());
             args.push(format!("{}:{CONTAINER_HOME}/.gitconfig:ro", path_str(&gitconfig)));
+        }
+        if let Some(aic) = &self.aic_binary {
+            args.push("-v".into());
+            args.push(format!("{}:{CONTAINER_AIC}:ro", path_str(aic)));
+        }
+        if let Some(dir) = &self.config_dir {
+            // Not under $HOME/.config: the runtime would create that parent
+            // root-owned, breaking other tools that write there.
+            args.push("-v".into());
+            args.push(format!("{}:{CONTAINER_CONFIG}:ro", path_str(dir)));
+            args.push("-e".into());
+            args.push(format!("{CONFIG_DIR_ENV}={CONTAINER_CONFIG}"));
         }
         self.push_credential_mounts(&mut args, &spec.agent);
 
@@ -260,6 +303,8 @@ mod tests {
             data_dir: PathBuf::from("/nonexistent-home/.local/share/aic/sandbox"),
             uid: 1000,
             gid: 1001,
+            aic_binary: Some(PathBuf::from("/host/bin/aic")),
+            config_dir: Some(PathBuf::from("/nonexistent-home/.config/aic")),
         }
     }
 
@@ -272,6 +317,7 @@ mod tests {
             interactive,
             agent: "claude".into(),
             args: vec!["-p".into(), "hi".into()],
+            name: None,
         }
     }
 
@@ -327,6 +373,33 @@ mod tests {
     fn git_dir_inside_repo_is_not_mounted_twice() {
         let args = sandbox(SandboxKind::Docker).run_args(&spec(Access::ReadWrite, false));
         assert!(!args.iter().any(|a| a.starts_with("/work/repo/.git")));
+    }
+
+    #[test]
+    fn aic_inside_gets_the_host_binary_config_and_no_nested_sandbox() {
+        let args = sandbox(SandboxKind::Podman).run_args(&spec(Access::ReadOnly, false));
+        assert!(has_pair(&args, "-e", "AIC_IN_SANDBOX=1"));
+        assert!(has_pair(&args, "-v", "/host/bin/aic:/usr/local/bin/aic:ro"));
+        assert!(has_pair(&args, "-v", "/nonexistent-home/.config/aic:/etc/aic:ro"));
+        assert!(has_pair(&args, "-e", "AIC_CONFIG_DIR=/etc/aic"));
+
+        let mut bare = sandbox(SandboxKind::Docker);
+        bare.aic_binary = None;
+        bare.config_dir = None;
+        let args = bare.run_args(&spec(Access::ReadWrite, false));
+        assert!(!args.iter().any(|a| a.contains("/usr/local/bin/aic") || a.contains("/etc/aic")));
+        assert!(has_pair(&args, "-e", "AIC_IN_SANDBOX=1"));
+    }
+
+    #[test]
+    fn named_runs_can_be_killed_by_name() {
+        let mut s = spec(Access::ReadWrite, false);
+        assert!(!sandbox(SandboxKind::Docker).run_args(&s).contains(&"--name".to_string()));
+        s.name = Some("aic-1-2".into());
+        assert!(has_pair(&sandbox(SandboxKind::Docker).run_args(&s), "--name", "aic-1-2"));
+        let kill = sandbox(SandboxKind::Podman).kill_command("aic-1-2");
+        assert_eq!(kill.get_program(), "podman");
+        assert_eq!(kill.get_args().collect::<Vec<_>>(), ["kill", "aic-1-2"]);
     }
 
     #[test]

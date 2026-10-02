@@ -33,6 +33,15 @@ pub enum Commands {
         /// them instead of erroring.
         slug: Option<String>,
     },
+    /// Run a local web chat server that talks to the configured agents.
+    Server {
+        /// Address to listen on. Anything but loopback exposes your agents
+        /// to the network.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+    },
     /// Manage the container sandbox agents run in.
     Sandbox {
         #[command(subcommand)]

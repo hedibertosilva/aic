@@ -206,6 +206,9 @@ impl Config {
     }
 
     pub fn global_dir() -> Result<PathBuf> {
+        if let Ok(dir) = std::env::var(CONFIG_DIR_ENV) {
+            return Ok(PathBuf::from(dir));
+        }
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
             return Ok(PathBuf::from(xdg).join("aic"));
         }
@@ -242,7 +245,8 @@ impl Config {
     }
 
     /// Loads the global config and, if the repo has a `.aic/config.toml`,
-    /// applies it on top.
+    /// applies it on top. Inside a sandbox the result never asks for
+    /// another one (see `in_sandbox`).
     pub fn load_merged(repo_root: &Path) -> Result<Config> {
         let mut config = Self::load_global()?;
         let repo_path = Self::repo_override_path(repo_root);
@@ -253,8 +257,29 @@ impl Config {
                 .with_context(|| format!("parsing {}", repo_path.display()))?;
             config.apply_overrides(overrides);
         }
+        config.apply_sandbox_env(in_sandbox());
         Ok(config)
     }
+
+    /// The outer container already isolates whatever `aic` starts inside
+    /// it, and there's no runtime in there to nest another one.
+    fn apply_sandbox_env(&mut self, in_sandbox: bool) {
+        if in_sandbox {
+            self.sandbox = SandboxKind::None;
+        }
+    }
+}
+
+/// Env var the sandbox sets on every container it starts.
+pub const IN_SANDBOX_ENV: &str = "AIC_IN_SANDBOX";
+
+/// Overrides the global config dir; the sandbox points it at the host's
+/// config, mounted read-only.
+pub const CONFIG_DIR_ENV: &str = "AIC_CONFIG_DIR";
+
+/// Whether this `aic` runs inside an aic sandbox container.
+pub fn in_sandbox() -> bool {
+    std::env::var(IN_SANDBOX_ENV).is_ok_and(|v| v == "1")
 }
 
 #[cfg(test)]
@@ -291,6 +316,15 @@ mod tests {
         });
         assert_eq!(config.sandbox, SandboxKind::None);
         assert_eq!(config.sandbox_image, "aic-sandbox");
+    }
+
+    #[test]
+    fn inside_a_sandbox_never_nests_another() {
+        let mut config = Config::default();
+        config.apply_sandbox_env(false);
+        assert_eq!(config.sandbox, SandboxKind::Docker);
+        config.apply_sandbox_env(true);
+        assert_eq!(config.sandbox, SandboxKind::None);
     }
 
     #[test]

@@ -20,7 +20,9 @@ pub const DEFAULT_CLAUDE_VERSION: &str = "2.1.287";
 
 /// Dockerfile for `aic sandbox build`. `agy` has no pinned public install
 /// method, so the host's binary is copied into the build context and
-/// `COPY`d in when `include_agy` is set.
+/// `COPY`d in when `include_agy` is set. `aic` itself is bind-mounted on
+/// every run (see `Sandbox::run_args`); a trixie base keeps a glibc build
+/// from a recent host runnable, and a static musl build runs anywhere.
 pub fn sandbox_dockerfile(include_agy: bool) -> String {
     let agy = if include_agy {
         "COPY agy /usr/local/bin/agy\n"
@@ -28,7 +30,7 @@ pub fn sandbox_dockerfile(include_agy: bool) -> String {
         ""
     };
     format!(
-        "FROM docker.io/library/node:22-bookworm-slim\n\
+        "FROM docker.io/library/node:22-trixie-slim\n\
 ARG CLAUDE_VERSION={DEFAULT_CLAUDE_VERSION}\n\
 RUN apt-get update \\\n\
  && apt-get install -y --no-install-recommends git ca-certificates ripgrep openssh-client curl \\\n\
@@ -50,6 +52,9 @@ mod tests {
         assert!(with.contains("claude-code@${CLAUDE_VERSION}"));
         assert!(with.contains("COPY agy /usr/local/bin/agy"));
         assert!(with.contains("chmod 1777 /home/aic"));
+        assert!(with.starts_with("FROM docker.io/library/node:22-trixie-slim\n"));
+        // aic is mounted at run time, not baked in.
+        assert!(!with.contains("aic /usr/local/bin/aic"));
         assert!(!sandbox_dockerfile(false).contains("COPY agy"));
     }
 }
