@@ -15,12 +15,15 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::agent::{AgentProcess, CliAgent, RunOpts};
 use crate::chat::{self, ChatEvent};
+use crate::{consumption, quotas};
 use crate::config::{Config, SandboxKind};
 use crate::sandbox::Sandbox;
 
 const INDEX_HTML: &str = include_str!("../web/chat.html");
 const CHAT_CSS: &str = include_str!("../web/chat.css");
 const CHAT_JS: &str = include_str!("../web/chat.js");
+const CHAT_IMPORT_JS: &str = include_str!("../web/chat-import.js");
+const CHAT_QUOTAS_JS: &str = include_str!("../web/chat-quotas.js");
 const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
 
 /// Cap on the request body, so a stray client can't make us buffer forever.
@@ -49,6 +52,12 @@ struct App {
     allowed_hosts: Option<Vec<String>>,
     /// Models each agent CLI reported, so the dialog does not spawn it every time.
     models: Mutex<HashMap<String, chat::ModelCatalog>>,
+    quotas: Mutex<HashMap<String, QuotaCache>>,
+}
+
+struct QuotaCache {
+    signature: String,
+    status: quotas::QuotaStatus,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +70,10 @@ struct ChatStateRequest {
 struct ChatRequest {
     agent: String,
     prompt: String,
+    /// Omitted by auxiliary requests (e.g. title generation). Historical
+    /// imported/copied entries never trigger accounting.
+    #[serde(default)]
+    conversation_id: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
     /// Persona / group-chat framing from the page, sent on every turn.
@@ -100,7 +113,7 @@ pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
     });
     let app = Arc::new(App {
         repo_root: repo_root.to_path_buf(), config: RwLock::new(config), chat_db: Mutex::new(chat_db),
-        allowed_hosts, models: Mutex::default(),
+        allowed_hosts, models: Mutex::default(), quotas: Mutex::default(),
     });
 
     let server = tiny_http::Server::http((host, port))
@@ -146,6 +159,7 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
              updated_at INTEGER NOT NULL
          );",
     )?;
+    consumption::init(&db)?;
     Ok(db)
 }
 
@@ -228,7 +242,7 @@ fn respond_text(request: Request, status: u16, content_type: &str, body: impl In
     Ok(())
 }
 
-fn handle(app: &App, mut request: Request) -> Result<()> {
+fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     if let Some(allowed) = &app.allowed_hosts {
         let ok = header_value(&request, "Host").is_some_and(|h| allowed.contains(&h));
         if !ok {
@@ -241,6 +255,8 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
         (Method::Get, "/") => respond_text(request, 200, "text/html; charset=utf-8", INDEX_HTML),
         (Method::Get, "/chat.css") => respond_text(request, 200, "text/css; charset=utf-8", CHAT_CSS),
         (Method::Get, "/chat.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_JS),
+        (Method::Get, "/chat-import.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_IMPORT_JS),
+        (Method::Get, "/chat-quotas.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_QUOTAS_JS),
         (Method::Get, "/favicon.svg" | "/favicon.ico") => {
             respond_text(request, 200, "image/svg+xml", FAVICON_SVG)
         }
@@ -266,6 +282,33 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
                 "sandboxed": config.sandbox != SandboxKind::None,
             });
             respond_text(request, 200, "application/json", body.to_string())
+        }
+        (Method::Get, "/api/quotas") => {
+            let conversation = query_value(request.url(), "conversation").unwrap_or_default();
+            let statuses = quota_snapshot(app);
+            let totals = consumption::load(&app.chat_db.lock().expect("chat database lock poisoned"), &conversation)?;
+            respond_text(request, 200, "application/json", serde_json::json!({"agents":statuses,"consumption":totals}).to_string())
+        }
+        (Method::Post, "/api/quotas/refresh") => {
+            if !same_origin(&request) || !header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json")) {
+                return respond_text(request, 403, "text/plain", "forbidden");
+            }
+            let mut body = String::new();
+            request.as_reader().take(MAX_BODY).read_to_string(&mut body)?;
+            #[derive(Deserialize)]
+            struct Refresh { agent: Option<String> }
+            let req: Refresh = match serde_json::from_str(&body) {
+                Ok(req) => req,
+                Err(_) => return respond_text(request, 400, "text/plain", "invalid refresh request"),
+            };
+            let config = current_config(app);
+            if let Some(agent) = req.agent {
+                if !config.agents.contains_key(&agent) { return respond_text(request, 404, "text/plain", "unknown agent"); }
+                refresh_quota(app, &agent);
+            } else {
+                for agent in config.agents.keys() { refresh_quota(app, agent); }
+            }
+            respond_text(request, 202, "application/json", "{}")
         }
         (Method::Get, "/api/models") => {
             let agent = request
@@ -342,6 +385,79 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
         }
         _ => respond_text(request, 404, "text/plain", "not found"),
     }
+}
+
+fn query_value(url: &str, key: &str) -> Option<String> {
+    let value = url.split_once('?')?.1.split('&').find_map(|p| {
+        let (k, v) = p.split_once('=')?; (k == key).then_some(v)
+    })?;
+    let mut bytes = Vec::new(); let mut i = 0;
+    while i < value.len() {
+        let b = value.as_bytes()[i];
+        if b == b'%' {
+            let hex = value.get(i+1..i+3)?;
+            bytes.push(u8::from_str_radix(hex,16).ok()?); i += 3;
+        } else { bytes.push(if b == b'+' { b' ' } else { b }); i += 1; }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn quota_signature(config: &Config, name: &str) -> String {
+    format!("{}:{:?}:{}", config.agents[name].binary, config.sandbox, config.sandbox_image)
+}
+
+/// Snapshot returns immediately; first reads run independently in worker threads.
+fn quota_snapshot(app: &Arc<App>) -> Vec<quotas::QuotaStatus> {
+    let config = current_config(app);
+    let mut names: Vec<_> = config.agents.keys().cloned().collect(); names.sort();
+    let mut cold = Vec::new();
+    {
+        let mut cache = app.quotas.lock().expect("quota cache poisoned");
+        cache.retain(|name, _| config.agents.contains_key(name));
+        for name in &names {
+            let signature = quota_signature(&config, name);
+            if cache.get(name).is_none_or(|entry| entry.signature != signature) {
+                let agent = CliAgent::new(name, &config.agents[name].binary);
+                let status = quotas::QuotaStatus::initial(&agent);
+                if status.refreshable { cold.push(name.clone()); }
+                cache.insert(name.clone(), QuotaCache { signature, status });
+            }
+        }
+    }
+    for name in cold { refresh_quota(app, &name); }
+    let cache = app.quotas.lock().expect("quota cache poisoned");
+    names.iter().filter_map(|name| cache.get(name).map(|entry| entry.status.clone())).collect()
+}
+
+fn refresh_quota(app: &Arc<App>, name: &str) {
+    let config = current_config(app);
+    let Some(cfg) = config.agents.get(name) else { return };
+    let agent = CliAgent::new(name, &cfg.binary);
+    let signature = quota_signature(&config, name);
+    {
+        let mut cache = app.quotas.lock().expect("quota cache poisoned");
+        let entry = cache.entry(name.to_string()).or_insert_with(|| QuotaCache {
+            signature: signature.clone(), status: quotas::QuotaStatus::initial(&agent),
+        });
+        if entry.signature != signature { *entry = QuotaCache { signature: signature.clone(), status: quotas::QuotaStatus::initial(&agent) }; }
+        if !entry.status.refreshable || entry.status.reading { return; }
+        entry.status.reading = true;
+        entry.status.attempted_at = Some(chrono::Utc::now().to_rfc3339());
+    }
+    let (app, name) = (Arc::clone(app), name.to_string());
+    thread::spawn(move || {
+        let result = build_agent(&app, &name).and_then(|agent| quotas::read_codex(&agent, &app.repo_root));
+        let mut cache = app.quotas.lock().expect("quota cache poisoned");
+        let Some(entry) = cache.get_mut(&name).filter(|entry| entry.signature == signature) else { return };
+        match result {
+            Ok(mut status) => { status.attempted_at = entry.status.attempted_at.clone(); entry.status = status; }
+            Err(_) => {
+                entry.status.state = "read_error".into(); entry.status.reading = false;
+                // Keep prior windows and fetched_at. No raw stderr/account secrets in the UI.
+                entry.status.error = Some("Couldn't read quota. Check the Codex CLI login and sandbox, then retry.".into());
+            }
+        }
+    });
 }
 
 /// What the agent's own CLI reports it can run: `codex debug models`, `agy models`.
@@ -560,7 +676,7 @@ fn failed(error: String) -> ChatEvent {
 
 /// Answers one chat turn as NDJSON: `session`, then `delta`s, then `done`.
 /// Blank lines in between are heartbeats.
-fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
+fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
     if req.prompt.trim().is_empty() {
         return respond_text(request, 400, "text/plain", "empty prompt");
     }
@@ -571,6 +687,12 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
     let config = current_config(app);
     let sandboxed = config.sandbox != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
+    let mut native_session = resume.clone();
+    let was_resumed = resume.is_some();
+    let conversation = req.conversation_id.filter(|s| !s.is_empty());
+    let agent_name = req.agent.clone();
+    let mut accounted = false;
+    let mut started = false;
 
     // Tell the agent what it may do, so it says so instead of hunting for a
     // workaround (copying files to /tmp, writing patches nobody can apply).
@@ -640,6 +762,7 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
             send(&tx, &failed(format!("{err:#}")));
         }
         Ok(process) => {
+            started = true;
             // Stop in the page closes the connection. Writes are what notice
             // that, so keep writing while the agent is quiet, and kill it
             // (with everything it started) as soon as one fails.
@@ -659,7 +782,26 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
                     }
                 })
             };
-            let result = pump_agent(agent.is_agy(), agent.is_codex(), process, &tx);
+            let result = pump_agent(agent.is_agy(), agent.is_codex(), process, &tx, |event| {
+                if let ChatEvent::Session { id } = event { native_session = Some(id.clone()); }
+                if let ChatEvent::Done { usage, .. } = event {
+                    if !accounted {
+                        if let Some(conversation) = &conversation {
+                            let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+                            let session = native_session.as_deref().map(|id| consumption::SessionCounter { id, resumed:was_resumed });
+                            // agy and Codex report cumulative native-session counters.
+                            // Convert resumed results to a per-turn delta before
+                            // adding them to the conversation total.
+                            let cumulative = agent.is_agy() || agent.is_codex();
+                            match consumption::record(&mut db, conversation, &agent_name, session, cumulative, usage.as_ref()) {
+                                Ok(normalized) => *usage = normalized,
+                                Err(err) => eprintln!("saving conversation usage failed: {err}"),
+                            }
+                        }
+                        accounted = true;
+                    }
+                }
+            });
             finished.store(true, Ordering::Relaxed);
             watcher.thread().unpark();
             let _ = watcher.join();
@@ -668,12 +810,28 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
             }
         }
     }
+    // A process that never started did not produce a reply or consume usage.
+    // Once started, a failure without a final Usage event remains a partial
+    // conversation turn and is recorded as such.
+    if started && !accounted {
+        if let Some(conversation) = &conversation {
+            let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+            let session = native_session.as_deref().map(|id| consumption::SessionCounter { id, resumed:was_resumed });
+            let cumulative = agent.is_agy() || agent.is_codex();
+            if let Err(err) = consumption::record(&mut db, conversation, &agent_name, session, cumulative, None) {
+                eprintln!("saving conversation usage failed: {err}");
+            }
+        }
+    }
+    // Auxiliary calls such as title generation omit conversation_id and
+    // should not trigger an account quota read.
+    if started && conversation.is_some() { refresh_quota(app, &agent_name); }
     drop(tx);
     responder.join().map_err(|_| anyhow!("response thread panicked"))??;
     Ok(())
 }
 
-fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<Vec<u8>>) -> Result<()> {
+fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<Vec<u8>>, mut observe: impl FnMut(&mut ChatEvent)) -> Result<()> {
     let AgentProcess { mut child, killer } = process;
     let stdout = child.stdout.take().context("agent stdout was not piped")?;
     let mut stderr = child.stderr.take().context("agent stderr was not piped")?;
@@ -687,7 +845,8 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
     let mut finished = false;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
-        let Some(event) = chat::parse_line_for(is_agy, is_codex, &line) else { continue };
+        let Some(mut event) = chat::parse_line_for(is_agy, is_codex, &line) else { continue };
+        observe(&mut event);
         let event = match event {
             // The agent only reports the reply at the end (no deltas seen):
             // surface it as one chunk so the page has something to render.
@@ -727,6 +886,58 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quota_cache_deduplicates_reads_and_keeps_last_success_on_failure() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("codex");
+        let count = dir.path().join("reads");
+        let fail = dir.path().join("fail");
+        let script = format!(r#"#!/bin/sh
+printf 'read\n' >> '{}'
+if [ -f '{}' ]; then exit 1; fi
+sleep 0.1
+while IFS= read -r line; do
+ case "$line" in
+  *initialize*) printf '{{"id":1,"result":{{}}}}\n' ;;
+  *account/read*) printf '{{"id":2,"result":{{"account":{{"type":"chatgpt"}}}}}}\n' ;;
+  *account/rateLimits/read*) printf '{{"id":3,"result":{{"rateLimits":{{"primary":{{"usedPercent":86,"windowDurationMins":300}}}}}}}}\n' ;;
+ esac
+done
+"#,count.display(),fail.display());
+        std::fs::write(&binary,script).unwrap();
+        std::fs::set_permissions(&binary,std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut config = Config::default(); config.sandbox = SandboxKind::None;
+        config.agents.get_mut("codex").unwrap().binary = binary.to_string_lossy().into_owned();
+        let app = Arc::new(App { repo_root:dir.path().to_path_buf(), config:RwLock::new(config),
+            chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None,
+            models:Mutex::default(),quotas:Mutex::default() });
+        quota_snapshot(&app);
+        refresh_quota(&app,"codex"); // In-flight read must not spawn another process.
+        let wait = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                let q = quota_snapshot(&app).into_iter().find(|q| q.agent=="codex").unwrap();
+                if !q.reading { return q; }
+                assert!(std::time::Instant::now()<deadline,"quota reader did not finish");
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let first = wait();
+        assert_eq!(first.state,"available");
+        assert_eq!(first.windows[0].used_pct,Some(86.0));
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(),1);
+        // A page reload reads the same in-memory cache without starting a query.
+        assert_eq!(quota_snapshot(&app).into_iter().find(|q|q.agent=="codex").unwrap().fetched_at,first.fetched_at);
+        std::fs::write(fail,"").unwrap();
+        refresh_quota(&app,"codex");
+        let failed = wait();
+        assert_eq!(failed.state,"read_error");
+        assert_eq!(failed.fetched_at,first.fetched_at);
+        assert_eq!(failed.windows[0].used_pct,Some(86.0));
+        assert!(failed.attempted_at.is_some());
+    }
 
     #[test]
     fn chat_database_is_created_under_aic_and_keeps_json() {

@@ -1,7 +1,7 @@
 //! Turns the raw JSON event lines of Claude, Gemini and Codex into one small
 //! event vocabulary the web chat understands.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -26,7 +26,7 @@ pub enum ChatEvent {
 
 /// What one turn cost. Every field is optional: each agent reports a
 /// different subset (agy may report none at all).
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<u64>,
@@ -57,6 +57,28 @@ impl Usage {
             cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
             num_turns: value.get("num_turns").and_then(Value::as_u64),
         };
+        (usage != Usage::default()).then_some(usage)
+    }
+
+    /// Input means uncached tokens throughout aic. Codex's input includes
+    /// cached tokens; agy's input excludes cache (its total is input + output).
+    fn from_codex(value: &Value) -> Option<Usage> {
+        let raw = value.get("usage")?;
+        let cached = raw.get("cached_input_tokens").and_then(Value::as_u64);
+        let usage = Usage {
+            input_tokens: raw.get("input_tokens").and_then(Value::as_u64)
+                .map(|input| input.saturating_sub(cached.unwrap_or(0))),
+            cache_read_tokens: cached,
+            output_tokens: raw.get("output_tokens").and_then(Value::as_u64),
+            ..Default::default()
+        };
+        (usage != Usage::default()).then_some(usage)
+    }
+
+    fn from_agy(value: &Value) -> Option<Usage> {
+        let mut usage = Self::from_result(value).unwrap_or_default();
+        usage.cache_read_tokens = value.get("usage").and_then(|u| u.get("cache_read_tokens")).and_then(Value::as_u64)
+            .or(usage.cache_read_tokens);
         (usage != Usage::default()).then_some(usage)
     }
 }
@@ -141,12 +163,13 @@ fn parse_codex(value: &Value) -> Option<ChatEvent> {
                 text: str_of(item, "text").unwrap_or_default().to_string(),
             })
         }
-        "turn.completed" => Some(ChatEvent::Done { ok: true, text: String::new(), error: None, usage: None }),
+        "turn.completed" => Some(ChatEvent::Done { ok: true, text: String::new(), error: None, usage: Usage::from_codex(value) }),
         "turn.failed" => Some(ChatEvent::Done {
             ok: false,
             text: String::new(),
-            error: value.get("error").and_then(Value::as_str).map(str::to_string).or_else(|| Some("Codex turn failed".into())),
-            usage: None,
+            error: value.get("error").and_then(|e| e.as_str().or_else(|| str_of(e, "message")))
+                .map(str::to_string).or_else(|| Some("Codex turn failed".into())),
+            usage: Usage::from_codex(value),
         }),
         _ => None,
     }
@@ -246,7 +269,7 @@ fn parse_agy(value: &Value) -> Option<ChatEvent> {
                     .to_string()
             });
             // Same shape as claude's if agy reports any; nothing otherwise.
-            Some(ChatEvent::Done { ok, text, error, usage: Usage::from_result(result) })
+            Some(ChatEvent::Done { ok, text, error, usage: Usage::from_agy(result) })
         }
         _ => None,
     }
@@ -332,6 +355,32 @@ mod tests {
         let message = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}"#;
         assert_eq!(parse_line_for(false, true, message), Some(ChatEvent::Delta { text: "hi".into() }));
         assert_eq!(parse_line_for(false, true, r#"{"type":"turn.completed"}"#), Some(ChatEvent::Done { ok: true, text: String::new(), error: None, usage: None }));
+    }
+
+    #[test]
+    fn codex_usage_does_not_count_cached_input_twice() {
+        let line = r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":70,"output_tokens":8}}"#;
+        let Some(ChatEvent::Done { usage: Some(usage), .. }) = parse_line_for(false, true, line) else { panic!("missing usage") };
+        assert_eq!(usage.input_tokens, Some(30));
+        assert_eq!(usage.cache_read_tokens, Some(70));
+        assert_eq!(usage.output_tokens, Some(8));
+        assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn codex_structured_error_keeps_reason_without_guessing_quota_classification() {
+        let line = r#"{"type":"turn.failed","error":{"message":"Usage limit reached"}}"#;
+        let Some(ChatEvent::Done { error, .. }) = parse_line_for(false, true, line) else { panic!("missing error") };
+        assert_eq!(error.as_deref(), Some("Usage limit reached"));
+        assert_eq!(parse_line_for(false,true,r#"{"type":"error","message":"retrying"}"#),None);
+    }
+
+    #[test]
+    fn agy_cache_uses_its_own_field_name() {
+        let line = r#"{"event":"result","result":{"status":"SUCCESS","usage":{"input_tokens":100,"cache_read_tokens":70,"output_tokens":8}}}"#;
+        let Some(ChatEvent::Done { usage: Some(usage), .. }) = parse_line(true,line) else { panic!("missing usage") };
+        assert_eq!(usage.input_tokens,Some(100));
+        assert_eq!(usage.cache_read_tokens,Some(70));
     }
 
     #[test]

@@ -118,6 +118,8 @@ Serves a local chat page where one conversation can have several participants �
 - The sidebar groups conversations by date and searches titles and contents; the ⋯ menu renames, exports (Markdown or JSON) and deletes. Ctrl+Shift+O starts a new conversation.
 - Binds to loopback by default and rejects requests with a foreign `Host` or `Origin`. `--host 0.0.0.0` exposes your agents to anyone who can reach the port.
 - `agy` currently reports its reply only at the end of a turn, so Gemini answers appear in one piece rather than token by token.
+- **Usage limits:** the meter button lists every configured agent, with conversation token/cost totals and Codex account quota windows. Chips and recipient pills warn at 80% and show exhaustion at 100%; sending remains available. Claude and Gemini explicitly show unavailable/pending quota readings. Missing tokens/cost stay `n/a` and incomplete totals are marked `≥`.
+- Conversation usage counters live in SQLite and include regenerated/deleted replies; copied or imported history is not charged to the new conversation. Codex quota readings stay in server memory across page reloads, refresh manually and after its turns, and expire when the server restarts. See [the UX specification](docs/agent-quotas-ux.md) for states and the later Claude/agy phases.
 
 ## Commands
 

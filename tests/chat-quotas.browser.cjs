@@ -1,0 +1,83 @@
+// Optional browser check: set AIC_TEST_BINARY and install Playwright + Chromium.
+// AIC_PLAYWRIGHT_MODULE can point to a Playwright installation outside the repo.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const { fixture } = require('./chat-quotas.integration.cjs');
+let chromium;
+try { ({ chromium } = require(process.env.AIC_PLAYWRIGHT_MODULE || 'playwright')); } catch {}
+
+test('chat quota panel, alerts, selector and conversation consumption', { skip: !process.env.AIC_TEST_BINARY || !chromium }, async () => {
+  const f = await fixture(); let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(f.base, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#chips .chip');
+    await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes('34%'));
+    assert.equal(await page.locator('#quotarows > .quota').count(), 3);
+    assert.match(await page.locator('#quotas').innerText(), /No quota reading yet/);
+    assert.match(await page.locator('#quotas').innerText(), /Quota not available/);
+    await page.getByRole('button', { name: 'Details for Codex', exact: true }).click();
+    assert.match(await page.locator('#quotas').innerText(), /Source: Codex app-server/);
+    const reads = fs.readFileSync(path.join(f.root, 'reads'), 'utf8');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#chips .chip'); await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes('34%'));
+    assert.equal(fs.readFileSync(path.join(f.root, 'reads'), 'utf8'), reads);
+    fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ pct: 80 }));
+    await page.locator('#quotarefresh').click(); await page.waitForSelector('#chips .quota-warn');
+    assert.equal(await page.locator('#chips .quota-warn').innerText(), '80%');
+    assert.match(await page.locator('#to .pill').getAttribute('aria-label'), /near usage limit/);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#quotabtn').getAttribute('aria-expanded'), 'false');
+    await page.locator('#chips .chip').click(); await page.waitForSelector('#pdialog[open]');
+    assert.match(await page.locator('#pquota').innerText(), /80%/);
+    assert.equal(await page.locator('#psave').isEnabled(), true); await page.locator('#pcancel').click();
+    await page.locator('#input').fill('hello fixture'); await page.locator('#send').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.agent === 'codex' && e.usage));
+    await page.waitForFunction(() => !document.querySelector('.card .status:not([hidden])'));
+    const id = await page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')).current);
+    await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => document.querySelector('#quotas').textContent.includes('100 in'));
+    assert.match(await page.locator('#quotas').innerText(), /cost n\/a/);
+    await page.keyboard.press('Escape');
+    await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('gemini');
+    assert.match(await page.locator('#pquota').innerText(), /Quota not available/);
+    await page.locator('#psave').click();
+    assert.equal(await page.locator('.card header .badge').first().innerText(), 'Codex');
+    await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('codex');
+    await page.locator('#psave').click();
+    await page.locator('#list .conv.active .more').click();
+    await page.getByRole('menuitem', { name: 'Fork conversation', exact: true }).click();
+    await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => !document.querySelector('#quotas').textContent.includes('Loading usage'));
+    assert.ok(!(await page.locator('#quotas').innerText()).includes('100 in'));
+    const forkId = await page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')).current);
+    assert.deepEqual((await f.snapshot(forkId)).consumption, {});
+    await page.keyboard.press('Escape');
+    await page.locator('#list .conv').filter({ hasText: 'hello fixture' }).filter({ hasNotText: 'Fork:' }).locator('.open').click();
+    await page.getByRole('button', { name: 'Regenerate', exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('.card .status:not([hidden])'));
+    await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => document.querySelector('#quotas').textContent.includes('200 in'));
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Delete reply', exact: true }).click();
+    assert.equal((await f.snapshot(id)).consumption.codex.turns, 2);
+    fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ pct: 100 }));
+    await page.locator('#quotabtn').click(); await page.locator('#quotarefresh').click();
+    await page.waitForSelector('#chips .quota-out');
+    assert.equal(await page.locator('#quotabtn').getAttribute('data-level'), 'out');
+    await page.setViewportSize({ width: 390, height: 844 });
+    const box = await page.locator('#quotas').boundingBox(); assert.ok(box.x >= 0 && box.x + box.width <= 390);
+    fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ fail: true }));
+    await page.locator('#quotarefresh').click();
+    await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes("Couldn't read quota"));
+    assert.equal(await page.locator('#quotarows .meter').first().getAttribute('aria-valuenow'), '100');
+    assert.match(await page.locator('#quotas').innerText(), /Retry/);
+    assert.deepEqual(errors, []);
+  } finally { await browser?.close(); await f.close(); }
+});

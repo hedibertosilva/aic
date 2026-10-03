@@ -12,6 +12,10 @@ let skills = []; // [{ name, description, argument_hint, requires_write }]
 const running = new Map(); // `${conv id}\n${participant}` -> AbortController
 const cardParts = new WeakMap(); // log entry -> DOM parts of its card
 const MAX_PARTICIPANTS = 5;
+let quotaData = { agents: [], consumption: {} }, quotaConversation = null, quotaRequest = null;
+const quotaExpanded = new Set(), quotaLevels = new Map(), quotaExpiryAttempts = new Map();
+const quotaManualReads = new Set();
+let quotaRefreshPending = false;
 
 /* ---------- small helpers ---------- */
 function el(tag, cls, text) {
@@ -46,6 +50,7 @@ const ICONS = {
   alert: I('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>'),
   rename: I('<path d="M4 20h16"/><path d="M6 16l9.5-9.5 3 3L9 19H6z"/>'),
   settings: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.08A1.7 1.7 0 0 0 10.66 18.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 14.7 1.7 1.7 0 0 0 5.44 13.66H5v-3h.08A1.7 1.7 0 0 0 6.64 9.62 1.7 1.7 0 0 0 6.3 7.74l-.06-.06 2.12-2.12.06.06A1.7 1.7 0 0 0 10.3 6 1.7 1.7 0 0 0 11.34 4.44V4h3v.08A1.7 1.7 0 0 0 15.38 5.64a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06A1.7 1.7 0 0 0 19 9.3a1.7 1.7 0 0 0 1.56 1.04H21v3h-.08A1.7 1.7 0 0 0 19.4 15z"/>'),
+  meter: I('<path d="M4 18a9 9 0 1 1 16 0"/><path d="M12 13l5-5"/><circle cx="12" cy="13" r="1.5"/>'),
 };
 function icon(kind) {
   const t = document.createElement("template");
@@ -222,6 +227,157 @@ function writeBadge() {
   const b = el("span", "badge writes"); b.title = "can edit files"; b.setAttribute("aria-label", "can edit files");
   b.appendChild(icon("edit"));
   return b;
+}
+
+/* ---------- quota cache and presentation ---------- */
+const quotaOf = (agent) => quotaData.agents.find(q => q.agent === agent);
+function quotaAlert(agent) {
+  const q = quotaOf(agent), level = ChatQuotas.level(q);
+  if (level === "normal") return "";
+  const w = ChatQuotas.critical(q);
+  return `${cap(agent)} ${level === "out" ? "quota exhausted" : "near usage limit"} · ${ChatQuotas.resetText(w)} · ${ChatQuotas.updated(q)}`;
+}
+function quotaBadge(agent) {
+  const q = quotaOf(agent), level = ChatQuotas.level(q);
+  if (level === "normal") return null;
+  const w = ChatQuotas.critical(q);
+  const b = el("span", "badge quota-" + level, level === "out" ? "Exhausted" : ChatQuotas.percent(w.used_pct) || "Near limit");
+  b.title = quotaAlert(agent); b.setAttribute("aria-label", b.title);
+  return b;
+}
+function quotaMeter(w, name) {
+  if (!ChatQuotas.numeric(w?.used_pct)) return null;
+  const meter = el("div", "meter");
+  meter.setAttribute("role", "meter"); meter.setAttribute("aria-label", `${name} ${w.label || "usage"}`);
+  meter.setAttribute("aria-valuemin", "0"); meter.setAttribute("aria-valuemax", "100");
+  meter.setAttribute("aria-valuenow", String(Math.min(100,w.used_pct)));
+  meter.setAttribute("aria-valuetext", `${ChatQuotas.percent(w.used_pct)} of ${w.label || "usage limit"} used, ${ChatQuotas.resetText(w)}`);
+  meter.style.setProperty("--pct", Math.min(100,w.used_pct) + "%");
+  meter.appendChild(el("i")); return meter;
+}
+async function fetchQuotaState() {
+  if (quotaRequest || !meta.agents.length) return quotaRequest;
+  const conversation = cur()?.id || "";
+  quotaRequest = (async () => {
+    try {
+      const res = await fetch("/api/quotas?conversation=" + encodeURIComponent(conversation));
+      if (!res.ok) throw new Error("Couldn't read usage limits");
+      const data = await res.json();
+      const changed = JSON.stringify(data.agents) !== JSON.stringify(quotaData.agents);
+      quotaData.agents = data.agents || [];
+      if ((cur()?.id || "") === conversation) { quotaData.consumption = data.consumption || {}; quotaConversation = conversation; }
+      const notices = [];
+      quotaData.agents.forEach(q => {
+        if (!q.reading) quotaManualReads.delete(q.agent);
+        const level = ChatQuotas.level(q), before = quotaLevels.get(q.agent);
+        if (before !== level && level !== "normal") notices.push(quotaAlert(q.agent));
+        quotaLevels.set(q.agent, level);
+      });
+      if (notices.length) announce(notices.join(". "));
+      if (changed) { renderBar(); renderComposer(); }
+      renderQuotas();
+    } catch {
+      quotaManualReads.clear();
+      // A transport failure keeps old readings visible without claiming freshness.
+      quotaData.agents = meta.agents.map(agent => ({ ...(quotaOf(agent) || { agent, windows: [] }),
+        refreshable: meta.details?.[agent]?.kind === "codex", state: "read_error", reading: false, error: "Couldn't reach the quota reader", attempted_at: new Date().toISOString() }));
+      renderQuotas();
+    } finally {
+      quotaRequest = null;
+      if ((cur()?.id || "") !== conversation) fetchQuotaState();
+    }
+  })();
+  return quotaRequest;
+}
+async function refreshQuotas(agent, silent = false) {
+  if (quotaRefreshPending && !agent) return;
+  quotaRefreshPending = true;
+  if (!silent) (agent ? [agent] : quotaData.agents.filter(q => q.refreshable).map(q => q.agent)).forEach(a => quotaManualReads.add(a));
+  renderQuotas();
+  try {
+    const res = await fetch("/api/quotas/refresh", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent: agent || null }) });
+    if (!res.ok) throw new Error(await res.text());
+    await fetchQuotaState();
+  } catch (err) { quotaManualReads.clear(); if (!silent) toast("Couldn't refresh usage limits: " + err.message); }
+  finally { quotaRefreshPending = false; renderQuotas(); }
+}
+function renderQuotaDialog() {
+  const agent = $("pagent").value, q = quotaOf(agent), note = $("pquota");
+  if (!agent) { note.textContent = ""; return; }
+  const level = ChatQuotas.level(q), w = ChatQuotas.critical(q);
+  note.className = "note" + (level === "out" ? " err" : level === "warn" ? " warn" : "");
+  const quota = q?.state === "read_error" ? "Couldn't refresh quota · " + ChatQuotas.updated(q)
+    : level === "out" ? `${cap(agent)} is out of quota. Replies may fail · ${ChatQuotas.resetText(w)}`
+    : q?.windows?.length ? q.windows.map(w => `${w.label}: ${ChatQuotas.percent(w.used_pct) || "n/a"}`).join(" · ") + " · " + ChatQuotas.updated(q)
+    : ChatQuotas.summary(q || { reason: "No quota reading yet" });
+  note.textContent = quota + " · This conversation: " + (quotaConversation === (cur()?.id || "") ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…");
+  note.title = q?.source || "";
+}
+function renderQuotas() {
+  const c = cur(), sameConversation = quotaConversation === (c?.id || "");
+  const rows = $("quotarows"), focused = document.activeElement?.dataset.quotaFocus;
+  rows.replaceChildren();
+  const levels = quotaData.agents.map(ChatQuotas.level);
+  const level = levels.includes("out") ? "out" : levels.includes("warn") ? "warn" : "";
+  if (level) $("quotabtn").dataset.level = level; else delete $("quotabtn").dataset.level;
+  $("quotabtn").setAttribute("aria-label", "Usage limits" + (level === "out" ? ": an agent is exhausted" : level ? ": an agent is near its limit" : ""));
+  const reading = quotaRefreshPending || quotaData.agents.some(q => q.reading);
+  $("quotarefresh").disabled = reading; $("quotarefresh").classList.toggle("spinning", quotaManualReads.size > 0);
+  $("quotas").setAttribute("aria-busy", String(reading));
+  meta.agents.forEach(agent => {
+    const q = quotaOf(agent) || { agent, windows: [], reason: "No quota reading yet" };
+    const w = ChatQuotas.critical(q), stale = ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error";
+    const row = el("div", "quota " + ChatQuotas.level(q) + (stale ? " stale" : ""));
+    const head = el("div", "head"), details = el("div", "quota-details");
+    head.appendChild(el("strong", "", cap(agent)));
+    if (q.reading && (!q.fetched_at || quotaManualReads.has(agent))) { const dots = el("span", "dots"); dots.setAttribute("aria-label", "Reading quota"); head.appendChild(dots); }
+    head.appendChild(el("span", "val", ChatQuotas.summary(q)));
+    const toggle = iconBtn("down", `Details for ${cap(agent)}`, () => {
+      if (quotaExpanded.has(agent)) quotaExpanded.delete(agent); else quotaExpanded.add(agent);
+      details.hidden = !quotaExpanded.has(agent); toggle.setAttribute("aria-expanded", String(!details.hidden));
+    });
+    toggle.dataset.quotaFocus = agent + ":details";
+    toggle.setAttribute("aria-expanded", String(quotaExpanded.has(agent))); head.appendChild(toggle);
+    row.appendChild(head);
+    const quota = el("div", "sub quota-reading");
+    const meter = quotaMeter(w, cap(agent)); if (meter) quota.appendChild(meter);
+    quota.appendChild(el("span", "", w ? ChatQuotas.resetText(w) + (ChatQuotas.expired(q) && q.reading ? " · refreshing…" : "")
+      : !q.fetched_at && meta.details?.[agent]?.kind === "claude" ? "Claude quota integration is planned for phase 2" : q.reason || "Quota not available"));
+    if (q.fetched_at) {
+      const age = el("span", "quota-age" + (ChatQuotas.stale(q) ? " old" : ""), " · " + ChatQuotas.updated(q));
+      age.title = "Source: " + q.source; quota.appendChild(age);
+    }
+    if (q.state === "read_error") {
+      quota.appendChild(el("span", "quota-error", " · " + (q.error || "Couldn't refresh")));
+      if (q.refreshable) {
+        const retry = el("button", "quota-retry", "Retry"); retry.type = "button";
+        retry.disabled = !!q.reading; retry.dataset.quotaFocus = agent + ":retry"; retry.onclick = () => refreshQuotas(agent); quota.appendChild(retry);
+      }
+    }
+    row.appendChild(quota);
+    const consumption = el("div", "sub quota-consumption", "This conversation: " + (sameConversation ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…"));
+    consumption.title = "Spent by aic in this conversation, including regenerated and deleted replies"; row.appendChild(consumption);
+    details.hidden = !quotaExpanded.has(agent);
+    (q.windows || []).forEach(window => {
+      const line = el("div", "quota-window " + ChatQuotas.windowLevel(window));
+      line.appendChild(el("span", "", (window.bucket ? window.bucket + " · " : "") + (window.model ? window.model + " · " : "") + window.label + ": " + (ChatQuotas.percent(window.used_pct) || "n/a")));
+      const meter = quotaMeter(window, cap(agent)); if (meter) line.appendChild(meter);
+      line.appendChild(el("div", "sub", ChatQuotas.resetText(window))); details.appendChild(line);
+    });
+    const provenance = el("div", "sub quota-source", "Source: " + (q.source || "No quota source available") + " · " + ChatQuotas.updated(q));
+    if (ChatQuotas.stale(q)) provenance.classList.add("old");
+    if (q.fetched_at) provenance.appendChild(el("div", "", "Last read " + new Date(q.fetched_at).toLocaleString()));
+    if (q.state === "read_error" && q.attempted_at) provenance.appendChild(el("div", "", "Couldn't refresh at " + new Date(q.attempted_at).toLocaleString()));
+    details.appendChild(provenance); row.appendChild(details); rows.appendChild(row);
+    for (const option of $("pagent").options) if (option.value === agent) {
+      const level = ChatQuotas.level(q); option.textContent = cap(agent) + (level === "out" ? " — exhausted" : level === "warn" ? " — " + (ChatQuotas.percent(w?.used_pct) || "near limit") : "");
+    }
+  });
+  $("quotaunknown").hidden = !c?.log.some(e => e.from !== "you" && !e.agent);
+  if (focused) [...rows.querySelectorAll("[data-quota-focus]")].find(e => e.dataset.quotaFocus === focused)?.focus();
+  if ($("pdialog").open) renderQuotaDialog();
+  if (!sameConversation && !quotaRequest && meta.agents.length) fetchQuotaState();
 }
 
 /* ---------- participants / conversations ---------- */
@@ -687,22 +843,67 @@ function convRow(c) {
 }
 
 function exportConv(c, kind) {
-  let text, type;
-  if (kind === "json") { text = JSON.stringify(c, null, 2); type = "application/json"; }
-  else {
-    const who = (name) => { const p = c.participants.find((x) => x.name === name); return p ? `${name} (${cap(p.agent)}${p.model ? ", " + cap(p.model) : ""})` : name; };
-    const out = [`# ${c.title}`, "", "Participants: " + c.participants.map((p) => who(p.name)).join(", "), ""];
-    c.log.forEach((e) => {
-      const head = e.from === "you" ? "you" + (e.to ? " → " + e.to.join(", ") : "") : who(e.from);
-      out.push(`## ${head}`, "", e.error ? `> ${e.text.replace(/\n/g, "\n> ")}` : e.text, "");
-    });
-    text = out.join("\n"); type = "text/markdown";
-  }
+  const text = ChatImport.exportText(c, kind);
+  const type = kind === "json" ? "application/json" : "text/markdown";
   const a = el("a");
   a.href = URL.createObjectURL(new Blob([text], { type }));
   a.download = (c.title.replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "conversation") + "." + kind;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ---------- file import ---------- */
+function chooseImport() { $("importfile").click(); }
+async function importFile(file) {
+  if (!file) return;
+  try {
+    if (file.size > ChatImport.MAX_BYTES) throw new Error("The file is too large (maximum 16 MiB).");
+    const extension = file.name.split(".").pop().toLowerCase();
+    const result = ChatImport.parse(await file.text(), extension, meta.agents, MAX_PARTICIPANTS);
+    const previous = state.current;
+    const c = result.conversation
+      ? { ...result.conversation, id: crypto.randomUUID(), updated: Date.now() }
+      : { id: crypto.randomUUID(), title: file.name.replace(/\.md$/i, ""), participants: [], log: [], round: 0,
+          updated: Date.now(), sendTo: null, keepEmpty: true };
+    if (result.draft !== undefined) {
+      const agent = defaultAgent();
+      if (agent) addParticipant(c, { agent });
+    }
+    // Check the actual serialized snapshot against browser quota. Commit the
+    // complete conversation only after both cache writes succeed.
+    const next = { ...state, current: c.id, convs: [c, ...state.convs] };
+    const nextDrafts = { ...drafts };
+    const old = cur();
+    if (old) nextDrafts[old.id] = $("input").value;
+    if (result.draft !== undefined) nextDrafts[c.id] = result.draft;
+    const oldCache = localStorage.getItem(KEY);
+    const oldDrafts = localStorage.getItem(DRAFTS_KEY);
+    try {
+      localStorage.setItem(KEY, JSON.stringify(next));
+      localStorage.setItem(DRAFTS_KEY, JSON.stringify(nextDrafts));
+    } catch (err) {
+      try {
+        if (oldCache === null) localStorage.removeItem(KEY); else localStorage.setItem(KEY, oldCache);
+        if (oldDrafts === null) localStorage.removeItem(DRAFTS_KEY); else localStorage.setItem(DRAFTS_KEY, oldDrafts);
+      } catch {}
+      throw new Error("Browser storage is unavailable or full. Free space and try again.");
+    }
+    state = next; drafts = nextDrafts;
+    $("search").value = "";
+    $("input").value = drafts[c.id] || ""; autosize(); hist.idx = -1;
+    document.body.classList.remove("drawer");
+    saveRemoteSoon(); render(true); $("input").focus();
+    toast(result.draft !== undefined ? "Markdown loaded as an unsent draft."
+      : "Conversation imported. Agents start fresh sessions with this history as context. Writing is disabled.", () => {
+      stopAll(c);
+      state.convs = state.convs.filter((x) => x !== c); delete drafts[c.id];
+      if (state.current === c.id) {
+        state.current = state.convs.some((x) => x.id === previous) ? previous : state.convs[0]?.id || null;
+        $("input").value = drafts[state.current] || ""; autosize();
+      }
+      save(); saveDrafts(); render(true);
+    });
+  } catch (err) { toast("Import failed: " + (err.message || err)); }
 }
 
 /* ---------- rendering: top bar and layout switch ---------- */
@@ -717,9 +918,16 @@ function renderBar() {
     chip.appendChild(el("span", "", p.name));
     chip.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) chip.appendChild(writeBadge());
+    const qb = quotaBadge(p.agent);
+    if (qb) { chip.appendChild(qb); chip.title += "\n" + quotaAlert(p.agent); }
     chip.onclick = () => openDialog(p);
     chips.appendChild(chip);
   });
+  let notice = $("importnotice");
+  if (!notice) { notice = el("div"); notice.id = "importnotice"; notice.setAttribute("role", "status"); $("bar").after(notice); }
+  const unavailable = c ? c.participants.filter((p) => !meta.agents.includes(p.agent)) : [];
+  notice.hidden = !unavailable.length;
+  notice.textContent = unavailable.length ? "Unavailable agents: " + unavailable.map((p) => p.name).join(", ") + ". Edit their participant settings to choose an available agent and activate them." : "";
   const add = $("addbtn");
   add.hidden = !!c && c.participants.length >= MAX_PARTICIPANTS;
   add.disabled = !c || !meta.agents.length;
@@ -802,15 +1010,16 @@ function card(c, e) {
 function paintCard(c, e) {
   const k = cardParts.get(e); if (!k) return;
   const p = c.participants.find((x) => x.name === e.from);
+  const turnAgent = e.agent || p?.agent, turnModel = e.agent ? e.model : p?.model;
   const changed = (part, key) => { const s = JSON.stringify(key); if (k.keys[part] === s) return false; k.keys[part] = s; return true; };
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [p?.agent, p?.model, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e)])) {
+  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e)])) {
     k.card.style.setProperty("--h", hueFor(c, e.from));
     k.head.textContent = "";
     k.head.append(avatar(c, e.from), el("span", "name", e.from));
-    if (p) k.head.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
+    if (turnAgent) k.head.appendChild(el("span", "badge", cap(turnAgent) + (turnModel ? " · " + cap(turnModel) : "")));
     if (p?.write) k.head.appendChild(writeBadge());
     if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
     k.head.appendChild(el("span", "grow"));
@@ -823,9 +1032,8 @@ function paintCard(c, e) {
   if (changed("status", [e.pending, e.activity || "", !!e.text])) {
     k.status.textContent = "";
     if (e.pending) {
-      const act = el("span", "act dots", e.activity || (e.text ? "writing" : "thinking"));
+      const act = el("span", "act dots", e.activity || (e.text ? "Writing" : "Thinking"));
       k.status.appendChild(act);
-      const t = el("span"); t.dataset.tick = e.t0; k.status.appendChild(t);
     }
     k.status.hidden = !e.pending;
   }
@@ -867,7 +1075,11 @@ function paintCard(c, e) {
   const [usage, detail] = usageText(e.usage);
   if (changed("foot", [e.pending, e.dur, usage, canRegen, !!e.text, e.stopped, busy(c)])) {
     k.foot.textContent = "";
-    if (!e.pending) {
+    if (e.pending) {
+      // While it thinks or writes, the footer shows how long it has been at it, where the clock time goes afterwards.
+      const t = el("span", "", Math.round((Date.now() - e.t0) / 1000) + "s"); t.dataset.tick = e.t0;
+      k.foot.appendChild(el("span", "metrics")).appendChild(t);
+    } else {
       const m = el("span", "metrics", stamp(e) + (usage ? " · " + usage : "") + (e.stopped ? " · stopped" : ""));
       if (detail) m.title = detail;
       const tools = el("span", "hovertools");
@@ -1019,17 +1231,21 @@ const SUGGESTIONS = [
 ];
 function emptyState(c) {
   const d = el("div"); d.id = "empty";
+  const importButton = el("button", "person add");
+  importButton.type = "button"; importButton.onclick = chooseImport;
+  importButton.append(icon("download"), el("span", "", "Import conversation"), el("small", "", ".json · .md"));
+  const people = el("div", "people");
   if (!meta.agents.length) {
     d.append(el("h1", "", "No agents configured"), el("p", "", "Add one with `aic config` and reload this page."));
+    people.appendChild(importButton); d.appendChild(people);
     return d;
   }
-  if (!c) return d;
+  if (!c) { people.appendChild(importButton); d.appendChild(people); return d; }
   const group = c.participants.length > 1;
   d.appendChild(el("h1", "", group ? "Talk to several agents at once" : "Start a conversation"));
   d.appendChild(el("p", "", group
     ? "Your message goes to everyone in “To:”. Once they've answered, you can ask them to comment on each other's replies."
     : "Ask anything about this repository. Add a participant (even a second Claude) to compare answers side by side."));
-  const people = el("div", "people");
   c.participants.forEach((p) => {
     const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
     b.style.setProperty("--h", hueOf(p));
@@ -1044,7 +1260,7 @@ function emptyState(c) {
   const add = el("button", "person add"); add.type = "button";
   add.append(icon("plus"), el("span", "", "Add participant"));
   add.onclick = () => openDialog(null);
-  people.appendChild(add);
+  people.append(add, importButton);
   d.appendChild(people);
   const sug = el("div", "suggest");
   SUGGESTIONS.forEach((s) => {
@@ -1063,7 +1279,7 @@ function leadingMentions(text) {
   return m ? m[1].trim().split(/\s+/).map((n) => n.slice(1)) : null;
 }
 // A disabled participant stays in the conversation (and its history) but gets nothing new.
-const active = (c) => c.participants.filter((p) => !p.inactive);
+const active = (c) => c.participants.filter((p) => !p.inactive && meta.agents.includes(p.agent));
 // "@all" stands for every participant, unless someone is really named "all".
 const expandMentions = (c, names) => names.flatMap((n) =>
   n === "all" && !c.participants.some((p) => p.name === n) ? active(c).map((p) => p.name) : [n]);
@@ -1085,9 +1301,12 @@ function renderComposer() {
       b.setAttribute("aria-pressed", String(on));
       b.appendChild(el("span", "dot"));
       b.appendChild(el("span", "", p.name));
+      const alert = quotaAlert(p.agent);
+      if (alert) { const badge = icon("alert"); badge.classList.add("quota-" + ChatQuotas.level(quotaOf(p.agent))); b.appendChild(badge); b.setAttribute("aria-label", p.name + ": " + alert); }
       const n = unseen(c, p).length;
       if (n && c.log.length) { const cnt = el("span", "count", String(n)); b.appendChild(cnt); }
       b.title = (on ? "Receives your message" : "Doesn't receive your message") + (n ? ` · ${n} new message${n > 1 ? "s" : ""} to read` : "");
+      if (alert) b.title += "\n" + alert;
       b.onclick = () => togglePill(c, p);
       to.appendChild(b);
     });
@@ -1142,6 +1361,7 @@ function syncPillsFromText(c) {
 function setTitle() { const c = cur(); document.title = c ? `${c.title} · aic chat` : "aic chat"; }
 function render(scrollEnd) {
   renderSidebar(); renderBar(); renderLog(); renderComposer(); setTitle();
+  renderQuotas();
   if (scrollEnd) toEnd();
 }
 
@@ -1154,6 +1374,11 @@ if (window.ResizeObserver) {
     const m = $("msgs");
     document.documentElement.style.setProperty("--sb", (m.offsetWidth - m.clientWidth) + "px");
   }).observe($("msgs"));
+  // How far down the footer the "To:" row starts: the footer's fade is solid from there. The input grows with its text.
+  new ResizeObserver(() => {
+    const bar = $("composer").querySelector(".toolbar");
+    if (bar) document.documentElement.style.setProperty("--solid", Math.round(bar.getBoundingClientRect().top - $("composer").getBoundingClientRect().top) + "px");
+  }).observe($("composer"));
 }
 $("msgs").addEventListener("scroll", () => { if (nearEnd()) $("jump").classList.remove("show"); });
 $("jump").onclick = toEnd;
@@ -1232,6 +1457,8 @@ function systemFor(c, p) {
 // placeholder is logged so replies from this same round stay unseen for the next one.
 function launch(c, targets, userText, to, opts = {}) {
   if (busy(c)) return;
+  targets = targets.filter((p) => !p.inactive && meta.agents.includes(p.agent));
+  if (!targets.length) { toast("Choose an available, active participant first."); return; }
   // A regenerated reply keeps its round, so it fills its own slot in that round's row.
   const round = opts.round ?? (c.round = (c.round || 0) + 1);
   c.updated = Date.now();
@@ -1248,7 +1475,7 @@ function launch(c, targets, userText, to, opts = {}) {
   });
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
-    j.entry = { from: j.p.name, round, text: "", pending: true, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}) };
+    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -1290,7 +1517,7 @@ async function turn(c, { p, text: prompt, entry }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        agent: p.agent, prompt, session_id: p.session, system: systemFor(c, p), write: !!p.write,
+        agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: !!p.write,
         model: p.model || null, effort: p.effort || null,
       }),
       signal: running.get(key).signal,
@@ -1338,6 +1565,7 @@ async function turn(c, { p, text: prompt, entry }) {
       if (view.lastUser && !busy(c)) view.lastUser._fill();
     }
     render();
+    fetchQuotaState(); // Server already refreshes only this turn's agent.
     if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
     else announce(`${p.name} finished.`);
   }
@@ -1574,6 +1802,7 @@ function updateDialog() {
     fillSelect("peffort", live?.efforts?.length ? live.efforts : EFFORTS[kind] || [], dlgEffort, d.effort);
   };
   suggest();
+  renderQuotaDialog();
   fetchModels(agent).then((live) => { if ($("pagent").value === agent) suggest(live); });
   // A new participant, or an existing one moved to another agent, starts a
   // fresh native session. Explain how its first prompt is seeded.
@@ -1662,6 +1891,7 @@ $("pform").onsubmit = (e) => {
     return dialogError(`A conversation can have at most ${MAX_PARTICIPANTS} participants.`);
   }
   const agent = $("pagent").value;
+  if (!meta.agents.includes(agent)) return dialogError("Choose an available agent.");
   const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(cap(agent)) || "agent"));
   if (!NAME_OK.test(name)) return dialogError("Use letters, digits, - and _ in the name.");
   if (c.participants.some((q) => q !== editing && q.name === name)) return dialogError(`There's already a participant called ${name}.`);
@@ -1771,6 +2001,10 @@ $("cform").onsubmit = async (e) => {
 $("new").appendChild(icon("plus"));
 $("new").setAttribute("aria-label", "New conversation");
 $("new").onclick = newConv;
+$("importfile").onchange = (e) => {
+  const file = e.target.files[0]; e.target.value = "";
+  importFile(file);
+};
 $("menu").appendChild(icon("menu"));
 $("menu").onclick = () => document.body.classList.add("drawer");
 $("scrim").onclick = () => document.body.classList.remove("drawer");
@@ -1780,12 +2014,25 @@ $("copyrepo").onclick = () => copyText(meta.repo, $("copyrepo"));
 $("addbtn").onclick = () => openDialog(null);
 $("configbtn").appendChild(icon("settings"));
 $("configbtn").onclick = openConfig;
+$("quotabtn").appendChild(icon("meter"));
+$("quotarefresh").appendChild(icon("retry"));
+$("quotaclose").appendChild(icon("close"));
+function closeQuotas() { $("quotas").hidden = true; $("quotabtn").setAttribute("aria-expanded", "false"); }
+$("quotabtn").onclick = () => {
+  const open = $("quotas").hidden; $("quotas").hidden = !open;
+  $("quotabtn").setAttribute("aria-expanded", String(open));
+  if (open) { renderQuotas(); fetchQuotaState(); }
+};
+$("quotaclose").onclick = () => { closeQuotas(); $("quotabtn").focus(); };
+$("quotarefresh").onclick = () => refreshQuotas();
+document.addEventListener("click", e => { if (!$("quotas").hidden && !$("quotas").contains(e.target) && !$("quotabtn").contains(e.target)) closeQuotas(); });
 $("search").oninput = renderSidebar;
 $("search").onkeydown = (e) => { if (e.key === "Escape" && $("search").value) { e.stopPropagation(); $("search").value = ""; renderSidebar(); } };
 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { e.preventDefault(); newConv(); return; }
   if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open || $("cdialog").open || $("ddialog").open || $("rdialog").open) return;
+  if (!$("quotas").hidden) { e.preventDefault(); closeQuotas(); $("quotabtn").focus(); return; }
   if (openMenu) { closeMenu(); return; }
   if (document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
   const c = cur();
@@ -1825,4 +2072,20 @@ document.addEventListener("keydown", (e) => {
   meta.agents.forEach((a) => { const o = el("option", "", cap(a)); o.value = a; $("pagent").appendChild(o); });
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
+  fetchQuotaState();
 })();
+
+// Poll only in-flight reads. An expired provider window gets at most two
+// automatic retries, one minute apart. A changed reset timestamp is a new
+// window; manual refresh remains available after the automatic limit.
+setInterval(() => {
+  if (quotaData.agents.some(q => q.reading)) fetchQuotaState();
+  const now = Date.now();
+  quotaData.agents.forEach(q => {
+    if (!q.refreshable || q.reading) return;
+    let attempts = quotaExpiryAttempts.get(q.agent);
+    if (!attempts) { attempts = new Map(); quotaExpiryAttempts.set(q.agent, attempts); }
+    if (ChatQuotas.shouldRetryExpired(q, attempts, now)) refreshQuotas(q.agent, true);
+  });
+}, 1000);
+setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);

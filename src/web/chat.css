@@ -58,6 +58,7 @@ svg.i { width: 16px; height: 16px; display: block; flex: none; fill: none; strok
 /* ---------- sidebar ---------- */
 aside { width: 350px; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex: none; }
 aside > header { padding: 12px; display: grid; grid-template-columns: 1fr auto; gap: 14px 8px; align-items: center; }
+#importnotice { padding: 8px 16px; color: var(--muted); }
 .brand { font-weight: 700; display: flex; align-items: center; gap: 8px; }
 .brand img { border-radius: 5px; }
 #new { padding: 5px 8px; display: inline-flex; align-items: center; }
@@ -93,11 +94,48 @@ aside > header { padding: 12px; display: grid; grid-template-columns: 1fr auto; 
 
 /* ---------- top bar ---------- */
 main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
-#bar { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#bar { padding: 8px 16px; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; position: relative; }
 #menu { display: none; }
 #chips { display: contents; }
 #configbtn { margin-left: auto; padding: 6px; }
 #configbtn svg.i { width: 22px; height: 22px; }
+#quotabtn { position: relative; padding: 6px; }
+#quotabtn svg.i { width: 22px; height: 22px; }
+#quotabtn[data-level]::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; }
+#quotabtn[data-level="warn"]::after { background: var(--warn); }
+#quotabtn[data-level="out"]::after { background: var(--err); }
+#quotas { position: absolute; right: 12px; top: calc(100% + 4px); z-index: 20; width: min(400px, calc(100vw - 24px));
+  max-height: 70vh; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 12px; box-shadow: var(--shadow); }
+#quotas[hidden] { display: none; }
+#quotas > header { display: flex; align-items: center; gap: 6px; }
+.quota { padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; min-height: 100px; }
+.quota .head { display: flex; gap: 6px; align-items: center; }
+.quota .head .val { margin-left: auto; color: var(--muted); text-align: right; }
+.quota .sub { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.quota-reading { min-height: 30px; margin: 3px 0; }
+.meter { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; margin: 4px 0 2px; }
+.meter > i { display: block; height: 100%; width: var(--pct); background: var(--muted); }
+.quota.warn .val, .quota-window.warn { color: var(--warn); }
+.quota.out .val, .quota-window.out { color: var(--err); }
+.quota.out .val { font-weight: 600; }
+.quota.warn > .quota-reading .meter > i, .quota-window.warn .meter > i { background: var(--warn); }
+.quota.out > .quota-reading .meter > i, .quota-window.out .meter > i { background: var(--err); }
+.quota.stale .meter { opacity: .5; }
+.quota-error { color: var(--err); }
+.quota-retry { padding: 0 4px; margin-left: 4px; font-size: 12px; }
+.quota-details { padding: 6px 8px; margin-top: 6px; border-left: 2px solid var(--line); }
+.quota-window + .quota-window { margin-top: 8px; }
+.quota-source { margin-top: 8px; }
+.quota-source.old, .quota-age.old { font-style: italic; }
+.badge.quota-warn, .pill .quota-warn { color: var(--warn); }
+.badge.quota-warn { background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.badge.quota-out, .pill .quota-out { color: var(--err); }
+.badge.quota-out { border-color: color-mix(in srgb, var(--err) 40%, var(--line)); }
+.spinning svg { animation: quota-spin 1s linear infinite; }
+@keyframes quota-spin { to { transform: rotate(360deg); } }
+@media (max-width: 700px) { #quotas { left: 8px; right: 8px; width: auto; } }
+@media (prefers-reduced-motion: reduce) { .spinning svg, #quotas .dots, #quotas .dots::before, #quotas .dots::after { animation: none; } }
 .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px 3px 4px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
 .chip .avatar { width: 20px; height: 20px; font-size: 11px; }
@@ -109,7 +147,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 
 /* ---------- messages ---------- */
 #view { flex: 1; min-height: 0; position: relative; display: flex; }
-#msgs { flex: 1; overflow-y: auto; padding: 16px; scroll-behavior: auto; }
+#msgs { flex: 1; overflow-y: auto; padding: 16px 16px calc(var(--solid, 110px) + 16px); scroll-behavior: auto; } /* bottom: room to scroll clear of the footer's fade */
 #layout { position: absolute; top: 8px; right: 20px; z-index: 3; display: flex; gap: 2px; background: var(--bg);
   border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
 #layout:empty { display: none; }
@@ -211,8 +249,15 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 /* ---------- composer ---------- */
 /* Lined up with the messages: same 16px edges, and room for #msgs's scrollbar (--sb, measured in JS) on the right,
    so both are centred in the same area and the input starts and ends where the replies do. */
-#composer { max-width: calc(1132px + var(--sb, 0px)); width: 100%; margin: 0 auto; padding: 8px calc(16px + var(--sb, 0px)) 10px 16px; position: relative; }
-#jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% + 8px); display: none; box-shadow: var(--shadow);
+/* The footer fades in over the bottom of the messages: fully transparent at its top, solid by the height of the
+   "To:" row (--solid, measured in JS), so the fade runs alongside the whole input. It spans the whole width so the fade
+   has no visible box; the padding keeps the input in the same centred column as the replies (16px edges, plus room for
+   #msgs's scrollbar, --sb, measured in JS). --lead is the bit of footer above the input. */
+#composer { --lead: 32px; --side: max(16px, calc((100% - 1132px - var(--sb, 0px)) / 2 + 16px));
+  width: 100%; margin-top: calc(-1 * var(--solid, 110px)); padding: calc(8px + var(--lead)) calc(var(--side) + var(--sb, 0px)) 10px var(--side); position: relative;
+  background: linear-gradient(to bottom, transparent, var(--bg) var(--solid, 110px)); pointer-events: none; }
+#composer > * { pointer-events: auto; }
+#jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(100% - var(--lead) + 8px); display: none; box-shadow: var(--shadow);
   background: var(--accent); color: var(--on-accent); border-color: transparent; border-radius: 999px; padding: 5px 14px 5px 10px; z-index: 4;
   align-items: center; gap: 4px; }
 #jump.show { display: inline-flex; }
@@ -234,7 +279,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 .send svg.i { width: 18px; height: 18px; }
 .hint { color: var(--muted); font-size: 12px; text-align: center; margin-top: 6px; min-height: 18px; }
 .hint.warn { color: var(--warn); }
-#ac { position: absolute; left: 16px; bottom: calc(100% - 8px); min-width: 260px; max-width: min(560px, calc(100% - 32px)); max-height: 50vh; overflow-y: auto;
+#ac { position: absolute; left: var(--side); bottom: calc(100% - var(--lead) - 8px); min-width: 260px; max-width: min(560px, calc(100% - 32px)); max-height: 50vh; overflow-y: auto;
   background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 4px; box-shadow: var(--shadow); display: none; z-index: 5; }
 #ac.open { display: block; }
 #ac .opt { padding: 6px 10px; border-radius: 6px; cursor: pointer; display: flex; gap: 10px; align-items: baseline; }
@@ -316,8 +361,8 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
   #msgs:not(.cols) .row { display: block; }
   #msgs:not(.cols) .row > * + * { margin-top: 12px; }
   .user { max-width: 92%; }
-  #msgs { padding: 12px; }
-  #composer { padding: 6px calc(8px + var(--sb, 0px)) 8px 8px; }
+  #msgs { padding: 12px 12px calc(var(--solid, 110px) + 12px); }
+  #composer { --side: 8px; padding-top: calc(6px + var(--lead)); padding-bottom: 8px; }
   .hint { display: none; }
   .grid2 { grid-template-columns: 1fr; }
 }

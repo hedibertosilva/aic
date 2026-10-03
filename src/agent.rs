@@ -252,6 +252,29 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
         self.binary_stem() == "codex"
     }
 
+    /// Non-generating CLI query. Use the same credentials and container as
+    /// turns, but keep the repository read-only and stdin available for RPC.
+    pub fn spawn_query(&self, args: &[&str], cwd: &std::path::Path) -> Result<AgentProcess> {
+        static QUERIES: AtomicU64 = AtomicU64::new(0);
+        let container = self.sandbox.as_ref().map(|_| {
+            format!("aic-query-{}-{}", std::process::id(), QUERIES.fetch_add(1, Ordering::Relaxed))
+        });
+        let mut cmd = match &self.sandbox {
+            Some(sandbox) => sandbox.command(&RunSpec {
+                repo_root: cwd.to_path_buf(),
+                git_dir: git::git_common_dir(cwd).ok(),
+                workdir: cwd.to_path_buf(), access: Access::ReadOnly,
+                interactive: false, agent: self.binary_stem().to_string(),
+                args: args.iter().map(|a| a.to_string()).collect(), name: container.clone(),
+            })?,
+            None => { let mut cmd = Command::new(&self.binary); cmd.args(args).current_dir(cwd); cmd }
+        };
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).process_group(0);
+        let child = cmd.spawn().with_context(|| self.spawn_error())?;
+        let killer = Killer { pgid: child.id(), container: self.sandbox.clone().zip(container) };
+        Ok(AgentProcess { child, killer })
+    }
+
     pub fn run(&self, opts: &RunOpts) -> Result<AgentRunResult> {
         let mut cmd = self.build_command(opts, None)?;
 
@@ -332,7 +355,13 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
             cmd.arg(prompt);
             return;
         }
-        cmd.arg("-p").arg(&opts.prompt);
+        // A prompt starting with '-' would be parsed as an option by the CLI.
+        let prompt = if opts.prompt.starts_with('-') {
+            format!("\n{}", opts.prompt)
+        } else {
+            opts.prompt.clone()
+        };
+        cmd.arg("-p").arg(prompt);
         cmd.arg("--output-format")
             .arg(if opts.stream { "stream-json" } else { "json" });
         if opts.stream && self.binary_stem() != "agy" {
