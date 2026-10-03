@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const Q = require('../src/web/chat-quotas.js');
+const Q = require('../src/chat/web/chat-quotas.js');
 const quota = (...windows) => ({ state: 'available', windows });
 test('alerts use inclusive thresholds and select the most critical window', () => {
   assert.equal(Q.level(quota({ used_pct: 79.9 })), 'normal');
@@ -55,4 +55,23 @@ test('expired windows stop after two automatic retries and reset with a new wind
   status.windows[0].resets_at = '2026-10-03T18:00:00Z';
   assert.equal(Q.shouldRetryExpired(status, attempts, now + 120000), false);
   assert.equal(attempts.size, 0);
+});
+// agy shares one window per model group; this is its real /usage shape.
+const agy = quota(
+  { id: 'gemini-weekly', label: 'Weekly', bucket: 'Gemini Models', models: ['Gemini Flash', 'Gemini Pro'], used_pct: 100, window_minutes: 10080 },
+  { id: '3p-weekly', label: 'Weekly', bucket: 'Claude and GPT models', models: ['Claude Opus', 'Claude Sonnet', 'GPT-OSS'], used_pct: 0, window_minutes: 10080 });
+test('an exhausted model group only limits the models in it', () => {
+  assert.equal(Q.level(Q.scoped(agy, 'gemini-3-pro-preview')), 'out');
+  assert.equal(Q.level(Q.scoped(agy, 'gemini-3-flash')), 'out');
+  assert.equal(Q.level(Q.scoped(agy, 'claude-opus-4-5-thinking')), 'normal');
+  assert.equal(Q.level(Q.scoped(agy, 'gpt-oss-120b')), 'normal');
+  assert.equal(Q.scoped(agy, 'claude-opus-4-5').windows.length, 1);
+});
+test('a model no group claims keeps every window, and the group is named when exhausted', () => {
+  assert.equal(Q.scoped(agy, 'mystery-model'), agy);
+  assert.equal(Q.scoped(agy, ''), agy);
+  assert.equal(Q.level(Q.scoped(agy, 'mystery-model')), 'out');
+  assert.equal(Q.summary(agy), 'Exhausted · Gemini Models');
+  const codex = quota({ used_pct: 50 });
+  assert.equal(Q.scoped(codex, 'gpt-5'), codex);
 });

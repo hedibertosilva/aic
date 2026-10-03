@@ -32,9 +32,18 @@ if(process.argv.includes('app-server')){
 }else if(process.argv.includes('debug'))send({models:[]});
 else{const turns=path.join(root,'turns');const n=(fs.existsSync(turns)?Number(fs.readFileSync(turns)):0)+1;fs.writeFileSync(turns,String(n));send({type:'thread.started',thread_id:'native-session'});send({type:'item.completed',item:{type:'agent_message',text:'Fixture reply'}});send({type:'turn.completed',usage:{input_tokens:100*n,cached_input_tokens:40*n,output_tokens:10*n}});}
 `, { mode: 0o755 });
-  fs.writeFileSync(claude, `#!${process.execPath}\nprocess.stderr.write('fixture process failed after start\\n');process.exit(1);\n`, { mode: 0o755 });
+  // /usage is answered with captures of the real CLIs; any other call fails after starting.
+  const usageReport={rate_limits:{limits:[{kind:'session',percent:0,resets_at:'2026-10-03T23:30:00+00:00',severity:'normal'},{kind:'weekly_all',percent:8,resets_at:'2026-10-09T03:00:00+00:00',severity:'normal'}]}};
+  fs.writeFileSync(claude, `#!${process.execPath}
+const fs=require('fs');
+if(process.argv.includes('/usage')){fs.appendFileSync(__dirname+'/claude-args',process.argv.slice(2).join(' ')+'\\n');console.log(JSON.stringify({type:'system',subtype:'init'}));console.log(JSON.stringify({type:'assistant',usage_report:${JSON.stringify(usageReport)}}));process.exit(0);}
+process.stderr.write('fixture process failed after start\\n');process.exit(1);
+`, { mode: 0o755 });
+  const agyData={groups:[{name:'Gemini Models',description:'Models within this group: Gemini Flash, Gemini Pro',buckets:[{id:'gemini-weekly',window:'weekly',remaining_fraction:0,reset_time:'2026-10-08T00:35:13Z'}]},{name:'Claude and GPT models',description:'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',buckets:[{id:'3p-weekly',window:'weekly',remaining_fraction:1,reset_time:'2026-10-10T18:37:32Z'}]}]};
+  const agy = path.join(root, 'agy');
+  fs.writeFileSync(agy, `#!${process.execPath}\nconsole.log(JSON.stringify({status:'SUCCESS',command:{name:'usage',data:${JSON.stringify(agyData)}}}));\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(root,'quota.json'), JSON.stringify({pct:34}));
-  fs.writeFileSync(path.join(config,'config.toml'), `sandbox="none"\nexecutor="codex"\n[agents.codex]\nbinary=${JSON.stringify(cli)}\n[agents.claude]\nbinary=${JSON.stringify(claude)}\n[agents.gemini]\nbinary="/missing-test/agy"\n`);
+  fs.writeFileSync(path.join(config,'config.toml'), `sandbox="none"\nexecutor="codex"\n[agents.codex]\nbinary=${JSON.stringify(cli)}\n[agents.claude]\nbinary=${JSON.stringify(claude)}\n[agents.gemini]\nbinary=${JSON.stringify(agy)}\n`);
   const listener=net.createServer(); await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
   const port=listener.address().port; await new Promise(resolve=>listener.close(resolve));
   const base=`http://127.0.0.1:${port}`; let server;
@@ -59,8 +68,13 @@ if(require.main===module) test('quota cache and durable conversation counters wo
     assert.deepEqual(initial.agents.map(q=>q.agent),['claude','codex','gemini']);
     const codex=initial.agents.find(q=>q.agent==='codex');
     assert.equal(codex.windows[0].used_pct,34);
-    assert.equal(initial.agents[0].reason,'No quota reading yet');
-    assert.deepEqual(initial.agents[2].windows,[]);
+    const claudeQuota=initial.agents[0];
+    assert.equal(claudeQuota.state,'available');
+    assert.deepEqual(claudeQuota.windows.map(w=>[w.label,w.used_pct]),[['5-hour',0],['Weekly',8]]);
+    assert.ok(fs.readFileSync(path.join(f.root,'claude-args'),'utf8').includes('--no-session-persistence'),'/usage must not persist a session');
+    const agyQuota=initial.agents[2];
+    assert.deepEqual(agyQuota.windows.map(w=>[w.bucket,w.used_pct]),[['Gemini Models',100],['Claude and GPT models',0]]);
+    assert.deepEqual(agyQuota.windows[0].models,['Gemini Flash','Gemini Pro']);
     await f.snapshot();assert.equal(fs.readFileSync(path.join(f.root,'reads'),'utf8').trim().split('\n').length,1);
     const turn=await f.request('/api/chat',{agent:'codex',conversation_id:'conversation',prompt:'hello'});
     const events=(await turn.text()).trim().split('\n').filter(Boolean).map(JSON.parse);

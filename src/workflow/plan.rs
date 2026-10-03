@@ -45,13 +45,13 @@ pub fn new(repo_root: &Path, slug: &str, title: Option<String>, no_open: bool) -
     }
 
     let config = Config::load_merged(repo_root)?;
-    let binary = config.agent(&config.executor)?.binary.clone();
+    let binary = config.agent(&config.workflow.executor)?.binary.clone();
     let prompt = format!(
         "Let's discuss the plan in {}. Read it, then interview me to fill in its sections.",
         plan_path.display()
     );
     let sandbox = Sandbox::from_config(&config)?;
-    super::dev::exec_interactive(&binary, &prompt, &config.permission_mode, repo_root, sandbox.as_ref())
+    super::dev::exec_interactive(&binary, &prompt, &config.permissions.mode, repo_root, sandbox.as_ref())
 }
 
 #[derive(Default)]
@@ -68,7 +68,7 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
 
     let plan_path = {
         let feature = state.feature(slug).with_context(|| {
-            format!("no feature '{slug}' found; run `aic plan new {slug}` first")
+            format!("no feature '{slug}' found; run `aic workflow plan new {slug}` first")
         })?;
         repo_root.join(&feature.plan.path)
     };
@@ -76,10 +76,10 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
         bail!("plan file {} is missing", plan_path.display());
     }
 
-    let reviewer_name = overrides.reviewer.unwrap_or_else(|| config.reviewer.clone());
-    let executor_name = overrides.executor.unwrap_or_else(|| config.executor.clone());
-    let mode = overrides.mode.unwrap_or(config.mode);
-    let max_rounds = overrides.max_rounds.unwrap_or(config.max_rounds);
+    let reviewer_name = overrides.reviewer.unwrap_or_else(|| config.workflow.reviewer.clone());
+    let executor_name = overrides.executor.unwrap_or_else(|| config.workflow.executor.clone());
+    let mode = overrides.mode.unwrap_or(config.workflow.mode);
+    let max_rounds = overrides.max_rounds.unwrap_or(config.workflow.max_rounds);
 
     let reviewer_cfg = config.agent(&reviewer_name)?;
     let reviewer = CliAgent::with_defaults(
@@ -114,7 +114,7 @@ pub fn review(repo_root: &Path, slug: &str, overrides: ReviewOverrides) -> Resul
         &executor,
         mode,
         max_rounds,
-        config.skip_permissions,
+        config.permissions.skip,
         existing_rounds,
         repo_root,
         |content| review_prompt(&slug_owned, content),

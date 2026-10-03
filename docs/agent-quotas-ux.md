@@ -7,15 +7,18 @@ fica fora da v1. Descoberta técnica: [agent-quotas-spike.md](agent-quotas-spike
 ## Entregas
 
 1. **Fase 1:** consumo por conversa/agente no SQLite, agente gravado por
-   turno, parser Codex corrigido, cota Codex, cache em memória no servidor,
-   painel, badges e nota no seletor.
-2. **Fase 2:** evento de cota Claude e cartão de falha classificado, após
-   leitura autenticada, ordem dos eventos e falha real serem validadas.
-3. **Fase 3:** cota agy headless somente se a validação mostrar viabilidade.
+   turno, parser Codex corrigido, cota de Codex, Claude (`/usage`) e agy
+   (`/usage`, por grupo de modelos), cache em memória no servidor, painel,
+   badges e nota no seletor. Claude e agy entraram na fase 1 depois que o
+   `/usage` de ambos foi validado (ver o spike).
+2. **Fase 2:** cartão de falha classificado (cota × rate limit), após a ordem
+   dos eventos e uma falha real de limite serem capturadas.
+3. **Fase 3:** *(absorvida na fase 1 para o agy.)*
 
-Claude e agy usam estados explícitos e consumo observado na fase 1.
-O suporte a representações de eventos Claude no modelo de apresentação
-não significa que o adapter esteja habilitado.
+Um agente cuja leitura falhe, ou cuja conta não tenha janelas, usa os estados
+explícitos e o consumo observado. No agy, o painel e os alertas usam as janelas
+do grupo que governa o modelo do participante; modelo não reconhecido mantém
+todas as janelas.
 
 ## Pontos de acesso
 
@@ -49,7 +52,7 @@ pode ser apresentada como cotas independentes por participante/modelo.
 | Normal | `34% · 5h` e reset | Barra neutra |
 | ≥80% | `⚠ Near limit 86% · wk` | Barra/badge com `--warn` |
 | ≥100% | `Exhausted` e reset | Barra/badge com `--err` |
-| Sem leitura Claude | `No quota reading yet` | Sem barra; explica que a integração está planejada para a fase 2 |
+| Antes da primeira leitura | `No quota reading yet` | Sem barra; some assim que a leitura termina |
 | Indisponível | `Quota not available` e motivo | Sem barra nem trilho |
 | Primeira leitura | `Checking…` | Indicador por agente |
 | Aviso sem percentual | `Near limit (reported by provider)` | Sem número nem barra |

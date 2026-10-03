@@ -26,14 +26,14 @@ pub fn run(repo_root: &Path, slug_arg: Option<String>) -> Result<()> {
             return Ok(());
         }
         if explicit {
-            bail!("no feature '{slug}' found; run `aic plan new {slug}` first");
+            bail!("no feature '{slug}' found; run `aic workflow plan new {slug}` first");
         }
         // Inferred from the branch name, not found: fall through to
         // listing everything rather than erroring on a best-effort guess.
     }
 
     if state.features.is_empty() {
-        println!("No features tracked yet. Run `aic plan new <slug>` to start one.");
+        println!("No features tracked yet. Run `aic workflow plan new <slug>` to start one.");
         return Ok(());
     }
 

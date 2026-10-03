@@ -14,11 +14,11 @@ pub fn build(config: &Config, tag: Option<String>, claude_version: Option<String
     let Some(sandbox) = Sandbox::from_config(config)? else {
         bail!("sandbox is set to \"none\"; set sandbox = \"docker\" or \"podman\" to build an image");
     };
-    let tag = tag.unwrap_or_else(|| config.sandbox_image.clone());
+    let tag = tag.unwrap_or_else(|| config.sandbox.image.clone());
 
     let tmp = tempfile::tempdir().context("creating build context")?;
     let context = tmp.path().to_path_buf();
-    let (agy, codex) = if config.sandbox_bind_agents {
+    let (agy, codex) = if config.sandbox.bind_agents {
         println!("Host agy/Codex binaries will be bound at run time; omitting them from the image.");
         (None, None)
     } else {
@@ -27,7 +27,7 @@ pub fn build(config: &Config, tag: Option<String>, claude_version: Option<String
     if let Some(agy) = &agy {
         std::fs::copy(agy, context.join("agy"))
             .with_context(|| format!("copying {} into the build context", agy.display()))?;
-    } else if !config.sandbox_bind_agents {
+    } else if !config.sandbox.bind_agents {
         eprintln!("warning: 'agy' not found on PATH; the image will not contain agy");
     }
     if let Some(codex) = &codex {
@@ -41,7 +41,7 @@ pub fn build(config: &Config, tag: Option<String>, claude_version: Option<String
             .with_context(|| format!("copying {} into the build context", codex.display()))?;
         std::fs::copy(&helper, context.join("codex-code-mode-host"))
             .with_context(|| format!("copying {} into the build context", helper.display()))?;
-    } else if !config.sandbox_bind_agents {
+    } else if !config.sandbox.bind_agents {
         eprintln!("warning: 'codex' not found on PATH; the image will not contain codex");
     }
     std::fs::write(context.join("Dockerfile"), templates::sandbox_dockerfile(agy.is_some(), codex.is_some()))?;
@@ -59,8 +59,8 @@ pub fn build(config: &Config, tag: Option<String>, claude_version: Option<String
     }
 
     println!("Built sandbox image '{tag}'.");
-    if tag != config.sandbox_image {
-        println!("Set sandbox_image = \"{tag}\" in your config to use it.");
+    if tag != config.sandbox.image {
+        println!("Set sandbox.image = \"{tag}\" in your config to use it.");
     }
     Ok(())
 }

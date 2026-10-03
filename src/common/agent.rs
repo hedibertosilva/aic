@@ -252,6 +252,10 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
         self.binary_stem() == "codex"
     }
 
+    pub fn is_claude(&self) -> bool {
+        self.binary_stem() == "claude"
+    }
+
     /// Non-generating CLI query. Use the same credentials and container as
     /// turns, but keep the repository read-only and stdin available for RPC.
     pub fn spawn_query(&self, args: &[&str], cwd: &std::path::Path) -> Result<AgentProcess> {

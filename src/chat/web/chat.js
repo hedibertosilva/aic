@@ -230,19 +230,21 @@ function writeBadge() {
 }
 
 /* ---------- quota cache and presentation ---------- */
-const quotaOf = (agent) => quotaData.agents.find(q => q.agent === agent);
-function quotaAlert(agent) {
-  const q = quotaOf(agent), level = ChatQuotas.level(q);
+// With a model, only the windows that govern it (agy groups quota by model).
+const quotaOf = (agent, model) => { const q = quotaData.agents.find(q => q.agent === agent); return q && model ? ChatQuotas.scoped(q, model) : q; };
+const quotaModel = (agent, model) => model || meta.details?.[agent]?.model || "";
+function quotaAlert(agent, model) {
+  const q = quotaOf(agent, model), level = ChatQuotas.level(q);
   if (level === "normal") return "";
   const w = ChatQuotas.critical(q);
   return `${cap(agent)} ${level === "out" ? "quota exhausted" : "near usage limit"} · ${ChatQuotas.resetText(w)} · ${ChatQuotas.updated(q)}`;
 }
-function quotaBadge(agent) {
-  const q = quotaOf(agent), level = ChatQuotas.level(q);
+function quotaBadge(agent, model) {
+  const q = quotaOf(agent, model), level = ChatQuotas.level(q);
   if (level === "normal") return null;
   const w = ChatQuotas.critical(q);
   const b = el("span", "badge quota-" + level, level === "out" ? "Exhausted" : ChatQuotas.percent(w.used_pct) || "Near limit");
-  b.title = quotaAlert(agent); b.setAttribute("aria-label", b.title);
+  b.title = quotaAlert(agent, model); b.setAttribute("aria-label", b.title);
   return b;
 }
 function quotaMeter(w, name) {
@@ -303,7 +305,7 @@ async function refreshQuotas(agent, silent = false) {
   finally { quotaRefreshPending = false; renderQuotas(); }
 }
 function renderQuotaDialog() {
-  const agent = $("pagent").value, q = quotaOf(agent), note = $("pquota");
+  const agent = $("pagent").value, q = quotaOf(agent, quotaModel(agent, $("pmodel").value)), note = $("pquota");
   if (!agent) { note.textContent = ""; return; }
   const level = ChatQuotas.level(q), w = ChatQuotas.critical(q);
   note.className = "note" + (level === "out" ? " err" : level === "warn" ? " warn" : "");
@@ -371,7 +373,8 @@ function renderQuotas() {
     if (q.state === "read_error" && q.attempted_at) provenance.appendChild(el("div", "", "Couldn't refresh at " + new Date(q.attempted_at).toLocaleString()));
     details.appendChild(provenance); row.appendChild(details); rows.appendChild(row);
     for (const option of $("pagent").options) if (option.value === agent) {
-      const level = ChatQuotas.level(q); option.textContent = cap(agent) + (level === "out" ? " — exhausted" : level === "warn" ? " — " + (ChatQuotas.percent(w?.used_pct) || "near limit") : "");
+      const qd = quotaOf(agent, quotaModel(agent, "")), wd = ChatQuotas.critical(qd), level = ChatQuotas.level(qd);
+      option.textContent = cap(agent) + (level === "out" ? " — exhausted" : level === "warn" ? " — " + (ChatQuotas.percent(wd?.used_pct) || "near limit") : "");
     }
   });
   $("quotaunknown").hidden = !c?.log.some(e => e.from !== "you" && !e.agent);
@@ -918,8 +921,8 @@ function renderBar() {
     chip.appendChild(el("span", "", p.name));
     chip.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) chip.appendChild(writeBadge());
-    const qb = quotaBadge(p.agent);
-    if (qb) { chip.appendChild(qb); chip.title += "\n" + quotaAlert(p.agent); }
+    const qb = quotaBadge(p.agent, quotaModel(p.agent, p.model));
+    if (qb) { chip.appendChild(qb); chip.title += "\n" + quotaAlert(p.agent, quotaModel(p.agent, p.model)); }
     chip.onclick = () => openDialog(p);
     chips.appendChild(chip);
   });
@@ -1301,8 +1304,8 @@ function renderComposer() {
       b.setAttribute("aria-pressed", String(on));
       b.appendChild(el("span", "dot"));
       b.appendChild(el("span", "", p.name));
-      const alert = quotaAlert(p.agent);
-      if (alert) { const badge = icon("alert"); badge.classList.add("quota-" + ChatQuotas.level(quotaOf(p.agent))); b.appendChild(badge); b.setAttribute("aria-label", p.name + ": " + alert); }
+      const pm = quotaModel(p.agent, p.model), alert = quotaAlert(p.agent, pm);
+      if (alert) { const badge = icon("alert"); badge.classList.add("quota-" + ChatQuotas.level(quotaOf(p.agent, pm))); b.appendChild(badge); b.setAttribute("aria-label", p.name + ": " + alert); }
       const n = unseen(c, p).length;
       if (n && c.log.length) { const cnt = el("span", "count", String(n)); b.appendChild(cnt); }
       b.title = (on ? "Receives your message" : "Doesn't receive your message") + (n ? ` · ${n} new message${n > 1 ? "s" : ""} to read` : "");
@@ -1831,7 +1834,7 @@ function updateDialog() {
   });
 }
 function dialogError(msg) { $("perror").textContent = msg; $("perror").hidden = false; }
-$("pmodel").onchange = () => { dlgModel = $("pmodel").value; };
+$("pmodel").onchange = () => { dlgModel = $("pmodel").value; renderQuotaDialog(); }; // the limit that applies depends on the model
 $("peffort").onchange = () => { dlgEffort = $("peffort").value; };
 $("pagent").onchange = () => { dlgModel = ""; dlgEffort = ""; updateDialog(); }; // each agent has its own models
 document.querySelectorAll('input[name="paccess"]').forEach((r) => { r.onchange = updateDialog; });
@@ -1943,12 +1946,8 @@ async function openConfig() {
     const res = await fetch("/api/config");
     if (!res.ok) throw new Error(await res.text());
     const config = await res.json();
-    setOptions("cexecutor", config.agents, config.executor);
-    setOptions("creviewer", config.agents, config.reviewer);
-    $("cmode").value = config.mode;
-    $("cmaxrounds").value = config.max_rounds;
+    setOptions("cdefault", config.agents, config.default_agent);
     $("cpermission").value = config.permission_mode;
-    $("cbasebranch").value = config.default_base_branch || "";
     $("cskippermissions").checked = !!config.skip_permissions;
     $("csandbox").value = config.sandbox;
     $("csandboximage").value = config.sandbox_image;
@@ -1967,12 +1966,8 @@ $("cform").onsubmit = async (e) => {
   const error = $("cerror"), saveBtn = $("csave");
   error.hidden = true; saveBtn.disabled = true;
   const payload = {
-    executor: $("cexecutor").value,
-    reviewer: $("creviewer").value,
-    mode: $("cmode").value,
-    max_rounds: Number($("cmaxrounds").value),
+    default_agent: $("cdefault").value,
     permission_mode: $("cpermission").value,
-    default_base_branch: $("cbasebranch").value.trim(),
     skip_permissions: $("cskippermissions").checked,
     sandbox: $("csandbox").value,
     sandbox_image: $("csandboximage").value.trim(),
@@ -1983,7 +1978,7 @@ $("cform").onsubmit = async (e) => {
     });
     if (!res.ok) throw new Error(await res.text());
     const config = await res.json();
-    meta.default = config.executor;
+    meta.default = config.default_agent;
     meta.agents = config.agents;
     meta.sandboxed = config.sandbox !== "none";
     $("cdialog").close();

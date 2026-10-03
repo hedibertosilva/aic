@@ -119,7 +119,7 @@ pub fn run_review_loop(
                 format!(
                     "reviewer '{}' succeeded but returned no structured output (empty response \
 usually means a tool call was silently denied in headless mode — set \
-`skip_permissions = true` in config if you trust this agent to run unattended, or check \
+`permissions.skip = true` in config if you trust this agent to run unattended, or check \
 `aic config show`)",
                     reviewer.name()
                 )

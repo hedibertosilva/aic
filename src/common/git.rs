@@ -388,7 +388,7 @@ mod filter_tests {
     fn filters_defaults_generated_and_config_excludes() {
         let dir = setup();
         let mut config = Config::default();
-        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        config.workflow.git_diff_exclude_patterns = vec!["skip.txt".into()];
         let args = vec!["--staged".to_string()];
 
         let diff = filtered_diff(dir.path(), &config, &args, false).unwrap();
@@ -405,8 +405,8 @@ mod filter_tests {
     fn include_patterns_win_over_every_exclusion() {
         let dir = setup();
         let mut config = Config::default();
-        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
-        config.git_diff_include_patterns = vec!["Cargo.lock".into(), "gen/**".into(), "skip.txt".into()];
+        config.workflow.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        config.workflow.git_diff_include_patterns = vec!["Cargo.lock".into(), "gen/**".into(), "skip.txt".into()];
         let diff = filtered_diff(dir.path(), &config, &["--staged".to_string()], false).unwrap();
         assert!(diff.contains("Cargo.lock"));
         assert!(diff.contains("gen/out.txt"));

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use crate::chat::Usage;
+use super::store::Usage;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Total {

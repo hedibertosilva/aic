@@ -42,7 +42,7 @@ pub fn execute(repo_root: &Path, slug: &str, overrides: ExecuteOverrides) -> Res
 
     let plan_path = {
         let feature = state.feature(slug).with_context(|| {
-            format!("no feature '{slug}' found; run `aic plan new {slug}` first")
+            format!("no feature '{slug}' found; run `aic workflow plan new {slug}` first")
         })?;
         repo_root.join(&feature.plan.path)
     };
@@ -50,14 +50,14 @@ pub fn execute(repo_root: &Path, slug: &str, overrides: ExecuteOverrides) -> Res
         bail!("plan file {} is missing", plan_path.display());
     }
 
-    let executor_name = overrides.executor.unwrap_or_else(|| config.executor.clone());
+    let executor_name = overrides.executor.unwrap_or_else(|| config.workflow.executor.clone());
     let executor_cfg = config.agent(&executor_name)?;
     let executor_binary = executor_cfg.binary.clone();
     let executor_model = executor_cfg.model.clone();
     let executor_effort = executor_cfg.effort.clone();
     let permission_mode = overrides
         .permission_mode
-        .unwrap_or_else(|| config.permission_mode.clone());
+        .unwrap_or_else(|| config.permissions.mode.clone());
     let mode = overrides.mode.unwrap_or(ExecuteModeArg::Interactive);
 
     let start_sha = git::head_sha(repo_root)?;
@@ -85,7 +85,7 @@ explain why.",
             let result = agent.run(&RunOpts {
                 prompt,
                 permission: Some(permission_mode),
-                skip_permissions: config.skip_permissions,
+                skip_permissions: config.permissions.skip,
                 cwd: Some(repo_root.to_path_buf()),
                 ..Default::default()
             })?;
@@ -218,10 +218,10 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
         return Ok(());
     }
 
-    let reviewer_name = overrides.reviewer.unwrap_or_else(|| config.reviewer.clone());
-    let executor_name = overrides.executor.unwrap_or_else(|| config.executor.clone());
-    let mode = overrides.mode.unwrap_or(config.mode);
-    let max_rounds = overrides.max_rounds.unwrap_or(config.max_rounds);
+    let reviewer_name = overrides.reviewer.unwrap_or_else(|| config.workflow.reviewer.clone());
+    let executor_name = overrides.executor.unwrap_or_else(|| config.workflow.executor.clone());
+    let mode = overrides.mode.unwrap_or(config.workflow.mode);
+    let max_rounds = overrides.max_rounds.unwrap_or(config.workflow.max_rounds);
 
     let reviewer_cfg = config.agent(&reviewer_name)?;
     let reviewer = CliAgent::with_defaults(
@@ -263,7 +263,7 @@ pub fn review(repo_root: &Path, slug: Option<&str>, overrides: ReviewOverrides) 
         &executor,
         mode,
         max_rounds,
-        config.skip_permissions,
+        config.permissions.skip,
         existing_rounds,
         repo_root,
         |content| review_prompt(&target_desc_owned, content),
@@ -352,7 +352,7 @@ fn resolve_diff(
                 ));
             }
             let start = start_sha
-                .context("no start sha recorded for this feature; run `aic dev execute` first, or pass --range")?;
+                .context("no start sha recorded for this feature; run `aic workflow dev execute` first, or pass --range")?;
             Ok((
                 format!("commits since {start}"),
                 vec![format!("{start}..HEAD")],
@@ -360,7 +360,7 @@ fn resolve_diff(
             ))
         }
         TargetArg::Branch => {
-            let branch = git::default_branch(repo_root, Some(&config.default_base_branch))?;
+            let branch = git::default_branch(repo_root, Some(&config.workflow.default_base_branch))?;
             let anchor = git::merge_base(repo_root, &branch)?;
             Ok((
                 format!("diff against {branch}"),

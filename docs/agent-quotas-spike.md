@@ -34,8 +34,8 @@ o lançamento do container a partir do host.
 | Agente | Origem de cota | Validação no sandbox | Custo e latência | Erro de limite e decisão para v1 |
 | --- | --- | --- | --- | --- |
 | Codex | `codex app-server` por stdio, método `account/rateLimits/read`; percentuais, duração e reset em `primary`/`secondary` | **Consulta autenticada confirmada**: retornou janelas de 300 e 10080 minutos | Uma leitura levou **2304 ms**, incluindo inicialização. Não iniciou thread/turno de geração; cobrança específica da consulta não foi medida | `exec --json` tem `turn.failed` e `error`; preservar mensagem estruturada. **R1 habilitável** para contas que retornem janelas; R2 caso não retornem |
-| Claude | Stream `rate_limit_event`; status line documenta `rate_limits.five_hour`/`seven_day` | Binário funciona; `claude auth status` confirmou falta de login. Leitura autenticada **não validada** | Aproveitar evento de um turno já em andamento não inicia outra geração. Consulta independente e sua latência **não validadas** | Evento tem status `rejected` e reset opcional. **R1 parcial/passivo**, apenas com dados efetivamente recebidos; antes disso, R2 |
-| gemini / agy | `/usage` (`/quota`) na TUI; status line fornece objeto `quota` por modelo/bucket | `/usage` em JSON e `/quota` em stream-json retornaram erro de autenticação, em **1290/1195 ms**. Saída de cota headless autenticada **não validada** | TUI consulta backend; leitura via status line é passiva. Não há medição de latência/cobrança da consulta autenticada | `result.status=ERROR`, `result.error`; também investigar `AGY_ERROR` em stderr. **R2 na v1 inicial**, sem concluir que o fornecedor não expõe cota |
+| Claude | `claude -p "/usage"`: o evento `assistant` do `stream-json` traz `usage_report.rate_limits.limits[]` (`kind`, `percent` usado 0-100, `resets_at` RFC 3339, `severity`). O `rate_limit_event` do turno continua útil para a fase 2 | **Validado no host em 2026-10-03** (2.1.287, logado): janelas `session` (5h) e `weekly_all`. Não validado dentro do sandbox | **1,5 s** (`json`) e 3 s (`stream-json`); 0 tokens e US$ 0, sem chamada ao modelo. Sem `--no-session-persistence`, o `/usage` grava uma sessão em `~/.claude/projects` | Contrato não documentado oficialmente (só observado na 2.1.287, a versão fixada). `scope` veio `null`; janelas por modelo não foram observadas. **R1 na fase 1** |
+| gemini / agy | `agy --print "/usage" --output-format json` (ou `/quota` em `stream-json`): `command.data.groups[].buckets[]` com `window`, `remaining_fraction` e `reset_time` | **Validado no host por Hediberto em 2026-10-03** (1.2.16): JSON e `stream-json` (evento `command_result`). Não validado dentro do sandbox | `duration_seconds: 0` e 0 tokens; latência de parede não medida. Sem login, a consulta cai em OAuth e expira (60 s) | Cota **por grupo de modelos**, não por agente: no teste, `Gemini Models` estava em 100% e `Claude and GPT models` em 0%. O texto de `response` mostra o percentual *restante*, não o usado. Falha real de limite ainda não capturada. **R1 na fase 1** |
 
 Os tempos da matriz são amostras únicas, não benchmarks. Uma segunda
 consulta Codex, usando o probe salvo, levou **3495 ms** e também retornou
@@ -123,7 +123,7 @@ teste Rust atual é uma fixture, não evidência de execução nesta investigaç
 
 O `Usage` atual é reaproveitável, mas não cobre sozinho a iniciativa:
 
-- `src/chat.rs::parse_codex` descarta `turn.completed.usage` e só lê
+- `src/chat/store.rs::parse_codex` descarta `turn.completed.usage` e só lê
   `turn.failed.error` como string. Deve aceitar também `error.message`
   e preservar o erro terminal; um `error` intermediário pode ser retry.
 - `Usage::from_result` só reconhece o nome Claude para cache. agy usa
@@ -138,7 +138,7 @@ O `Usage` atual é reaproveitável, mas não cobre sozinho a iniciativa:
   14172 tokens de entrada, 12288 em cache e 5 de saída; após `exec resume`,
   o segundo informou 28368, 24576 e 10. A implementação deve, portanto,
   manter baseline por sessão e contabilizar apenas o delta do segundo turno.
-- `src/web/chat.js::launch` salva `from`, mas não o agente/modelo do turno.
+- `src/chat/web/chat.js::launch` salva `from`, mas não o agente/modelo do turno.
   Registrar esses valores na entrada ao iniciar a execução; troca de agente,
   renomeação e remoção de participante não podem reatribuir gastos antigos.
   Entradas antigas sem essa informação ficam como consumo de origem desconhecida.
@@ -211,14 +211,41 @@ pode bloquear o turno nem apresentar uma cota antiga como atual.
    sessão, além da semântica de cache/tokens.
 5. No host, executar os probes pelo caminho `Sandbox::run_args`, com os
    mounts reais: Claude recebe estado e credenciais, Codex recebe `.codex`,
-   agy recebe `.gemini`. Credenciais somente em keyring podem exigir outro
+   agy recebe um `.gemini` próprio do aic (login separado, em arquivo; o do host fica no keyring). Credenciais somente em keyring podem exigir outro
    mecanismo; o bind atual não prova que esse caso funciona.
 
 O spike entregou a matriz, probe Codex e decisões técnicas. A fase 1 foi
 implementada posteriormente: adapter Codex, cache do servidor, contadores
 SQLite e interface. O escopo consolidado está em
-[agent-quotas-ux.md](agent-quotas-ux.md). Claude e agy continuam pendentes
-da validação autenticada descrita acima.
+[agent-quotas-ux.md](agent-quotas-ux.md).
+
+## Atualização: leitura de Claude e agy via `/usage` (2026-10-03)
+
+Os dois CLIs expõem o `/usage` em modo não interativo, com JSON estruturado,
+sem gerar tokens. Isso substitui a leitura passiva por `rate_limit_event` como
+caminho principal e move os dois para a fase 1, no mesmo modelo do Codex:
+leitura sob demanda e cache no servidor. Implementado em `src/chat/quotas.rs`
+(`read_claude`, `read_agy`), com as capturas reais como fixtures.
+
+- **Claude:** `claude -p /usage --no-session-persistence --output-format stream-json --verbose`.
+  Lido de `usage_report.rate_limits.limits[]`. Verificado de ponta a ponta pelo
+  `aic chat` com o Claude real (7% sessão, 8% semana, nenhuma sessão gravada).
+- **agy:** `agy --print /usage --output-format json`, lido de
+  `command.data.groups[].buckets[]`; `used_pct = 100 × (1 − remaining_fraction)`.
+  Cada janela leva a lista de modelos do grupo (`models`), extraída de
+  `Models within this group: …`. O chat escolhe as janelas do modelo do
+  participante (todas as palavras do item do grupo presentes no id do modelo,
+  p. ex. `Gemini Pro` ↔ `gemini-3-pro-preview`). **Modelo que nenhum grupo
+  reconhece mantém todas as janelas**: nunca esconder um limite por falha de
+  nome. O painel por agente mostra o grupo mais crítico, nomeado.
+- O `reset_time` de um bucket sem uso se desloca entre leituras (18:37:32 →
+  18:37:43): janela deslizante. Uma mudança de `resets_at` não prova reset.
+- **Ainda não validado:** execução dentro do sandbox (credenciais montadas),
+  agy autenticado pelo aic (a leitura do agy foi só contra fixture; o JSON
+  real foi capturado pelo usuário no host), janelas por modelo do Claude
+  (`scope`), valores de `severity` diferentes de `normal`, e a falha real de
+  limite (R5/fase 2). O agy com o grupo Gemini esgotado é a oportunidade
+  de capturar essa falha sem custo.
 
 ## Alinhamento técnico com a proposta de UX da Vera
 

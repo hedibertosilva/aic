@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const importer = require('../src/web/chat-import.js');
+const importer = require('../src/chat/web/chat-import.js');
 const source = {
   id: 'old', title: 'A conversation', round: 2, sendTo: ['Dev'],
   participants: [{ name: 'Dev', agent: 'codex', model: 'model', role: 'Developer\nwith context', effort: 'high',
@@ -76,7 +76,7 @@ function harness(failKey) {
     cur: () => null, defaultAgent: () => '', autosize() {}, saveRemoteSoon() {}, render() {}, stopAll() {}, save() {}, saveDrafts() {},
     toast: (message, callback) => { context.message = message; undo = callback; },
   });
-  const code = fs.readFileSync(require.resolve('../src/web/chat.js'), 'utf8');
+  const code = fs.readFileSync(require.resolve('../src/chat/web/chat.js'), 'utf8');
   vm.runInContext(code.slice(code.indexOf('async function importFile'), code.indexOf('/* ---------- rendering: top bar')), context);
   return { context, cache, initial, undo: () => undo() };
 }

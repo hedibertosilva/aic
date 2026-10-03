@@ -16,6 +16,19 @@ const ChatQuotas = (() => {
     return [...(q?.windows || [])].sort((a,b) => rank[windowLevel(b)] - rank[windowLevel(a)] || (b.used_pct ?? -1) - (a.used_pct ?? -1))[0];
   }
   const level = (q) => critical(q) ? windowLevel(critical(q)) : "normal";
+  // Some providers (agy) share a window per model group. A group entry such as
+  // "Gemini Pro" applies to a model id when all its words appear in the id.
+  const words = (s) => String(s || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  function appliesTo(w, model) {
+    const have = new Set(words(model));
+    return !w.models?.length || w.models.some(m => { const t = words(m); return t.length && t.every(x => have.has(x)); });
+  }
+  // Windows that govern one model. A model no group claims can't be told apart,
+  // so every window stays: never hide a limit because a name didn't match.
+  function scoped(q, model) {
+    const claimed = (q?.windows || []).some(w => w.models?.length && appliesTo(w, model));
+    return model && claimed ? { ...q, windows: q.windows.filter(w => appliesTo(w, model)) } : q;
+  }
   function resetText(w, now = Date.now()) {
     const reset = time(w?.resets_at);
     if (!Number.isFinite(reset)) return "reset time unknown";
@@ -39,7 +52,7 @@ const ChatQuotas = (() => {
     const w = critical(q), l = level(q);
     if (q?.state === "read_error") return "Couldn't read quota";
     if (!w) return q?.reading ? "Checking…" : q?.reason === "No quota reading yet" ? "No quota reading yet" : "Quota not available";
-    if (l === "out") return "Exhausted";
+    if (l === "out") return "Exhausted" + (w.bucket ? " · " + w.bucket : "");
     if (l === "warn" && !numeric(w.used_pct)) return "⚠ Near limit (reported by provider)";
     if (!numeric(w.used_pct)) return "Quota not available";
     return `${l === "warn" ? "⚠ Near limit " : ""}${percent(w.used_pct)} · ${windowLabel(w)}${w.model ? " · " + w.model : ""}`;
@@ -74,6 +87,6 @@ const ChatQuotas = (() => {
     });
     return true;
   }
-  return { numeric, percent, windowLabel, windowLevel, critical, level, resetText, updated, summary, consumptionText, stale, expired, shouldRetryExpired };
+  return { numeric, percent, windowLabel, windowLevel, critical, level, scoped, resetText, updated, summary, consumptionText, stale, expired, shouldRetryExpired };
 })();
 if (typeof module !== "undefined") module.exports = ChatQuotas;

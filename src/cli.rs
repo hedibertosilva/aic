@@ -1,21 +1,109 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::error::ErrorKind;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 use crate::config::Mode;
 
 #[derive(Parser)]
 #[command(
     name = "aic",
-    about = "Orchestrates Claude Code and Gemini (Antigravity CLI) for planning and dev review"
+    about = "Local web chat for Claude Code, Gemini (Antigravity CLI) and Codex, plus a plan/dev review workflow. Without a subcommand, starts the chat."
 )]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
+
+impl Cli {
+    /// Like `Cli::parse()`, except that a missing positional argument or
+    /// subcommand prints the help of the command being run instead of just
+    /// an error, so the user sees what to pass.
+    pub fn parse_args() -> Self {
+        let mut root = Cli::command();
+        root.build();
+        let err = match root.try_get_matches_from_mut(std::env::args_os()) {
+            Ok(matches) => return Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit()),
+            Err(err) => err,
+        };
+        if !matches!(
+            err.kind(),
+            ErrorKind::MissingRequiredArgument
+                | ErrorKind::MissingSubcommand
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        ) {
+            err.exit();
+        }
+        // The deepest subcommand named on the command line (skipping flags).
+        let mut current = &mut root;
+        for arg in std::env::args().skip(1).filter(|a| !a.starts_with('-')) {
+            if current.find_subcommand(&arg).is_some() {
+                current = current.find_subcommand_mut(&arg).expect("checked above");
+            }
+        }
+        let _ = current.write_help(&mut std::io::stderr());
+        std::process::exit(2);
+    }
+}
+
+/// Defaults of `aic chat`, also used when no subcommand is given.
+pub const DEFAULT_CHAT_HOST: &str = "127.0.0.1";
+pub const DEFAULT_CHAT_PORT: u16 = 7878;
 
 #[derive(Subcommand)]
 pub enum Commands {
     /// Set up `.aic/` in this repo and the global config, if missing.
     Init,
+    /// Run a local web chat that talks to the configured agents (the default).
+    ///
+    /// Runs `aic init` first, so `.aic/` and the config exist.
+    Chat {
+        /// Address to listen on. Anything but loopback exposes your agents
+        /// (and their mounted credentials) to the network.
+        #[arg(long, default_value = DEFAULT_CHAT_HOST)]
+        host: String,
+        #[arg(long, default_value_t = DEFAULT_CHAT_PORT)]
+        port: u16,
+    },
+    /// Plan, execute and review a feature with two agents.
+    #[command(visible_alias = "wf")]
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
+    /// List the configured agents, check their quota and log them in.
+    #[command(alias = "agents")]
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
+    /// Manage the container sandbox agents run in.
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommands,
+    },
+    /// View or edit aic's configuration (defaults for every other command).
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommands>,
+    },
+    /// Alias of `aic workflow plan`.
+    #[command(hide = true)]
+    Plan {
+        #[command(subcommand)]
+        command: PlanCommands,
+    },
+    /// Alias of `aic workflow dev`.
+    #[command(hide = true)]
+    Dev {
+        #[command(subcommand)]
+        command: DevCommands,
+    },
+    /// Alias of `aic workflow status`.
+    #[command(hide = true)]
+    Status { slug: Option<String> },
+}
+
+#[derive(Subcommand)]
+pub enum WorkflowCommands {
     /// Manage planning proposals (the `.md` discussed before building anything).
     Plan {
         #[command(subcommand)]
@@ -32,25 +120,6 @@ pub enum Commands {
         /// if that doesn't match a tracked feature either, lists all of
         /// them instead of erroring.
         slug: Option<String>,
-    },
-    /// Run a local web chat that talks to the configured agents.
-    Chat {
-        /// Address to listen on. Anything but loopback exposes your agents
-        /// to the network.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        #[arg(long, default_value_t = 7878)]
-        port: u16,
-    },
-    /// Manage the container sandbox agents run in.
-    Sandbox {
-        #[command(subcommand)]
-        command: SandboxCommands,
-    },
-    /// View or edit aic's configuration (defaults for every other command).
-    Config {
-        #[command(subcommand)]
-        command: Option<ConfigCommands>,
     },
 }
 
@@ -69,7 +138,7 @@ pub enum PlanCommands {
     },
     /// Ask the reviewer agent to review PLAN.md.
     Review {
-        /// Feature slug (must already exist — run `aic plan new` first).
+        /// Feature slug (must already exist — run `aic workflow plan new` first).
         slug: String,
         /// Agent that reviews the plan. Must be a key under [agents] in the
         /// config. Defaults to the configured `reviewer` (normally gemini).
@@ -118,12 +187,12 @@ pub enum DevCommands {
     },
     /// Ask the reviewer agent to review a diff (staged, recent commits, or against the base branch).
     ///
-    /// With a <SLUG> that names a tracked feature (from `aic plan new`),
+    /// With a <SLUG> that names a tracked feature (from `aic workflow plan new`),
     /// rounds are recorded in that feature's history and saved under
-    /// .aic/dev/<slug>/reviews/CODE-RN.md, same as `aic plan review`. If
+    /// .aic/dev/<slug>/reviews/CODE-RN.md, same as `aic workflow plan review`. If
     /// <SLUG> is omitted (or doesn't match a tracked feature — e.g. you're
     /// on `main`), this is an ad-hoc review instead: not tied to any
-    /// feature, not recorded in state.json or `aic status`, saved under
+    /// feature, not recorded in state.json or `aic workflow status`, saved under
     /// .aic/adhoc/reviews/<timestamp>-RN.md. Use a tracked slug when
     /// following the plan -> execute -> review flow for a feature; leave it
     /// off for a one-off "review whatever's staged right now".
@@ -177,13 +246,43 @@ pub enum SandboxCommands {
     ///
     /// Also the upgrade path: the image's agent versions win over the
     /// host's inside the sandbox, so rebuild to pick up newer ones. With
-    /// sandbox_bind_agents enabled, agy/Codex use host binaries instead.
+    /// [sandbox] bind_agents enabled, agy/Codex use host binaries instead.
     Build {
-        /// Image tag to build. Defaults to the configured `sandbox_image`.
+        /// Image tag to build. Defaults to the configured `[sandbox] image`.
         tag: Option<String>,
         /// Version of @anthropic-ai/claude-code to install in the image.
         #[arg(long = "claude-version")]
         claude_version: Option<String>,
+    },
+    /// Alias of `aic agent login`.
+    #[command(hide = true)]
+    Login { agent: String },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommands {
+    /// List the configured agents (binary, model, effort, default roles).
+    List,
+    /// Read the account quota of each agent (or one) through its CLI.
+    ///
+    /// Takes a few seconds per agent. A failure usually means the agent isn't
+    /// logged in: see `aic agent login`.
+    Status {
+        /// An agent from the config ([agents] key). Defaults to all of them.
+        agent: Option<String>,
+    },
+    /// Open an agent's own CLI so you can log in (once; the login persists).
+    ///
+    /// Always the vendor's CLI, so it's clear you're signing in to it and
+    /// not to aic. `gemini` (the `agy` binary) opens inside the sandbox: it
+    /// keeps the host login in the keyring, which the container can't reach,
+    /// so the sandbox has its own under ~/.local/share/aic/sandbox/agy (host
+    /// network, so the OAuth callback works). `claude` and `codex` open on
+    /// the host, because the sandbox reuses the host's login files.
+    Login {
+        /// An agent from the config ([agents] key) or binary: gemini (agy),
+        /// claude or codex.
+        agent: String,
     },
 }
 
@@ -191,12 +290,14 @@ pub enum SandboxCommands {
 pub enum ConfigCommands {
     /// Print the effective configuration (global + repo override).
     Show,
-    /// Set a single top-level key in the global config.
+    /// Set a single key in the global config, as `section.key`.
     ///
-    /// Keys: executor, reviewer, mode (manual|auto), max_rounds,
-    /// permission_mode (acceptEdits|plan), default_base_branch,
-    /// skip_permissions (true|false), sandbox (docker|podman|none),
-    /// sandbox_image, sandbox_bind_agents (true|false).
+    /// Keys: workflow.executor, workflow.reviewer, workflow.mode
+    /// (manual|auto), workflow.max_rounds, workflow.default_base_branch,
+    /// permissions.mode (acceptEdits|plan), permissions.skip (true|false),
+    /// sandbox.runtime (docker|podman|none), sandbox.image,
+    /// sandbox.bind_agents (true|false), chat.default_agent. The old flat
+    /// names (mode, sandbox_image, ...) still work.
     Set {
         /// Config key to set (see above for the full list).
         key: String,

@@ -140,16 +140,13 @@
   <form id="cform" method="dialog">
     <h2 id="ctitle">Configuration</h2>
     <div class="grid2">
-      <label>Executor <select id="cexecutor"></select></label>
-      <label>Reviewer <select id="creviewer"></select></label>
-      <label>Review mode <select id="cmode"><option value="manual">Manual</option><option value="auto">Auto</option></select></label>
-      <label>Maximum rounds <input type="number" id="cmaxrounds" min="1" step="1" required></label>
+      <label>Default participant <select id="cdefault"></select></label>
       <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
-      <label>Base branch <input type="text" id="cbasebranch" placeholder="Auto-detect" autocomplete="off" spellcheck="false"></label>
       <label>Sandbox <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
       <label>Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
     </div>
     <label class="check"><input type="checkbox" id="cskippermissions"> Automatically approve tool permissions in headless runs</label>
+    <p class="note">Plan and review settings (executor, reviewer, rounds, base branch) belong to <code>aic workflow</code>: edit them with <code>aic config</code>.</p>
     <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
     <p class="note warn" id="cwarn" hidden></p>
     <p class="note err" id="cerror" hidden></p>

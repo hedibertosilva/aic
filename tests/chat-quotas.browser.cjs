@@ -19,8 +19,9 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     await page.locator('#quotabtn').click();
     await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes('34%'));
     assert.equal(await page.locator('#quotarows > .quota').count(), 3);
-    assert.match(await page.locator('#quotas').innerText(), /No quota reading yet/);
-    assert.match(await page.locator('#quotas').innerText(), /Quota not available/);
+    // Claude's and agy's /usage are read too; agy's Gemini group is exhausted in the fixture.
+    await page.waitForFunction(() => /8% · wk/.test(document.querySelector('#quotarows').textContent));
+    assert.match(await page.locator('#quotas').innerText(), /Exhausted · Gemini Models/);
     await page.getByRole('button', { name: 'Details for Codex', exact: true }).click();
     assert.match(await page.locator('#quotas').innerText(), /Source: Codex app-server/);
     const reads = fs.readFileSync(path.join(f.root, 'reads'), 'utf8');
@@ -46,7 +47,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     assert.match(await page.locator('#quotas').innerText(), /cost n\/a/);
     await page.keyboard.press('Escape');
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('gemini');
-    assert.match(await page.locator('#pquota').innerText(), /Quota not available/);
+    assert.match(await page.locator('#pquota').innerText(), /Gemini is out of quota/);
     await page.locator('#psave').click();
     assert.equal(await page.locator('.card header .badge').first().innerText(), 'Codex');
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('codex');
@@ -76,7 +77,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ fail: true }));
     await page.locator('#quotarefresh').click();
     await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes("Couldn't read quota"));
-    assert.equal(await page.locator('#quotarows .meter').first().getAttribute('aria-valuenow'), '100');
+    assert.equal(await page.locator('#quotarows > .quota').filter({ hasText: 'Codex' }).locator('.meter').first().getAttribute('aria-valuenow'), '100');
     assert.match(await page.locator('#quotas').innerText(), /Retry/);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await f.close(); }

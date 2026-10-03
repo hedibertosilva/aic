@@ -14,17 +14,17 @@ use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::agent::{AgentProcess, CliAgent, RunOpts};
-use crate::chat::{self, ChatEvent};
+use crate::chat::store::{self as chat, ChatEvent};
 use crate::{consumption, quotas};
 use crate::config::{Config, SandboxKind};
 use crate::sandbox::Sandbox;
 
-const INDEX_HTML: &str = include_str!("../web/chat.html");
-const CHAT_CSS: &str = include_str!("../web/chat.css");
-const CHAT_JS: &str = include_str!("../web/chat.js");
-const CHAT_IMPORT_JS: &str = include_str!("../web/chat-import.js");
-const CHAT_QUOTAS_JS: &str = include_str!("../web/chat-quotas.js");
-const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
+const INDEX_HTML: &str = include_str!("web/chat.html");
+const CHAT_CSS: &str = include_str!("web/chat.css");
+const CHAT_JS: &str = include_str!("web/chat.js");
+const CHAT_IMPORT_JS: &str = include_str!("web/chat-import.js");
+const CHAT_QUOTAS_JS: &str = include_str!("web/chat-quotas.js");
+const FAVICON_SVG: &str = include_str!("web/favicon.svg");
 
 /// Cap on the request body, so a stray client can't make us buffer forever.
 const MAX_BODY: u64 = 1 << 20;
@@ -89,16 +89,14 @@ struct ChatRequest {
     effort: Option<String>,
 }
 
-/// The same top-level settings exposed by `aic config`. They are saved to the
-/// global config; a repository override can still take precedence at runtime.
+/// The settings the chat dialog edits (`[chat]`, `[permissions]` and
+/// `[sandbox]`; the workflow ones live in `aic config`). They are saved to
+/// the global config; a repository override can still take precedence at
+/// runtime.
 #[derive(Deserialize)]
 struct SettingsRequest {
-    executor: String,
-    reviewer: String,
-    mode: crate::config::Mode,
-    max_rounds: u32,
+    default_agent: String,
     permission_mode: String,
-    default_base_branch: String,
     skip_permissions: bool,
     sandbox: SandboxKind,
     sandbox_image: String,
@@ -123,7 +121,7 @@ pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
         eprintln!(
             "warning: listening on {host}: anyone who can reach this port can run your agents \
              (skip_permissions = {}).",
-            current_config(&app).skip_permissions
+            current_config(&app).permissions.skip
         );
     }
 
@@ -212,15 +210,11 @@ fn config_json(config: &Config) -> serde_json::Value {
     let mut agents: Vec<&String> = config.agents.keys().collect();
     agents.sort();
     serde_json::json!({
-        "executor": config.executor,
-        "reviewer": config.reviewer,
-        "mode": config.mode,
-        "max_rounds": config.max_rounds,
-        "permission_mode": config.permission_mode,
-        "default_base_branch": config.default_base_branch,
-        "skip_permissions": config.skip_permissions,
-        "sandbox": config.sandbox,
-        "sandbox_image": config.sandbox_image,
+        "default_agent": config.chat_default_agent(),
+        "permission_mode": config.permissions.mode,
+        "skip_permissions": config.permissions.skip,
+        "sandbox": config.sandbox.runtime,
+        "sandbox_image": config.sandbox.image,
         "agents": agents,
     })
 }
@@ -277,9 +271,9 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             let body = serde_json::json!({
                 "agents": names,
                 "details": details,
-                "default": config.executor,
+                "default": config.chat_default_agent(),
                 "repo": app.repo_root.display().to_string(),
-                "sandboxed": config.sandbox != SandboxKind::None,
+                "sandboxed": config.sandbox.runtime != SandboxKind::None,
             });
             respond_text(request, 200, "application/json", body.to_string())
         }
@@ -403,7 +397,7 @@ fn query_value(url: &str, key: &str) -> Option<String> {
 }
 
 fn quota_signature(config: &Config, name: &str) -> String {
-    format!("{}:{:?}:{}", config.agents[name].binary, config.sandbox, config.sandbox_image)
+    format!("{}:{:?}:{}", config.agents[name].binary, config.sandbox.runtime, config.sandbox.image)
 }
 
 /// Snapshot returns immediately; first reads run independently in worker threads.
@@ -446,7 +440,7 @@ fn refresh_quota(app: &Arc<App>, name: &str) {
     }
     let (app, name) = (Arc::clone(app), name.to_string());
     thread::spawn(move || {
-        let result = build_agent(&app, &name).and_then(|agent| quotas::read_codex(&agent, &app.repo_root));
+        let result = build_agent(&app, &name).and_then(|agent| quotas::read(&agent, &app.repo_root));
         let mut cache = app.quotas.lock().expect("quota cache poisoned");
         let Some(entry) = cache.get_mut(&name).filter(|entry| entry.signature == signature) else { return };
         match result {
@@ -454,7 +448,7 @@ fn refresh_quota(app: &Arc<App>, name: &str) {
             Err(_) => {
                 entry.status.state = "read_error".into(); entry.status.reading = false;
                 // Keep prior windows and fetched_at. No raw stderr/account secrets in the UI.
-                entry.status.error = Some("Couldn't read quota. Check the Codex CLI login and sandbox, then retry.".into());
+                entry.status.error = Some(format!("Couldn't read quota. Check the {name} CLI login and sandbox, then retry."));
             }
         }
     });
@@ -509,9 +503,6 @@ fn run_listing(binary: &str, args: &[&str]) -> Option<String> {
 }
 
 fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()> {
-    if req.max_rounds == 0 {
-        return respond_text(request, 400, "text/plain", "max_rounds must be at least 1");
-    }
     if !matches!(req.permission_mode.as_str(), "acceptEdits" | "plan") {
         return respond_text(request, 400, "text/plain", "permission_mode must be acceptEdits or plan");
     }
@@ -521,18 +512,14 @@ fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()
 
     let mut global = Config::load_global()?;
     let available = current_config(app);
-    if !available.agents.contains_key(&req.executor) || !available.agents.contains_key(&req.reviewer) {
-        return respond_text(request, 400, "text/plain", "executor and reviewer must name configured agents");
+    if !available.agents.contains_key(&req.default_agent) {
+        return respond_text(request, 400, "text/plain", "default_agent must name a configured agent");
     }
-    global.executor = req.executor;
-    global.reviewer = req.reviewer;
-    global.mode = req.mode;
-    global.max_rounds = req.max_rounds;
-    global.permission_mode = req.permission_mode;
-    global.default_base_branch = req.default_base_branch;
-    global.skip_permissions = req.skip_permissions;
-    global.sandbox = req.sandbox;
-    global.sandbox_image = req.sandbox_image;
+    global.chat.default_agent = req.default_agent;
+    global.permissions.mode = req.permission_mode;
+    global.permissions.skip = req.skip_permissions;
+    global.sandbox.runtime = req.sandbox;
+    global.sandbox.image = req.sandbox_image;
     global.save_global()?;
 
     let effective = Config::load_merged(&app.repo_root)?;
@@ -556,7 +543,7 @@ struct Skill {
 /// mount it). Repo skills win on a name clash.
 fn list_skills(app: &App) -> Vec<Skill> {
     let mut dirs = vec![app.repo_root.join(".claude").join("skills")];
-    if current_config(app).sandbox == SandboxKind::None {
+    if current_config(app).sandbox.runtime == SandboxKind::None {
         if let Ok(home) = std::env::var("HOME") {
             dirs.push(PathBuf::from(home).join(".claude").join("skills"));
         }
@@ -685,7 +672,7 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
         Err(err) => return respond_text(request, 400, "text/plain", format!("{err:#}")),
     };
     let config = current_config(app);
-    let sandboxed = config.sandbox != SandboxKind::None;
+    let sandboxed = config.sandbox.runtime != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
     let mut native_session = resume.clone();
     let was_resumed = resume.is_some();
@@ -729,9 +716,9 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
         // A read-only participant can still read: the sandbox's read-only
         // mount makes skipping prompts safe. Without a sandbox, fall back to
         // plan mode (no edits) and keep prompts on.
-        skip_permissions: config.skip_permissions && (req.write || sandboxed),
+        skip_permissions: config.permissions.skip && (req.write || sandboxed),
         permission: if req.write {
-            Some(config.permission_mode.clone())
+            Some(config.permissions.mode.clone())
         } else if sandboxed {
             None
         } else {
@@ -908,8 +895,9 @@ done
 "#,count.display(),fail.display());
         std::fs::write(&binary,script).unwrap();
         std::fs::set_permissions(&binary,std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut config = Config::default(); config.sandbox = SandboxKind::None;
+        let mut config = Config::default(); config.sandbox.runtime = SandboxKind::None;
         config.agents.get_mut("codex").unwrap().binary = binary.to_string_lossy().into_owned();
+        for other in ["claude", "agy"] { if let Some(agent) = config.agents.get_mut(other) { agent.binary = "/missing-test/".to_string() + other; } }
         let app = Arc::new(App { repo_root:dir.path().to_path_buf(), config:RwLock::new(config),
             chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None,
             models:Mutex::default(),quotas:Mutex::default() });

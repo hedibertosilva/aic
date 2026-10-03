@@ -2,7 +2,7 @@
 //!
 //! Every `claude`/`agy` run can be wrapped as `<runtime> run … <image>
 //! <binary> <args>` so an agent running unattended can only touch the
-//! mounted repo (plus any `sandbox_mounts`), not the rest of `$HOME`. The
+//! mounted repo (plus any `[sandbox] mounts`), not the rest of `$HOME`. The
 //! threat model is *accidental* destructive commands: the network stays open
 //! and agent credentials are mounted in, so this is not a confidentiality
 //! boundary.
@@ -107,9 +107,9 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// `None` when the config says `sandbox = "none"`.
+    /// `None` when the config says `[sandbox] runtime = "none"`.
     pub fn from_config(config: &Config) -> Result<Option<Sandbox>> {
-        if config.sandbox == SandboxKind::None {
+        if config.sandbox.runtime == SandboxKind::None {
             return Ok(None);
         }
         let host_home = PathBuf::from(std::env::var("HOME").context("HOME environment variable is not set")?);
@@ -122,17 +122,17 @@ impl Sandbox {
         let meta = std::fs::metadata(&host_home)
             .with_context(|| format!("reading {}", host_home.display()))?;
         Ok(Some(Sandbox {
-            kind: config.sandbox,
-            image: config.sandbox_image.clone(),
-            mounts: config.sandbox_mounts.clone(),
-            env: config.sandbox_env.clone(),
+            kind: config.sandbox.runtime,
+            image: config.sandbox.image.clone(),
+            mounts: config.sandbox.mounts.clone(),
+            env: config.sandbox.env.clone(),
             host_home,
             data_dir,
             uid: meta.uid(),
             gid: meta.gid(),
             aic_binary: std::env::current_exe().ok().filter(|p| p.is_file()),
             config_dir: Config::global_dir().ok().filter(|p| p.is_dir()),
-            bound_binaries: config.sandbox_bind_agents.then(host_agent_binaries),
+            bound_binaries: config.sandbox.bind_agents.then(host_agent_binaries),
         }))
     }
 
@@ -157,13 +157,13 @@ impl Sandbox {
             .status();
         match status {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
-                "sandbox runtime '{rt}' not found on PATH; install it or set sandbox = \"none\"",
+                "sandbox runtime '{rt}' not found on PATH; install it or set [sandbox] runtime = \"none\"",
                 rt = self.runtime()
             ),
             Err(err) => Err(err).with_context(|| format!("running '{} image inspect'", self.runtime())),
             Ok(status) if status.success() => Ok(()),
             Ok(_) => bail!(
-                "sandbox image '{img}' not found; run 'aic sandbox build' or set sandbox = \"none\"",
+                "sandbox image '{img}' not found; run 'aic sandbox build' or set [sandbox] runtime = \"none\"",
                 img = self.image
             ),
         }
@@ -173,10 +173,12 @@ impl Sandbox {
     /// doesn't create them root-owned.
     fn prepare(&self, agent: &str) -> Result<()> {
         self.validate_bound_agent(agent)?;
-        if agent == "claude" {
-            let dir = self.claude_state_dir();
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
+        let dir = match agent {
+            "claude" => self.claude_state_dir(),
+            "agy" => self.agy_state_dir(),
+            _ => return Ok(()),
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         Ok(())
     }
 
@@ -190,7 +192,7 @@ impl Sandbox {
             for name in required {
                 if !binaries.iter().any(|(binary, _)| binary == *name) {
                     bail!(
-                        "sandbox_bind_agents is enabled but host binary '{name}' was not found; install it on PATH (the Codex helper may also be beside codex) or disable sandbox_bind_agents and rebuild the image"
+                        "[sandbox] bind_agents is enabled but host binary '{name}' was not found; install it on PATH (the Codex helper may also be beside codex) or disable bind_agents and rebuild the image"
                     );
                 }
             }
@@ -202,6 +204,10 @@ impl Sandbox {
         self.data_dir.join("claude")
     }
 
+    fn agy_state_dir(&self) -> PathBuf {
+        self.data_dir.join("agy")
+    }
+
     /// Builds the full `<runtime> run …` command for `spec`, creating any
     /// needed host state dirs first.
     pub fn command(&self, spec: &RunSpec) -> Result<Command> {
@@ -211,10 +217,28 @@ impl Sandbox {
         Ok(cmd)
     }
 
+    /// Interactive `agy` for `aic agent login`: same mounts as a normal
+    /// run, plus the host network so the browser can reach the OAuth
+    /// callback listener the CLI opens.
+    pub fn login_command(&self, repo_root: &Path, agent: &str) -> Result<Command> {
+        self.prepare(agent)?;
+        let mut cmd = Command::new(self.runtime());
+        cmd.args(self.build_run_args(&login_spec(repo_root, agent), true));
+        Ok(cmd)
+    }
+
     /// The argument list after `<runtime>`. Pure, so it can be unit-tested
     /// without a container.
     pub fn run_args(&self, spec: &RunSpec) -> Vec<String> {
+        self.build_run_args(spec, false)
+    }
+
+    fn build_run_args(&self, spec: &RunSpec, host_network: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
+        if host_network {
+            args.push("--network".into());
+            args.push("host".into());
+        }
         if spec.interactive {
             args.push("-it".into());
         } else {
@@ -305,7 +329,10 @@ impl Sandbox {
     /// Agent login state. `claude` gets a container-owned state dir (it
     /// writes sessions/history there, so a plain RO bind of `~/.claude`
     /// would break it) with only the credentials file bound in from the
-    /// host, writable so token refreshes persist. `agy` gets `~/.gemini`.
+    /// host, writable so token refreshes persist. `agy` keeps its login in
+    /// the host keyring (D-Bus Secret Service), which the container can't
+    /// reach, so it gets a container-owned `~/.gemini` with its own login
+    /// (file storage) instead of the host's `~/.gemini`.
     fn push_credential_mounts(&self, args: &mut Vec<String>, agent: &str) {
         match agent {
             "claude" => {
@@ -325,11 +352,8 @@ impl Sandbox {
                 }
             }
             "agy" => {
-                let gemini = self.host_home.join(".gemini");
-                if gemini.exists() {
-                    args.push("-v".into());
-                    args.push(format!("{}:{CONTAINER_HOME}/.gemini", path_str(&gemini)));
-                }
+                args.push("-v".into());
+                args.push(format!("{}:{CONTAINER_HOME}/.gemini", path_str(&self.agy_state_dir())));
             }
             "codex" => {
                 let codex = self.host_home.join(".codex");
@@ -355,6 +379,19 @@ impl Sandbox {
 
     pub fn runtime_name(&self) -> &'static str {
         self.runtime()
+    }
+}
+
+fn login_spec(repo_root: &Path, agent: &str) -> RunSpec {
+    RunSpec {
+        repo_root: repo_root.to_path_buf(),
+        git_dir: None,
+        workdir: repo_root.to_path_buf(),
+        access: Access::ReadOnly,
+        interactive: true,
+        agent: agent.to_string(),
+        args: Vec::new(),
+        name: None,
     }
 }
 
@@ -527,6 +564,28 @@ mod tests {
         ));
         assert!(has_pair(&args, "-e", "CLAUDE_CONFIG_DIR=/home/aic/.claude"));
         assert!(!args.iter().any(|a| a.starts_with("/nonexistent-home/.claude:")));
+    }
+
+    #[test]
+    fn agy_gets_container_owned_gemini_dir_not_host_one() {
+        let mut spec = spec(Access::ReadWrite, false);
+        spec.agent = "agy".into();
+        let args = sandbox(SandboxKind::Docker).run_args(&spec);
+        assert!(has_pair(
+            &args,
+            "-v",
+            "/nonexistent-home/.local/share/aic/sandbox/agy:/home/aic/.gemini"
+        ));
+        assert!(!args.iter().any(|a| a.starts_with("/nonexistent-home/.gemini:")));
+    }
+
+    #[test]
+    fn login_command_uses_host_network_and_interactive_agy() {
+        let args = sandbox(SandboxKind::Docker).build_run_args(&login_spec(Path::new("/work/repo"), "agy"), true);
+        assert!(has_pair(&args, "--network", "host"));
+        assert!(args.contains(&"-it".to_string()));
+        assert_eq!(args.last().map(String::as_str), Some("agy"));
+        assert!(has_pair(&args, "-v", "/nonexistent-home/.local/share/aic/sandbox/agy:/home/aic/.gemini"));
     }
 
     #[test]
