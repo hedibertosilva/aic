@@ -71,15 +71,16 @@ impl Killer {
         // The process group, plus every descendant found before killing
         // anything (tools may start commands in groups of their own, and
         // killed parents get their children reparented).
-        let mut targets = vec![format!("-{}", self.pgid)];
-        targets.extend(descendants(self.pgid).iter().map(u32::to_string));
-        let _ = Command::new("kill")
-            .arg("-KILL")
-            .arg("--")
-            .args(&targets)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        let children = descendants(self.pgid);
+        // Slim sandbox images may have only a shell builtin `kill`. Calling
+        // POSIX directly keeps query timeouts and Stop independent of PATH.
+        unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
+        // SAFETY: kill accepts integer process IDs, has no pointer arguments;
+        // each invocation is isolated in a process group before spawning.
+        unsafe {
+            kill(-(self.pgid as i32), 9);
+            for pid in children { kill(pid as i32, 9); }
+        }
     }
 }
 
