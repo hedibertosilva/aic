@@ -61,6 +61,52 @@ impl Usage {
     }
 }
 
+/// Models and reasoning efforts an agent CLI says it can use.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ModelCatalog {
+    pub models: Vec<String>,
+    pub efforts: Vec<String>,
+}
+
+/// `codex debug models` prints one JSON object. Hidden models are left out;
+/// efforts are the union across the rest, in the order the CLI lists them.
+pub fn parse_codex_models(output: &str) -> ModelCatalog {
+    let mut catalog = ModelCatalog::default();
+    let Ok(value) = serde_json::from_str::<Value>(output.trim()) else { return catalog };
+    let Some(models) = value.get("models").and_then(Value::as_array) else { return catalog };
+    for model in models {
+        if str_of(model, "visibility") != Some("list") {
+            continue;
+        }
+        let Some(slug) = str_of(model, "slug") else { continue };
+        catalog.models.push(slug.to_string());
+        let levels = model.get("supported_reasoning_levels").and_then(Value::as_array);
+        for effort in levels.into_iter().flatten().filter_map(|l| str_of(l, "effort")) {
+            if !catalog.efforts.iter().any(|e| e == effort) {
+                catalog.efforts.push(effort.to_string());
+            }
+        }
+    }
+    catalog
+}
+
+/// `agy models` prints a plain list; its exact layout isn't documented, so
+/// take the first word of each line that looks like a model id and skip the
+/// status lines ("Fetching ...", "Error: ...").
+pub fn parse_agy_models(output: &str) -> ModelCatalog {
+    let mut catalog = ModelCatalog::default();
+    for line in output.lines() {
+        let word = line.trim().trim_start_matches(['-', '*', '•']).split_whitespace().next().unwrap_or("");
+        let id_like = word.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_'))
+            && word.chars().any(|c| c.is_ascii_digit() || c == '-');
+        if id_like && !catalog.models.iter().any(|m| m == word) {
+            catalog.models.push(word.to_string());
+        }
+    }
+    catalog
+}
+
 /// Parses one stdout line. Lines that aren't JSON, or events the chat has no
 /// use for (hooks, tool calls, ...), yield `None`.
 #[cfg(test)]
@@ -330,5 +376,29 @@ mod tests {
             panic!("expected agy usage");
         };
         assert_eq!(usage, Usage { output_tokens: Some(5), ..Default::default() });
+    }
+
+    #[test]
+    fn codex_models_skip_hidden_and_merge_efforts() {
+        let out = r#"{"models":[
+            {"slug":"gpt-a","visibility":"list","supported_reasoning_levels":[{"effort":"low"},{"effort":"high"}]},
+            {"slug":"gpt-hidden","visibility":"hide","supported_reasoning_levels":[{"effort":"ultra"}]},
+            {"slug":"gpt-b","visibility":"list","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"}]}]}"#;
+        let catalog = parse_codex_models(out);
+        assert_eq!(catalog.models, ["gpt-a", "gpt-b"]);
+        assert_eq!(catalog.efforts, ["low", "high", "max"]);
+    }
+
+    #[test]
+    fn codex_models_tolerate_garbage() {
+        assert_eq!(parse_codex_models("not json"), ModelCatalog::default());
+        assert_eq!(parse_codex_models(r#"{"models":3}"#), ModelCatalog::default());
+    }
+
+    #[test]
+    fn agy_models_take_id_like_words_only() {
+        let out = "Fetching available models...\n- gemini-3-pro  (default)\n* gemini-3-flash\nError: nope\ngemini-3-pro\n";
+        assert_eq!(parse_agy_models(out).models, ["gemini-3-pro", "gemini-3-flash"]);
+        assert!(parse_agy_models("Error: Please sign in to view available models.\n").models.is_empty());
     }
 }

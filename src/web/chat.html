@@ -15,7 +15,13 @@
     <input type="search" id="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
   </header>
   <nav id="list"></nav>
-  <footer id="repo"></footer>
+  <footer id="repobar">
+    <div class="repoinfo">
+      <div id="reponame"></div>
+      <span id="repo"></span>
+    </div>
+    <button id="copyrepo" class="icon" aria-label="Copy repository path" title="Copy repository path"></button>
+  </footer>
 </aside>
 <div id="scrim"></div>
 <main>
@@ -41,21 +47,22 @@
         <button class="send" id="send" aria-label="Send"></button>
       </div>
     </form>
-    <div class="hint" id="hint">Enter sends · Shift+Enter new line · @ mentions · / skills</div>
+    <div class="hint" id="hint">Enter sends · Shift+Enter new line · @ mentions · /fork · / skills</div>
   </footer>
 </main>
 
 <dialog id="pdialog" aria-labelledby="ptitle">
   <form id="pform" method="dialog">
-    <h2 id="ptitle">Add participant</h2>
+    <div class="phead">
+      <h2 id="ptitle">Add participant</h2>
+      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="lbl">Active</span><span class="knob"></span></button>
+    </div>
     <div class="grid2">
       <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
       <label>Agent <select id="pagent"></select></label>
-      <label>Model <input type="text" id="pmodel" list="pmodels" placeholder="agent default" autocomplete="off" spellcheck="false"></label>
-      <label>Effort <input type="text" id="peffort" list="pefforts" placeholder="agent default" autocomplete="off" spellcheck="false"></label>
+      <label>Model <select id="pmodel"></select></label>
+      <label>Effort <select id="peffort"></select></label>
     </div>
-    <datalist id="pmodels"></datalist>
-    <datalist id="pefforts"></datalist>
     <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
     <fieldset class="colours">
       <legend>Colour</legend>
@@ -71,11 +78,49 @@
       <p class="note warn" id="pwritewarn" hidden></p>
     </fieldset>
     <p class="note err" id="perror" hidden></p>
-    <div class="buttons">
-      <button type="button" id="premove" class="danger">Remove</button>
+    <div class="buttons" id="pbuttons">
+      <button type="button" id="premove" class="danger" hidden>Remove</button>
       <span class="grow"></span>
       <button type="button" id="pcancel">Cancel</button>
       <button type="submit" id="psave" class="primary">Save</button>
+    </div>
+    <div id="pconfirm" hidden>
+      <p class="note warn" id="pconfirmtext"></p>
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="pkeep">Cancel</button>
+        <button type="button" id="pdoremove" class="danger">Remove</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ddialog" aria-labelledby="dtitle">
+  <div id="dform">
+    <h2 id="dtitle">Delete conversation?</h2>
+    <p id="dtext"></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="dcancel" autofocus>Cancel</button>
+      <button type="button" id="ddelete" class="danger">Delete</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="rdialog" aria-labelledby="rtitle">
+  <form id="rform" method="dialog">
+    <h2 id="rtitle">Rename conversation</h2>
+    <label>Title <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35"></label>
+    <div id="rcount" aria-live="polite"></div>
+    <div class="rgen">
+      <label>Generate with <select id="rwho"></select></label>
+      <button type="button" id="rgen">Generate title</button>
+    </div>
+    <p class="note err" id="rerror" hidden></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="rcancel">Cancel</button>
+      <button type="submit" id="rsave" class="primary">Save</button>
     </div>
   </form>
 </dialog>

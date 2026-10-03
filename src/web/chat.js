@@ -33,6 +33,11 @@ const ICONS = {
   down: I('<path d="M12 5v14M6 13l6 6 6-6"/>'),
   send: I('<path d="M12 19V5M6 11l6-6 6 6"/>'),
   trash: I('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>'),
+  expand: I('<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>'),
+  collapse: I('<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>'),
+  pause: I('<path d="M8 5v14M16 5v14"/>'),
+  play: I('<path d="M7 4.5v15l12-7.5z"/>'),
+  spark: I('<path d="M11 3l1.9 5.6L18.5 10.5l-5.6 1.9L11 18l-1.9-5.6L3.5 10.5l5.6-1.9z"/><path d="M19 15v4M17 17h4"/>'),
   more: I('<circle cx="5" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="19" cy="12" r="1.2"/>'),
   columns: I('<rect x="3" y="5" width="7.5" height="14" rx="1.5"/><rect x="13.5" y="5" width="7.5" height="14" rx="1.5"/>'),
   stack: I('<rect x="4" y="3.5" width="16" height="7.5" rx="1.5"/><rect x="4" y="13" width="16" height="7.5" rx="1.5"/>'),
@@ -77,11 +82,19 @@ const uniq = (xs) => [...new Set(xs)];
 const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n));
 
 /* ---------- persistence ---------- */
-// Saving is debounced while typing and reports failures (a full storage
-// quota) in a banner that stays until a save works again.
-function load() {
+// localStorage is retained only as an offline/startup cache. The local aic
+// server owns the durable copy in .aic/chat/chat.sqlite3.
+let remoteReady = false, remoteSaving = false, remoteDirty = false;
+function loadLocal() {
   try { state = Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}); } catch {}
   try { drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {}; } catch {}
+  normalizeState();
+}
+// Run this after loading either cache or SQLite. In particular, an agent may
+// have been streaming when the browser closed, so no stored entry may remain
+// permanently pending after a restart.
+function normalizeState() {
+  if (!Array.isArray(state.convs)) state.convs = [];
   if (state.stack) state.layout = "stack";
   delete state.stack;
   state.convs.forEach((c) => {
@@ -100,8 +113,8 @@ function storeItem(key, value) {
   try { localStorage.setItem(key, value); return true; }
   catch (err) {
     const b = $("banner");
-    b.replaceChildren(icon("alert"), document.createTextNode(
-      " Couldn't save your conversations (" + (err && err.name === "QuotaExceededError" ? "browser storage is full" : String(err && err.message || err)) +
+    b.replaceChildren(icon("alert"), el("span", "message",
+      "Couldn't save your conversations (" + (err && err.name === "QuotaExceededError" ? "browser storage is full" : String(err && err.message || err)) +
       "). New messages will be lost when you close this tab: export and delete old conversations to free space."));
     b.hidden = false;
     return false;
@@ -110,14 +123,56 @@ function storeItem(key, value) {
 function save() {
   clearTimeout(save.t); save.t = 0;
   if (storeItem(KEY, JSON.stringify(state))) $("banner").hidden = true;
+  saveRemoteSoon();
 }
 function saveSoon() { clearTimeout(save.t); save.t = setTimeout(save, 500); }
-function saveDrafts() { clearTimeout(saveDrafts.t); saveDrafts.t = 0; storeItem(DRAFTS_KEY, JSON.stringify(drafts)); }
+function saveDrafts() {
+  clearTimeout(saveDrafts.t); saveDrafts.t = 0;
+  storeItem(DRAFTS_KEY, JSON.stringify(drafts));
+  saveRemoteSoon();
+}
 function saveDraftsSoon() { clearTimeout(saveDrafts.t); saveDrafts.t = setTimeout(saveDrafts, 400); }
-window.addEventListener("pagehide", () => { if (save.t) save(); if (saveDrafts.t) saveDrafts(); });
+function remoteError(err) {
+  const b = $("banner");
+  b.replaceChildren(icon("alert"), el("span", "message", "Couldn't save your conversations to .aic/chat: " + (err.message || err) + ". This browser still has a temporary copy."));
+  b.hidden = false;
+}
+// Only one request may be in flight. A later edit marks the state dirty and
+// is sent after it, preventing an older request from winning a write race.
+async function saveRemote() {
+  if (!remoteReady || remoteSaving || !remoteDirty) return;
+  remoteSaving = true; remoteDirty = false;
+  try {
+    const res = await fetch("/api/chat/state", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      // `keepalive` limits request bodies to roughly 64 KiB in browsers. A
+      // conversation snapshot can be much larger, so normal saves must use a
+      // regular fetch; localStorage remains the abrupt-close fallback.
+      body: JSON.stringify({ state, drafts }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    $("banner").hidden = true;
+  } catch (err) {
+    remoteError(err);
+  } finally {
+    remoteSaving = false;
+    if (remoteDirty) saveRemote();
+  }
+}
+function saveRemoteSoon() {
+  if (!remoteReady) return;
+  remoteDirty = true;
+  clearTimeout(saveRemoteSoon.t);
+  saveRemoteSoon.t = setTimeout(saveRemote, 250);
+}
+window.addEventListener("pagehide", () => {
+  if (save.t) save(); if (saveDrafts.t) saveDrafts();
+  // The local cache still covers an abrupt browser close.
+  saveRemote();
+});
 
 const cur = () => state.convs.find((c) => c.id === state.current);
-const hasInteraction = (c) => Array.isArray(c.log) && c.log.length > 0;
+const hasInteraction = (c) => !!c.keepEmpty || (Array.isArray(c.log) && c.log.length > 0);
 function pruneEmptyConversations() {
   const empty = new Set(state.convs.filter((c) => !hasInteraction(c)).map((c) => c.id));
   if (!empty.size) return false;
@@ -195,7 +250,66 @@ function newConv() {
   switchTo(c.id);
   if (!agent) toast("No agents configured: check `aic config show`.");
 }
+function copyParticipants(source, seen) {
+  // Native CLI sessions cannot be forked. Start fresh sessions in the new
+  // conversation, while preserving every participant setting.
+  return source.participants.map((p) => ({
+    name: p.name, agent: p.agent, role: p.role || "", write: !!p.write,
+    model: p.model || "", effort: p.effort || "", hue: hueOf(p), session: "", seen,
+  }));
+}
+function copyLog(log) {
+  return log.map((e) => ({
+    ...e,
+    ...(e.to ? { to: [...e.to] } : {}),
+    ...(e.actions ? { actions: [...e.actions] } : {}),
+    ...(e.usage ? { usage: { ...e.usage } } : {}),
+  }));
+}
+function copyConversation(source, withHistory) {
+  if (withHistory && busy(source)) {
+    toast("Wait for replies to finish before forking this conversation.");
+    return;
+  }
+  const log = withHistory ? copyLog(source.log) : [];
+  const agentNames = source.participants.map((p) => p.name).join(", ") || "Agents";
+  const c = {
+    id: crypto.randomUUID(),
+    title: (withHistory ? `Fork: ${source.title}` : agentNames).slice(0, 80),
+    participants: copyParticipants(source, log.length),
+    log,
+    round: withHistory ? source.round || 0 : 0,
+    updated: Date.now(),
+    sendTo: source.sendTo ? [...source.sendTo] : null,
+    // Unlike an untouched “New conversation”, this is deliberately useful
+    // without messages: it keeps a reusable group of agents.
+    ...(withHistory ? {} : { keepEmpty: true }),
+  };
+  state.convs.unshift(c);
+  $("search").value = "";
+  switchTo(c.id);
+  toast(withHistory
+    ? "Fork created. Agents start fresh sessions with this conversation as context."
+    : "Conversation created with the same agents.");
+}
+const cloneAgents = (c) => copyConversation(c, false);
+const forkConversation = (c) => copyConversation(c, true);
+// /clear: empties the conversation and puts every participant on a fresh native session. The participants stay.
+function clearConversation(c) {
+  if (!c.log.length) { toast("Nothing to clear."); return; }
+  const saved = { log: c.log, round: c.round, title: c.title, updated: c.updated, people: c.participants.map((p) => [p, p.session, p.seen]) };
+  c.log = []; c.round = 0; c.updated = Date.now();
+  if (!c.renamed) c.title = "New conversation";
+  c.participants.forEach((p) => { p.session = ""; p.seen = 0; });
+  save(); render(true);
+  toast("Conversation cleared", () => {
+    Object.assign(c, { log: saved.log, round: saved.round, title: saved.title, updated: saved.updated });
+    saved.people.forEach(([p, session, seen]) => { p.session = session; p.seen = seen; });
+    save(); render(true);
+  });
+}
 function switchTo(id) {
+  hist.idx = -1;
   const old = cur();
   if (old && !discardEmptyConversation(old)) { drafts[old.id] = $("input").value; saveDraftsSoon(); }
   state.current = id;
@@ -203,8 +317,153 @@ function switchTo(id) {
   document.body.classList.remove("drawer");
   save(); render(true); $("input").focus();
 }
+/* ---------- rename dialog ---------- */
+const TITLE_HINT = 35; // roughly what fits in the sidebar next to the "more" button; guidance, not a limit
+let renamingConv = null, titleCtl = null;
+
+// Whoever answered last without failing is the default generator.
+function lastResponder(c) {
+  for (let i = c.log.length - 1; i >= 0; i--) {
+    const e = c.log[i];
+    if (e.from !== "you" && !e.error && !e.pending && e.text) return c.participants.find((p) => p.name === e.from) || null;
+  }
+  return c.participants[0] || null;
+}
+// A small, bounded cut of the conversation (about 1,500 characters) for the one-off title request.
+function titleContext(c) {
+  const clip = (t, n) => { const s = t.replace(/\s+/g, " ").trim(); return s.length > n ? s.slice(0, n) + "…" : s; };
+  const users = c.log.filter((e) => e.from === "you" && e.text);
+  const replies = c.log.filter((e) => e.from !== "you" && !e.error && !e.pending && e.text);
+  const out = ["First user message: " + clip(users[0]?.text || "", 300), "", "Recent context:"];
+  users.slice(1).slice(-3).forEach((e) => out.push("User: " + clip(e.text, 200)));
+  replies.slice(-3).forEach((e) => out.push(`[${e.from}]: ${clip(e.text, 200)}`));
+  return out.join("\n");
+}
+const cleanTitle = (t) => (t.split("\n").map((l) => l.trim()).find(Boolean) || "")
+  .replace(/^[\s"'`*#]+|[\s"'`*]+$/g, "").replace(/[.。]+$/, "").trim();
+
+// One standalone request to the agent: no session, no write access, nothing added to the conversation.
+async function askTitle(c, p, extra, signal) {
+  const prompt = `Write a short title for this conversation: at most ${TITLE_HINT} characters, in the same language as the messages, no quotes, no emoji, no trailing period. Reply with the title only.\n\n${titleContext(c)}${extra ? "\n\n" + extra : ""}`;
+  const res = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agent: p.agent, prompt, session_id: null, write: false, effort: null,
+      system: "You write short titles for chat conversations. Reply with the title only.",
+      model: kindOf(p) === "claude" ? "haiku" : null, // a cheap model; other agents use their configured default
+    }),
+    signal,
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "", text = "", final = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i); buf = buf.slice(i + 1);
+      if (!line.trim()) continue;
+      const ev = JSON.parse(line);
+      if (ev.type === "delta") text += ev.text;
+      else if (ev.type === "done") {
+        if (!ev.ok) throw new Error(ev.error || "The agent failed.");
+        final = ev.text;
+      }
+    }
+  }
+  return cleanTitle(text || final);
+}
+
+function renderRenameCount() {
+  const n = $("rinput").value.trim().length, over = n > TITLE_HINT, count = $("rcount");
+  count.replaceChildren(...(over ? [icon("alert")] : []), el("span", "", `${n} / ${TITLE_HINT}`));
+  count.classList.toggle("over", over); // only an older, longer title can be over: typing stops at the limit
+  count.title = over ? `Longer than the ${TITLE_HINT} characters that fit in the sidebar` : "";
+}
+const setGenLabel = (btn, label, spark = true) => btn.replaceChildren(...(spark ? [icon("spark")] : []), el("span", "", label));
+// Cut at the last whole word that fits, or hard at the limit for one long word.
+const fitTitle = (t) => {
+  if (t.length <= TITLE_HINT) return t;
+  const cut = t.slice(0, TITLE_HINT + 1), at = cut.lastIndexOf(" ");
+  return (at > 0 ? cut.slice(0, at) : t.slice(0, TITLE_HINT)).trim();
+};
+function renameError(msg) {
+  $("rerror").replaceChildren(icon("alert"), el("span", "", msg));
+  $("rerror").hidden = false;
+}
+function openRename(c) {
+  renamingConv = c;
+  $("rinput").value = c.title;
+  $("rerror").hidden = true;
+  const who = $("rwho"); who.textContent = "";
+  c.participants.forEach((p) => { const o = el("option", "", p.name); o.value = p.name; who.appendChild(o); });
+  const def = lastResponder(c);
+  if (def) who.value = def.name;
+  const hasText = c.log.some((e) => e.text);
+  $("rgen").disabled = !def || !hasText;
+  $("rgen").title = hasText ? "" : "Send a message first";
+  who.disabled = !def;
+  setGenLabel($("rgen"), "Generate title");
+  renderRenameCount();
+  $("rdialog").showModal();
+  $("rinput").focus(); $("rinput").select();
+}
+$("rinput").oninput = renderRenameCount;
+$("rcancel").onclick = () => $("rdialog").close();
+$("rdialog").onclose = () => { titleCtl?.abort(); titleCtl = null; renamingConv = null; };
+$("rgen").onclick = async () => {
+  const c = renamingConv, p = c?.participants.find((q) => q.name === $("rwho").value);
+  if (!c || !p || titleCtl) return;
+  const ctl = titleCtl = new AbortController();
+  const btn = $("rgen");
+  btn.disabled = true; $("rwho").disabled = true; setGenLabel(btn, "Generating…", false); $("rerror").hidden = true; $("rinput").readOnly = true;
+  try {
+    let title = await askTitle(c, p, "", ctl.signal);
+    // Too long to fit: ask once more for a shorter one; if it is still long, cut at a word.
+    if (title.length > TITLE_HINT) title = await askTitle(c, p, `Your previous attempt, "${title}", was ${title.length} characters. Give a shorter title (at most ${TITLE_HINT}).`, ctl.signal);
+    if (!title) throw new Error("The agent didn't suggest a title.");
+    $("rinput").value = fitTitle(title); renderRenameCount();
+    setGenLabel(btn, "Generate again");
+    $("rinput").focus();
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    renameError("Couldn't generate a title: " + (err.message || err));
+    setGenLabel(btn, "Generate title");
+  } finally {
+    if (titleCtl === ctl) titleCtl = null;
+    btn.disabled = false; $("rwho").disabled = false; $("rinput").readOnly = false;
+  }
+};
+$("rform").onsubmit = (e) => {
+  e.preventDefault();
+  const c = renamingConv, t = $("rinput").value.trim();
+  if (!c) return;
+  if (!t) return renameError("The title can't be empty.");
+  c.title = t.slice(0, 80); c.renamed = true; save(); renderSidebar(); setTitle();
+  $("rdialog").close();
+};
+
+// Deleting a conversation asks first; the dialog's Cancel has the initial focus so a stray Enter keeps it.
+let deleting = null;
 function removeConv(c) {
   if (busy(c)) { toast("Stop its replies before deleting it."); return; }
+  deleting = c;
+  $("dtext").textContent = `This will delete “${c.title}” and all its messages. You can undo right after.`;
+  $("ddialog").showModal();
+  $("dcancel").focus();
+}
+$("dcancel").onclick = () => $("ddialog").close();
+$("ddialog").onclose = () => { deleting = null; };
+$("ddelete").onclick = () => {
+  const c = deleting;
+  $("ddialog").close();
+  if (!c) return;
+  if (busy(c)) toast("Stop its replies before deleting it."); else deleteConv(c);
+};
+function deleteConv(c) {
   const idx = state.convs.indexOf(c);
   if (idx < 0) return;
   state.convs.splice(idx, 1);
@@ -352,7 +611,6 @@ function skillProblem(name, targets) {
 }
 
 /* ---------- rendering: sidebar ---------- */
-let renaming = null; // id of the conversation being renamed inline
 let openMenu = null;
 function closeMenu() { if (openMenu) { openMenu.menu.remove(); openMenu.btn.setAttribute("aria-expanded", "false"); openMenu = null; } }
 document.addEventListener("click", (e) => { if (openMenu && !openMenu.menu.contains(e.target) && e.target !== openMenu.btn) closeMenu(); });
@@ -366,8 +624,6 @@ function dateGroup(t) {
   return "Older";
 }
 function renderSidebar() {
-  // Don't pull the inline rename box out from under the user's typing.
-  if (renaming && document.activeElement?.closest?.("#list") && document.activeElement.tagName === "INPUT") return;
   const q = $("search").value.trim().toLowerCase();
   const list = $("list"); list.textContent = "";
   const shown = state.convs
@@ -380,25 +636,12 @@ function renderSidebar() {
     if (g !== group) { list.appendChild(el("h3", "", g)); group = g; }
     list.appendChild(convRow(c));
   });
+  const name = (meta.repo || "").split(/[\\/]/).filter(Boolean).pop() || meta.repo;
+  $("reponame").textContent = name; $("reponame").title = name;
   $("repo").textContent = meta.repo; $("repo").title = meta.repo;
 }
 function convRow(c) {
   const row = el("div", "conv" + (c.id === state.current ? " active" : ""));
-  if (renaming === c.id) {
-    const input = el("input"); input.type = "text"; input.value = c.title; input.setAttribute("aria-label", "Conversation title");
-    let done = false;
-    const finish = (keep) => {
-      if (done) return; done = true;
-      const t = input.value.trim();
-      if (keep && t) { c.title = t.slice(0, 80); c.renamed = true; save(); }
-      renaming = null; input.blur(); renderSidebar(); setTitle();
-    };
-    input.onkeydown = (e) => { if (e.key === "Enter") finish(true); else if (e.key === "Escape") { e.stopPropagation(); finish(false); } };
-    input.onblur = () => finish(true);
-    row.appendChild(input);
-    requestAnimationFrame(() => { input.focus(); input.select(); });
-    return row;
-  }
   const open = el("button", "open"); open.type = "button";
   open.appendChild(el("span", "title", c.title));
   const sub = el("span", "sub");
@@ -421,7 +664,9 @@ function convRow(c) {
       b.onclick = () => { closeMenu(); fn(); };
       menu.appendChild(b);
     };
-    item("rename", "Rename", () => { renaming = c.id; renderSidebar(); });
+    item("rename", "Rename", () => openRename(c));
+    item("copy", "Clone agents", () => cloneAgents(c));
+    item("retry", "Fork conversation", () => forkConversation(c));
     item("download", "Export as Markdown", () => exportConv(c, "md"));
     item("download", "Export as JSON", () => exportConv(c, "json"));
     item("trash", "Delete", () => removeConv(c), "danger");
@@ -464,9 +709,11 @@ function exportConv(c, kind) {
 function renderBar() {
   const c = cur(), chips = $("chips"); chips.textContent = "";
   if (c) c.participants.forEach((p) => {
-    const chip = el("button", "chip"); chip.type = "button";
-    chip.title = (p.role ? p.role + "\n\n" : "") + "Edit " + p.name;
+    const chip = el("button", "chip" + (p.inactive ? " off" : "")); chip.type = "button";
+    chip.title = (p.role ? p.role + "\n\n" : "") + (p.inactive ? p.name + " — inactive. " : "") + "Edit " + p.name;
+    if (p.inactive) chip.setAttribute("aria-label", p.name + ", inactive");
     chip.appendChild(avatar(c, p.name));
+    if (p.inactive) { const ps = icon("pause"); ps.classList.add("pause"); chip.appendChild(ps); }
     chip.appendChild(el("span", "", p.name));
     chip.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) chip.appendChild(writeBadge());
@@ -489,7 +736,6 @@ function renderBar() {
     opt("columns", "columns", "Replies side by side");
     opt("stack", "stack", "Replies stacked");
   }
-  document.body.classList.toggle("wide", !!c && c.participants.length >= 3);
 }
 
 /* ---------- rendering: messages ---------- */
@@ -515,11 +761,37 @@ function usageText(u) {
 const lastEntryOf = (c, name) => { for (let i = c.log.length - 1; i >= 0; i--) if (c.log[i].from === name) return c.log[i]; return null; };
 const lastUserEntry = (c) => lastEntryOf(c, "you");
 
+// One reply per round can be expanded to fill the row; the others fold into name strips. Kept in memory only.
+const expanded = new Map(); // "conversation:round" -> participant name
+const expKey = (c, round) => c.id + ":" + round;
+const isExpanded = (c, e) => expanded.get(expKey(c, e.round)) === e.from;
+function applyFocus(c, r) {
+  const who = expanded.get(expKey(c, r.round)), on = !!who && r.cards.some((x) => x.name === who);
+  r.el.classList.toggle("focus", on);
+  r.cards.forEach((x) => {
+    x.node.classList.toggle("expanded", on && x.name === who);
+    x.node.classList.toggle("folded", on && x.name !== who);
+    paintCard(c, x.entry); // the expand button reflects the state
+  });
+}
+function toggleExpand(c, e) {
+  const key = expKey(c, e.round), open = !isExpanded(c, e);
+  if (open) expanded.set(key, e.from); else expanded.delete(key);
+  view.rows.forEach((r) => { if (r.round === e.round) applyFocus(c, r); });
+}
+// Esc: fold every expanded reply of this conversation back. True if there was one.
+function collapseAll(c) {
+  const keys = [...expanded.keys()].filter((k) => k.startsWith(c.id + ":"));
+  keys.forEach((k) => expanded.delete(k));
+  if (keys.length) view.rows.forEach((r) => applyFocus(c, r));
+  return keys.length > 0;
+}
 function card(c, e) {
   const d = el("article", "card");
   d.style.setProperty("--h", hueFor(c, e.from));
   const head = el("header"), status = el("div", "status"), body = el("div", "body md"), acts = el("div"), foot = el("footer");
   d.append(head, status, body, acts, foot);
+  d.onclick = () => { if (d.classList.contains("folded")) toggleExpand(c, e); };
   cardParts.set(e, { card: d, head, status, body, acts, foot, mode: "", rendered: null, stream: null, keys: {} });
   paintCard(c, e);
   return d;
@@ -534,7 +806,7 @@ function paintCard(c, e) {
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [p?.agent, p?.model, p?.write, e.skill, e.pending, hueFor(c, e.from)])) {
+  if (changed("head", [p?.agent, p?.model, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e)])) {
     k.card.style.setProperty("--h", hueFor(c, e.from));
     k.head.textContent = "";
     k.head.append(avatar(c, e.from), el("span", "name", e.from));
@@ -543,6 +815,9 @@ function paintCard(c, e) {
     if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
     k.head.appendChild(el("span", "grow"));
     if (e.pending) k.head.appendChild(iconBtn("stop", "Stop " + e.from, () => running.get(runKey(c, { name: e.from }))?.abort()));
+    const on = isExpanded(c, e), ex = iconBtn(on ? "collapse" : "expand", on ? "Collapse reply" : "Expand reply", () => toggleExpand(c, e));
+    ex.classList.add("expandbtn"); ex.setAttribute("aria-expanded", String(on));
+    k.head.appendChild(ex);
   }
 
   if (changed("status", [e.pending, e.activity || "", !!e.text])) {
@@ -702,30 +977,22 @@ function appendEntry(c, e) {
     return;
   }
   let r = view.rows.get(e.round);
-  if (!r || r.cells.get(e.from)?.taken) r = newRow(c, e.round);
+  if (!r || r.cards.some((x) => x.name === e.from)) r = newRow(e.round);
   const node = card(c, e);
-  let cell = r.cells.get(e.from);
-  if (!cell) { // someone no longer in the conversation: extra column
-    r.names.push(e.from); r.el.style.setProperty("--cols", r.names.length);
-    cell = { node: null, col: r.names.length }; r.cells.set(e.from, cell);
-  }
-  if (r.group) node.style.gridColumn = cell.col;
-  if (cell.node) cell.node.replaceWith(node); else r.el.appendChild(node);
-  cell.node = node; cell.taken = true;
+  // Replies sit side by side in participant order; whoever stayed silent takes no room,
+  // so a regenerated reply lands back in its own place.
+  const order = (name) => { const i = c.participants.findIndex((p) => p.name === name); return i < 0 ? Infinity : i; };
+  const mine = order(e.from), next = r.cards.find((x) => order(x.name) > mine);
+  r.el.insertBefore(node, next ? next.node : null);
+  r.cards.splice(next ? r.cards.indexOf(next) : r.cards.length, 0, { name: e.from, node, entry: e });
+  r.el.style.setProperty("--cols", r.cards.length);
   // Columns only pay off once two replies sit side by side; a lone reply gets the full reading width.
-  r.el.classList.toggle("solo", [...r.cells.values()].filter((x) => x.taken).length < 2);
+  r.el.classList.toggle("solo", r.cards.length < 2);
+  r.el.classList.toggle("wide", r.cards.length >= 3);
+  applyFocus(c, r);
 }
-// One column per participant, in participant order, so replies line up
-// round after round; someone not addressed gets a quiet placeholder.
-function newRow(c, round) {
-  const names = c.participants.map((p) => p.name);
-  const group = names.length > 1;
-  const r = { round, group, names: [...names], cells: new Map(), el: el("div", "row" + (group ? "" : " single")) };
-  r.el.style.setProperty("--cols", names.length);
-  if (group) names.forEach((n, i) => {
-    const g = el("div", "gap", "not addressed"); g.style.gridColumn = i + 1;
-    r.el.appendChild(g); r.cells.set(n, { node: g, col: i + 1 });
-  });
+function newRow(round) {
+  const r = { round, cards: [], el: el("div", "row solo") };
   view.wrap.insertBefore(r.el, view.after);
   view.rows.set(round, r);
   return r;
@@ -795,17 +1062,23 @@ function leadingMentions(text) {
   const m = (text + " ").match(/^((?:@[\w-]+\s+)+)/);
   return m ? m[1].trim().split(/\s+/).map((n) => n.slice(1)) : null;
 }
+// A disabled participant stays in the conversation (and its history) but gets nothing new.
+const active = (c) => c.participants.filter((p) => !p.inactive);
+// "@all" stands for every participant, unless someone is really named "all".
+const expandMentions = (c, names) => names.flatMap((n) =>
+  n === "all" && !c.participants.some((p) => p.name === n) ? active(c).map((p) => p.name) : [n]);
 // Who a message typed now would go to: leading @mentions win, else the "To:" pills.
 function recipients(c, text) {
-  const named = leadingMentions(text ?? $("input").value)?.filter((n) => c.participants.some((p) => p.name === n));
+  const typed = leadingMentions(text ?? $("input").value);
+  const named = typed && expandMentions(c, typed).filter((n) => c.participants.some((p) => p.name === n));
   const names = named && named.length ? named : c.sendTo;
-  return names ? c.participants.filter((p) => names.includes(p.name)) : c.participants;
+  return names ? active(c).filter((p) => names.includes(p.name)) : active(c);
 }
 function renderComposer() {
   const c = cur(), to = $("to"); to.textContent = "";
   if (c) {
     const sel = recipients(c);
-    c.participants.forEach((p) => {
+    active(c).forEach((p) => {
       const on = sel.includes(p);
       const b = el("button", "pill"); b.type = "button";
       b.style.setProperty("--h", hueOf(p));
@@ -829,7 +1102,7 @@ function renderComposer() {
 }
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
-  let msg = "Enter sends · Shift+Enter new line · @ mentions" + (skills.length ? " · / skills" : ""), warn = false;
+  let msg = "Enter sends · Shift+Enter new line · @ mentions · /fork · /clear" + (skills.length ? " · / skills" : ""), warn = false;
   if (c && busy(c)) msg = "Replies are coming in. Esc or ■ stops them; you can keep typing.";
   else if (c) {
     const body = text.replace(/^((?:@[\w-]+\s+)+)/, "");
@@ -840,7 +1113,7 @@ function renderHint() {
   hint.textContent = msg; hint.classList.toggle("warn", warn);
 }
 function togglePill(c, p) {
-  const all = c.participants.map((q) => q.name);
+  const all = active(c).map((q) => q.name);
   const sel = new Set(recipients(c).map((q) => q.name));
   if (sel.has(p.name)) sel.delete(p.name); else sel.add(p.name);
   c.sendTo = sel.size === all.length ? null : all.filter((n) => sel.has(n));
@@ -856,8 +1129,13 @@ function togglePill(c, p) {
 }
 // Typing "@name" picks the pills; deleting the mention goes back to everyone.
 function syncPillsFromText(c) {
-  const names = leadingMentions($("input").value)?.filter((n) => c.participants.some((p) => p.name === n));
-  if (names && names.length) { c.sendTo = uniq(names); c.toFromText = true; }
+  const typed = leadingMentions($("input").value);
+  const names = typed && expandMentions(c, typed).filter((n) => active(c).some((p) => p.name === n));
+  if (names && names.length) {
+    const picked = uniq(names);
+    c.sendTo = picked.length === active(c).length ? null : picked; // naming everyone is the same as no filter
+    c.toFromText = true;
+  }
   else if (c.toFromText) { c.sendTo = null; c.toFromText = false; }
 }
 
@@ -870,6 +1148,13 @@ function render(scrollEnd) {
 /* ---------- scrolling that doesn't fight the reader ---------- */
 const nearEnd = () => { const m = $("msgs"); return m.scrollHeight - m.scrollTop - m.clientHeight < 80; };
 const toEnd = () => { const m = $("msgs"); m.scrollTop = m.scrollHeight; $("jump").classList.remove("show"); };
+// The message list's scrollbar takes room the composer doesn't have; tell the CSS how much, so the two stay aligned.
+if (window.ResizeObserver) {
+  new ResizeObserver(() => {
+    const m = $("msgs");
+    document.documentElement.style.setProperty("--sb", (m.offsetWidth - m.clientWidth) + "px");
+  }).observe($("msgs"));
+}
 $("msgs").addEventListener("scroll", () => { if (nearEnd()) $("jump").classList.remove("show"); });
 $("jump").onclick = toEnd;
 $("jump").append(icon("down"), document.createTextNode("New messages"));
@@ -931,7 +1216,7 @@ function bootstrapPrompt(c, job) {
     : context + "New messages to answer:\n\n" + job.text;
 }
 function systemFor(c, p) {
-  const others = c.participants.filter((q) => q !== p).map((q) => q.name);
+  const others = active(c).filter((q) => q !== p).map((q) => q.name);
   let s = others.length
     ? `You are "${p.name}" in a group chat with the user and: ${others.join(", ")}. Messages from others arrive prefixed with [name]. Reply only as yourself, without prefixing your own name.`
     : `You are "${p.name}".`;
@@ -1059,7 +1344,7 @@ async function turn(c, { p, text: prompt, entry }) {
 }
 
 /* ---------- input ---------- */
-function clearInput(c) { $("input").value = ""; drafts[c.id] = ""; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
+function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
 $("form").onsubmit = (e) => {
   e.preventDefault();
   const c = cur();
@@ -1068,17 +1353,29 @@ $("form").onsubmit = (e) => {
   // a reflex Enter on the next message can't throw the replies away.
   if (busy(c)) { if (e.submitter === $("send")) stopAll(c); else renderHint(); return; }
   const text = $("input").value.trim();
+  if (text === "/fork") {
+    clearInput(c);
+    forkConversation(c);
+    return;
+  }
+  if (text === "/clear") {
+    clearInput(c);
+    clearConversation(c);
+    return;
+  }
   const m = (text + " ").match(/^((?:@[\w-]+\s+)+)([\s\S]*)$/);
   let body = text;
   if (m) {
     const names = m[1].trim().split(/\s+/).map((n) => n.slice(1));
-    const unknown = names.filter((n) => !c.participants.some((p) => p.name === n));
+    const unknown = expandMentions(c, names).filter((n) => !c.participants.some((p) => p.name === n));
     if (unknown.length) { toast("Unknown participant: " + unknown.join(", ")); return; }
+    const off = names.filter((n) => c.participants.find((p) => p.name === n)?.inactive);
+    if (off.length) { toast(off.join(", ") + (off.length > 1 ? " are" : " is") + " disabled. Enable " + (off.length > 1 ? "them" : "it") + " in the participant's settings first."); return; }
     body = m[2].trim();
   }
   const targets = recipients(c, text);
   if (!targets.length) { toast("Pick who receives the message in “To:”."); return; }
-  const to = targets.length === c.participants.length ? null : targets.map((p) => p.name);
+  const to = targets.length === active(c).length ? null : targets.map((p) => p.name);
   if (!body) { // nothing to add: let them answer what's new to them
     const ready = targets.filter((p) => unseen(c, p).length);
     if (!ready.length) { toast(text ? "Nothing new for them to answer yet." : "Write a message first."); return; }
@@ -1102,15 +1399,20 @@ function acUpdate() {
   if (c && (m = before.match(MENTION_Q))) {
     const used = m[1].trim().split(/\s+/).filter(Boolean).map((n) => n.slice(1));
     const q = m[2].toLowerCase();
-    acItems = c.participants.filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
-      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: cap(p.agent) + (p.role ? " · " + p.role : "") }));
-  } else if (c && skills.length && (m = before.match(SKILL_Q))) {
+    const everyone = active(c).length > 1 && !used.includes("all") && !c.participants.some((p) => p.name === "all") && "all".startsWith(q)
+      ? [{ type: "@", value: "all", label: "@all", sub: "Everyone in this conversation" }] : [];
+    acItems = [...everyone, ...active(c).filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
+      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: cap(p.agent) + (p.role ? " · " + p.role : "") }))];
+  } else if (c && (m = before.match(SKILL_Q))) {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
-    acItems = skills.filter((s) => s.name.toLowerCase().includes(q))
+    const fork = { type: "/", value: "fork", label: "/fork", sub: "Create a conversation branch", off: busy(c) ? "wait for replies to finish" : "" };
+    const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
+    acItems = [fork, clear, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint, sub: s.description,
-        off: allAgy ? "agy participants can't run skills" : "" }));
+        off: allAgy ? "agy participants can't run skills" : "" }))]
+      .filter((item) => item.value.toLowerCase().includes(q));
   }
   acSel = Math.min(acSel, Math.max(acItems.length - 1, 0));
   const box = $("ac"); box.textContent = "";
@@ -1136,6 +1438,39 @@ function acPick(idx) {
   i.selectionStart = i.selectionEnd = before.length;
   acSel = 0; onInput();
 }
+// Shell-style history: with the caret at the very start, Up recalls earlier messages (oldest last) and Down
+// comes back toward the newest, ending on whatever was being typed. Typing anything ends the browsing.
+const hist = { idx: -1, draft: "" };
+const userHistory = (c) => {
+  const out = [];
+  c.log.forEach((e) => {
+    if (e.from !== "you" || !e.text) return;
+    const t = (e.to?.length ? e.to.map((n) => "@" + n + " ").join("") : "") + e.text;
+    if (out[out.length - 1] !== t) out.push(t);
+  });
+  return out;
+};
+function recall(text) {
+  const t = $("input");
+  t.value = text; t.setSelectionRange(0, 0);
+  onInput();
+}
+function historyKey(e) {
+  if ((e.key !== "ArrowUp" && e.key !== "ArrowDown") || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey || e.isComposing) return false;
+  const t = $("input"), c = cur();
+  if (!c || t.selectionStart !== 0 || t.selectionEnd !== 0) return false;
+  const h = userHistory(c);
+  if (e.key === "ArrowUp") {
+    if (!h.length) return false;
+    if (hist.idx < 0) { hist.draft = t.value; hist.idx = h.length; }
+    if (hist.idx > 0) { hist.idx--; recall(h[hist.idx]); }
+    return true;
+  }
+  if (hist.idx < 0) return false;
+  hist.idx++;
+  if (hist.idx >= h.length) { hist.idx = -1; recall(hist.draft); } else recall(h[hist.idx]);
+  return true;
+}
 $("input").onkeydown = (e) => {
   if (acItems.length) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -1145,6 +1480,7 @@ $("input").onkeydown = (e) => {
     if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); acPick(acSel); return; }
     if (e.key === "Escape") { e.stopPropagation(); acClose(); return; }
   }
+  if (historyKey(e)) { e.preventDefault(); return; }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("form").requestSubmit(); }
 };
 function autosize() {
@@ -1156,23 +1492,56 @@ function autosize() {
   t.style.overflowY = want > max ? "auto" : "hidden";
 }
 function onInput() {
+  const t = $("input");
+  // Capitalise the first letter typed; @mentions and /skills start with a symbol, so they are left alone.
+  if (/^\p{Ll}/u.test(t.value)) {
+    const { selectionStart: a, selectionEnd: b } = t;
+    t.value = t.value.charAt(0).toUpperCase() + t.value.slice(1);
+    t.setSelectionRange(a, b);
+  }
   autosize(); acUpdate();
   const c = cur();
   if (c) { drafts[c.id] = $("input").value; saveDraftsSoon(); syncPillsFromText(c); renderComposer(); }
 }
-$("input").oninput = onInput;
+$("input").oninput = () => { hist.idx = -1; onInput(); };
 $("input").onblur = acClose;
 $("input").onclick = acUpdate;
 
 /* ---------- participant dialog ---------- */
 let editing = null; // participant being edited, or null when adding
 let dlgHue = 0;
-const MODELS = { claude: ["opus", "sonnet", "haiku"], agy: [], codex: [] };
-const EFFORTS = { claude: ["low", "medium", "high", "xhigh", "max"], agy: [], codex: ["low", "medium", "high", "xhigh"] };
+// Suggestions for the datalists; any value can still be typed. Codex: `codex debug models` (listed ones); agy efforts: `agy --help`.
+const MODELS = {
+  claude: ["opus", "sonnet", "haiku"],
+  agy: [],
+  codex: ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
+};
+const EFFORTS = {
+  claude: ["low", "medium", "high", "xhigh", "max"],
+  agy: ["low", "medium", "high", "max"],
+  codex: ["low", "medium", "high", "xhigh", "max", "ultra"],
+};
+// What the agent's own CLI reports (via the server); the static lists above are the fallback.
+const liveModels = new Map();
+function fetchModels(agent) {
+  if (!liveModels.has(agent)) {
+    const p = fetch("/api/models?agent=" + encodeURIComponent(agent))
+      .then((r) => (r.ok ? r.json() : {}), () => ({}))
+      .then((j) => { if (!j.models?.length) liveModels.delete(agent); return j; }); // retry later if it came back empty
+    liveModels.set(agent, p);
+  }
+  return liveModels.get(agent);
+}
 const access = () => document.querySelector('input[name="paccess"]:checked').value;
-function fillList(id, values) {
-  const dl = $(id); dl.textContent = "";
-  uniq(values.filter(Boolean).map(cap)).forEach((v) => { const o = el("option"); o.value = v; dl.appendChild(o); });
+// The chosen model/effort ("" = the agent's own default); kept here so a late list from the CLI can't reset the pick.
+let dlgModel = "", dlgEffort = "";
+// A plain select: "Agent default", then the suggestions. A saved value that isn't listed stays selectable.
+function fillSelect(id, values, chosen, fallback) {
+  const sel = $(id); sel.textContent = "";
+  const def = el("option", "", "Agent default" + (fallback ? ` (${cap(fallback)})` : "")); def.value = "";
+  sel.appendChild(def);
+  uniq([...values.filter(Boolean), chosen].filter(Boolean)).forEach((v) => { const o = el("option", "", cap(v)); o.value = v; sel.appendChild(o); });
+  sel.value = chosen;
 }
 function openDialog(p) {
   const c = cur(); if (!c || !meta.agents.length) return;
@@ -1181,7 +1550,7 @@ function openDialog(p) {
   $("psave").textContent = p ? "Save" : "Add";
   $("pname").value = p ? p.name : "";
   $("pagent").value = p ? p.agent : defaultAgent();
-  $("pmodel").value = cap(p?.model || ""); $("peffort").value = cap(p?.effort || "");
+  dlgModel = p?.model || ""; dlgEffort = p?.effort || "";
   $("prole").value = p?.role || "";
   document.querySelector(`input[name="paccess"][value="${p?.write ? "write" : "read"}"]`).checked = true;
   dlgHue = p ? hueOf(p) : pickHue(c);
@@ -1189,6 +1558,10 @@ function openDialog(p) {
   $("pname").disabled = replying; $("pagent").disabled = replying;
   $("pname").title = $("pagent").title = replying ? `Wait for ${p.name} to finish replying` : "";
   $("premove").hidden = !p;
+  $("ptoggle").hidden = !p;
+  dlgInactive = !!p?.inactive;
+  if (p) renderToggle();
+  askRemove(false);
   $("perror").hidden = true;
   updateDialog();
   $("pdialog").showModal();
@@ -1196,10 +1569,12 @@ function openDialog(p) {
 }
 function updateDialog() {
   const c = cur(), agent = $("pagent").value, d = meta.details?.[agent] || {}, kind = d.kind || "claude";
-  $("pmodel").placeholder = "agent default" + (d.model ? ` (${cap(d.model)})` : "");
-  $("peffort").placeholder = "agent default" + (d.effort ? ` (${cap(d.effort)})` : "");
-  fillList("pmodels", [d.model, ...MODELS[kind]]);
-  fillList("pefforts", [d.effort, ...EFFORTS[kind]]);
+  const suggest = (live) => {
+    fillSelect("pmodel", live?.models?.length ? live.models : MODELS[kind] || [], dlgModel, d.model);
+    fillSelect("peffort", live?.efforts?.length ? live.efforts : EFFORTS[kind] || [], dlgEffort, d.effort);
+  };
+  suggest();
+  fetchModels(agent).then((live) => { if ($("pagent").value === agent) suggest(live); });
   // A new participant, or an existing one moved to another agent, starts a
   // fresh native session. Explain how its first prompt is seeded.
   $("pagentwarn").hidden = !!editing && editing.agent === agent;
@@ -1227,11 +1602,49 @@ function updateDialog() {
   });
 }
 function dialogError(msg) { $("perror").textContent = msg; $("perror").hidden = false; }
-$("pagent").onchange = updateDialog;
+$("pmodel").onchange = () => { dlgModel = $("pmodel").value; };
+$("peffort").onchange = () => { dlgEffort = $("peffort").value; };
+$("pagent").onchange = () => { dlgModel = ""; dlgEffort = ""; updateDialog(); }; // each agent has its own models
 document.querySelectorAll('input[name="paccess"]').forEach((r) => { r.onchange = updateDialog; });
 $("pname").oninput = () => { $("pname").value = $("pname").value.replace(/\s+/g, "-").replace(/[^\w-]/g, ""); };
 $("pcancel").onclick = () => $("pdialog").close();
+// The switch in the dialog header pauses a participant: it keeps its settings and history, and gets no new
+// messages. Like the other fields it only takes effect on Save.
+let dlgInactive = false;
+function renderToggle() {
+  const t = $("ptoggle");
+  t.setAttribute("aria-checked", String(!dlgInactive));
+  t.classList.toggle("off", dlgInactive);
+  t.querySelector(".lbl").textContent = dlgInactive ? "Inactive" : "Active";
+  t.title = dlgInactive
+    ? "Inactive: gets no new messages (and no @all). Its past replies stay."
+    : "Active. Turn off to keep this participant and its history but stop sending it new messages.";
+}
+$("ptoggle").onclick = () => {
+  const c = cur(), p = editing;
+  if (!c || !p) return;
+  if (!dlgInactive) { // turning it off
+    if (isRunning(c, p)) return dialogError(`Wait for ${p.name} to finish replying.`);
+    if (active(c).filter((q) => q !== p).length < 1) return dialogError("At least one participant must stay active.");
+  }
+  $("perror").hidden = true;
+  dlgInactive = !dlgInactive;
+  renderToggle();
+};
+const askRemove = (on) => { $("pbuttons").hidden = on; $("pconfirm").hidden = !on; };
+// Removing a participant asks inside the edit dialog (no modal over a modal); Cancel gets the focus.
 $("premove").onclick = () => {
+  const c = cur(), p = editing;
+  if (!c || !p) return;
+  if (busy(c)) return dialogError("Wait for the replies to finish.");
+  if (c.participants.length < 2) return dialogError("A conversation needs at least one participant.");
+  $("perror").hidden = true;
+  $("pconfirmtext").replaceChildren(icon("alert"), el("span", "", `Remove ${p.name}? They leave this conversation, but the existing messages stay.`));
+  askRemove(true);
+  $("pkeep").focus();
+};
+$("pkeep").onclick = () => { askRemove(false); $("premove").focus(); };
+$("pdoremove").onclick = () => {
   const c = cur(), p = editing;
   if (!c || !p) return;
   if (busy(c)) return dialogError("Wait for the replies to finish.");
@@ -1252,7 +1665,7 @@ $("pform").onsubmit = (e) => {
   const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(cap(agent)) || "agent"));
   if (!NAME_OK.test(name)) return dialogError("Use letters, digits, - and _ in the name.");
   if (c.participants.some((q) => q !== editing && q.name === name)) return dialogError(`There's already a participant called ${name}.`);
-  const fields = { agent, role: $("prole").value.trim(), write: access() === "write", model: $("pmodel").value.trim().toLowerCase(), effort: $("peffort").value.trim().toLowerCase(), hue: dlgHue };
+  const fields = { agent, role: $("prole").value.trim(), write: access() === "write", model: $("pmodel").value, effort: $("peffort").value, hue: dlgHue };
   if (editing) {
     const p = editing;
     if (isRunning(c, p) && (name !== p.name || agent !== p.agent)) return dialogError(`Wait for ${p.name} to finish replying.`);
@@ -1269,6 +1682,12 @@ $("pform").onsubmit = (e) => {
     }
     if (agent !== p.agent) { p.agent = agent; p.session = ""; }
     Object.assign(p, { role: fields.role, write: fields.write, model: fields.model, effort: fields.effort, hue: fields.hue });
+    if (!!p.inactive !== dlgInactive) {
+      p.inactive = dlgInactive;
+      if (dlgInactive) {
+        if (c.sendTo) { c.sendTo = c.sendTo.filter((n) => n !== p.name); if (!c.sendTo.length) c.sendTo = null; }
+      } else p.seen = c.log.length; // no catching up on what it missed
+    }
   } else {
     const p = addParticipant(c, { name, ...fields });
     if (c.sendTo) c.sendTo.push(p.name);
@@ -1356,6 +1775,8 @@ $("menu").appendChild(icon("menu"));
 $("menu").onclick = () => document.body.classList.add("drawer");
 $("scrim").onclick = () => document.body.classList.remove("drawer");
 $("addbtn").appendChild(icon("plus"));
+setIcon($("copyrepo"), "copy");
+$("copyrepo").onclick = () => copyText(meta.repo, $("copyrepo"));
 $("addbtn").onclick = () => openDialog(null);
 $("configbtn").appendChild(icon("settings"));
 $("configbtn").onclick = openConfig;
@@ -1364,19 +1785,41 @@ $("search").onkeydown = (e) => { if (e.key === "Escape" && $("search").value) { 
 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { e.preventDefault(); newConv(); return; }
-  if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open || $("cdialog").open) return;
+  if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open || $("cdialog").open || $("ddialog").open || $("rdialog").open) return;
   if (openMenu) { closeMenu(); return; }
   if (document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
   const c = cur();
+  if (c && collapseAll(c)) { e.preventDefault(); return; }
   if (c && busy(c)) { e.preventDefault(); stopAll(c); }
 });
 
 (async () => {
-  load();
+  loadLocal();
   try {
     meta = Object.assign(meta, await (await fetch("/api/agents")).json());
   } catch (err) {
     $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
+  }
+  try {
+    const res = await fetch("/api/chat/state");
+    if (!res.ok) throw new Error(await res.text());
+    const saved = await res.json();
+    if (saved.state && typeof saved.state === "object" && Array.isArray(saved.state.convs)) {
+      state = Object.assign({ convs: [], current: null, layout: "auto" }, saved.state);
+      drafts = saved.drafts && typeof saved.drafts === "object" ? saved.drafts : {};
+      // Apply compatibility cleanups to records saved by older UI versions.
+      normalizeState();
+    } else {
+      // First launch after this upgrade: promote the browser history exactly
+      // once, then make SQLite the source of truth for future launches.
+      remoteDirty = true;
+    }
+    remoteReady = true;
+    if (remoteDirty) saveRemote();
+  } catch (err) {
+    remoteError(err);
+    // The app remains usable with its cache when an old server is still
+    // running during an upgrade.
   }
   try { skills = await (await fetch("/api/skills")).json(); } catch { skills = []; }
   meta.agents.forEach((a) => { const o = el("option", "", cap(a)); o.value = a; $("pagent").appendChild(o); });

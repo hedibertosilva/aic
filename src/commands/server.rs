@@ -1,12 +1,15 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
@@ -23,16 +26,35 @@ const FAVICON_SVG: &str = include_str!("../web/favicon.svg");
 /// Cap on the request body, so a stray client can't make us buffer forever.
 const MAX_BODY: u64 = 1 << 20;
 
+/// Chat state is deliberately capped separately from prompts.  It prevents a
+/// malformed local page from filling the repository disk in one request while
+/// still leaving ample room for a long multi-agent conversation.
+const MAX_CHAT_STATE: u64 = 64 << 20;
+
 /// How often an idle turn writes a blank line, so a closed tab is noticed
 /// (and its agent killed) even while the agent is silent.
 const HEARTBEAT: Duration = Duration::from_secs(2);
 
+/// How long a CLI gets to list its models before the dialog falls back to its built-in suggestions.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(8);
+
 struct App {
     repo_root: PathBuf,
     config: RwLock<Config>,
+    /// The browser is a cache; this database is the durable source of chat
+    /// state.  A mutex also makes writes deterministic across request threads.
+    chat_db: Mutex<Connection>,
     /// Host headers we accept; guards against DNS rebinding when listening
     /// on loopback. `None` when bound elsewhere (the user opted in).
     allowed_hosts: Option<Vec<String>>,
+    /// Models each agent CLI reported, so the dialog does not spawn it every time.
+    models: Mutex<HashMap<String, chat::ModelCatalog>>,
+}
+
+#[derive(Deserialize)]
+struct ChatStateRequest {
+    state: serde_json::Value,
+    drafts: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -71,11 +93,15 @@ struct SettingsRequest {
 
 pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
+    let chat_db = open_chat_db(repo_root)?;
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
     let allowed_hosts = loopback.then(|| {
         vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
     });
-    let app = Arc::new(App { repo_root: repo_root.to_path_buf(), config: RwLock::new(config), allowed_hosts });
+    let app = Arc::new(App {
+        repo_root: repo_root.to_path_buf(), config: RwLock::new(config), chat_db: Mutex::new(chat_db),
+        allowed_hosts, models: Mutex::default(),
+    });
 
     let server = tiny_http::Server::http((host, port))
         .map_err(|e| anyhow!("binding {host}:{port}: {e}"))?;
@@ -96,6 +122,59 @@ pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
             }
         });
     }
+    Ok(())
+}
+
+fn open_chat_db(repo_root: &Path) -> Result<Connection> {
+    let path = repo_root.join(".aic").join("chat").join("chat.sqlite3");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let db = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    db.busy_timeout(Duration::from_secs(5))?;
+    // One compact document is intentional: the web client already has a rich,
+    // evolving conversation graph (forks, participant cursors and native CLI
+    // sessions).  SQLite gives it atomic, durable replacement without coupling
+    // UI migrations to a relational schema.
+    db.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         CREATE TABLE IF NOT EXISTS chat_state (
+             id INTEGER PRIMARY KEY CHECK (id = 1),
+             state_json TEXT NOT NULL,
+             drafts_json TEXT NOT NULL,
+             updated_at INTEGER NOT NULL
+         );",
+    )?;
+    Ok(db)
+}
+
+fn load_chat_state(app: &App) -> Result<serde_json::Value> {
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let row: Option<(String, String)> = db
+        .query_row("SELECT state_json, drafts_json FROM chat_state WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    match row {
+        Some((state, drafts)) => Ok(serde_json::json!({
+            "state": serde_json::from_str::<serde_json::Value>(&state)?,
+            "drafts": serde_json::from_str::<serde_json::Value>(&drafts)?,
+        })),
+        None => Ok(serde_json::json!({ "state": null, "drafts": null })),
+    }
+}
+
+fn save_chat_state(app: &App, req: ChatStateRequest) -> Result<()> {
+    if !req.state.is_object() || !req.drafts.is_object() {
+        bail!("chat state and drafts must be JSON objects");
+    }
+    let state = serde_json::to_string(&req.state)?;
+    let drafts = serde_json::to_string(&req.drafts)?;
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    db.execute(
+        "INSERT INTO chat_state (id, state_json, drafts_json, updated_at) VALUES (1, ?1, ?2, unixepoch())
+         ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, drafts_json = excluded.drafts_json, updated_at = excluded.updated_at",
+        params![state, drafts],
+    )?;
     Ok(())
 }
 
@@ -188,12 +267,47 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
             });
             respond_text(request, 200, "application/json", body.to_string())
         }
+        (Method::Get, "/api/models") => {
+            let agent = request
+                .url()
+                .split_once('?')
+                .and_then(|(_, query)| query.split('&').find_map(|kv| kv.strip_prefix("agent=")))
+                .unwrap_or("")
+                .to_string();
+            match agent_models(app, &agent) {
+                Some(catalog) => respond_text(request, 200, "application/json", serde_json::to_string(&catalog)?),
+                None => respond_text(request, 404, "text/plain", "unknown agent"),
+            }
+        }
         (Method::Get, "/api/config") => {
             respond_text(request, 200, "application/json", config_json(&current_config(app)).to_string())
         }
         (Method::Get, "/api/skills") => {
             let body = serde_json::to_string(&list_skills(app))?;
             respond_text(request, 200, "application/json", body)
+        }
+        (Method::Get, "/api/chat/state") => {
+            respond_text(request, 200, "application/json", load_chat_state(app)?.to_string())
+        }
+        (Method::Post, "/api/chat/state") => {
+            let json = header_value(&request, "Content-Type")
+                .is_some_and(|c| c.starts_with("application/json"));
+            if !json || !same_origin(&request) {
+                return respond_text(request, 403, "text/plain", "forbidden");
+            }
+            let mut body = String::new();
+            request.as_reader().take(MAX_CHAT_STATE + 1).read_to_string(&mut body)?;
+            if body.len() as u64 > MAX_CHAT_STATE {
+                return respond_text(request, 413, "text/plain", "chat state is too large");
+            }
+            let req: ChatStateRequest = match serde_json::from_str(&body) {
+                Ok(req) => req,
+                Err(err) => return respond_text(request, 400, "text/plain", format!("bad chat state: {err}")),
+            };
+            match save_chat_state(app, req) {
+                Ok(()) => respond_text(request, 204, "text/plain", Vec::new()),
+                Err(err) => respond_text(request, 500, "text/plain", format!("saving chat state: {err:#}")),
+            }
         }
         (Method::Post, "/api/chat") => {
             // A cross-site page can POST text/plain without a preflight, so
@@ -228,6 +342,54 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
         }
         _ => respond_text(request, 404, "text/plain", "not found"),
     }
+}
+
+/// What the agent's own CLI reports it can run: `codex debug models`, `agy models`.
+/// `None` means an unknown agent; an empty catalog means nothing could be listed
+/// (Claude has no listing command, or the CLI is missing, signed out or slow).
+fn agent_models(app: &App, name: &str) -> Option<chat::ModelCatalog> {
+    let config = current_config(app);
+    let binary = config.agents.get(name)?.binary.clone();
+    if let Some(cached) = app.models.lock().expect("models cache poisoned").get(name) {
+        return Some(cached.clone());
+    }
+    let agent = CliAgent::new(name, binary.as_str());
+    let listed = if agent.is_codex() {
+        run_listing(&binary, &["debug", "models"]).map(|out| chat::parse_codex_models(&out))
+    } else if agent.is_agy() {
+        run_listing(&binary, &["models"]).map(|out| chat::parse_agy_models(&out))
+    } else {
+        None
+    };
+    let catalog = listed.unwrap_or_default();
+    if !catalog.models.is_empty() {
+        app.models.lock().expect("models cache poisoned").insert(name.to_string(), catalog.clone());
+    }
+    Some(catalog)
+}
+
+/// Runs a listing command and returns its stdout, giving up after `LISTING_TIMEOUT`.
+fn run_listing(binary: &str, args: &[&str]) -> Option<String> {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut out = String::new();
+        let _ = stdout.read_to_string(&mut out);
+        let _ = tx.send(out);
+    });
+    let out = rx.recv_timeout(LISTING_TIMEOUT).ok();
+    if out.is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+    out
 }
 
 fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()> {
@@ -565,6 +727,22 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_database_is_created_under_aic_and_keeps_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_chat_db(dir.path()).unwrap();
+        db.execute(
+            "INSERT INTO chat_state (id, state_json, drafts_json, updated_at) VALUES (1, ?1, ?2, 0)",
+            params![r#"{"convs":[]}"#, r#"{}"#],
+        )
+        .unwrap();
+        let state: String = db
+            .query_row("SELECT state_json FROM chat_state WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(state, r#"{"convs":[]}"#);
+        assert!(dir.path().join(".aic/chat/chat.sqlite3").is_file());
+    }
 
     #[test]
     fn skill_frontmatter_with_list_tools() {
