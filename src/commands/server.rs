@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -29,7 +29,7 @@ const HEARTBEAT: Duration = Duration::from_secs(2);
 
 struct App {
     repo_root: PathBuf,
-    config: Config,
+    config: RwLock<Config>,
     /// Host headers we accept; guards against DNS rebinding when listening
     /// on loopback. `None` when bound elsewhere (the user opted in).
     allowed_hosts: Option<Vec<String>>,
@@ -54,13 +54,28 @@ struct ChatRequest {
     effort: Option<String>,
 }
 
+/// The same top-level settings exposed by `aic config`. They are saved to the
+/// global config; a repository override can still take precedence at runtime.
+#[derive(Deserialize)]
+struct SettingsRequest {
+    executor: String,
+    reviewer: String,
+    mode: crate::config::Mode,
+    max_rounds: u32,
+    permission_mode: String,
+    default_base_branch: String,
+    skip_permissions: bool,
+    sandbox: SandboxKind,
+    sandbox_image: String,
+}
+
 pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
     let allowed_hosts = loopback.then(|| {
         vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
     });
-    let app = Arc::new(App { repo_root: repo_root.to_path_buf(), config, allowed_hosts });
+    let app = Arc::new(App { repo_root: repo_root.to_path_buf(), config: RwLock::new(config), allowed_hosts });
 
     let server = tiny_http::Server::http((host, port))
         .map_err(|e| anyhow!("binding {host}:{port}: {e}"))?;
@@ -69,7 +84,7 @@ pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
         eprintln!(
             "warning: listening on {host}: anyone who can reach this port can run your agents \
              (skip_permissions = {}).",
-            app.config.skip_permissions
+            current_config(&app).skip_permissions
         );
     }
 
@@ -94,6 +109,35 @@ fn header_value(request: &Request, name: &str) -> Option<String> {
         .iter()
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str().to_string())
+}
+
+fn current_config(app: &App) -> Config {
+    app.config.read().expect("chat config lock poisoned").clone()
+}
+
+fn config_json(config: &Config) -> serde_json::Value {
+    let mut agents: Vec<&String> = config.agents.keys().collect();
+    agents.sort();
+    serde_json::json!({
+        "executor": config.executor,
+        "reviewer": config.reviewer,
+        "mode": config.mode,
+        "max_rounds": config.max_rounds,
+        "permission_mode": config.permission_mode,
+        "default_base_branch": config.default_base_branch,
+        "skip_permissions": config.skip_permissions,
+        "sandbox": config.sandbox,
+        "sandbox_image": config.sandbox_image,
+        "agents": agents,
+    })
+}
+
+fn same_origin(request: &Request) -> bool {
+    match (header_value(request, "Origin"), header_value(request, "Host")) {
+        (Some(origin), Some(host)) => origin == format!("http://{host}"),
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
 }
 
 fn respond_text(request: Request, status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> Result<()> {
@@ -122,13 +166,15 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
             respond_text(request, 200, "image/svg+xml", FAVICON_SVG)
         }
         (Method::Get, "/api/agents") => {
-            let mut names: Vec<&String> = app.config.agents.keys().collect();
+            let config = current_config(app);
+            let mut names: Vec<&String> = config.agents.keys().collect();
             names.sort();
             let details: serde_json::Map<String, serde_json::Value> = names
                 .iter()
                 .map(|name| {
-                    let cfg = &app.config.agents[*name];
-                    let kind = if CliAgent::new(name.as_str(), cfg.binary.as_str()).is_agy() { "agy" } else { "claude" };
+                    let cfg = &config.agents[*name];
+                    let agent = CliAgent::new(name.as_str(), cfg.binary.as_str());
+                    let kind = if agent.is_codex() { "codex" } else if agent.is_agy() { "agy" } else { "claude" };
                     let info = serde_json::json!({ "kind": kind, "model": cfg.model, "effort": cfg.effort });
                     (name.to_string(), info)
                 })
@@ -136,11 +182,14 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
             let body = serde_json::json!({
                 "agents": names,
                 "details": details,
-                "default": app.config.executor,
+                "default": config.executor,
                 "repo": app.repo_root.display().to_string(),
-                "sandboxed": app.config.sandbox != SandboxKind::None,
+                "sandboxed": config.sandbox != SandboxKind::None,
             });
             respond_text(request, 200, "application/json", body.to_string())
+        }
+        (Method::Get, "/api/config") => {
+            respond_text(request, 200, "application/json", config_json(&current_config(app)).to_string())
         }
         (Method::Get, "/api/skills") => {
             let body = serde_json::to_string(&list_skills(app))?;
@@ -151,12 +200,7 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
             // insist on JSON and on a same-origin Origin when one is sent.
             let json = header_value(&request, "Content-Type")
                 .is_some_and(|c| c.starts_with("application/json"));
-            let same_origin = match (header_value(&request, "Origin"), header_value(&request, "Host")) {
-                (Some(origin), Some(host)) => origin == format!("http://{host}"),
-                (Some(_), None) => false,
-                (None, _) => true,
-            };
-            if !json || !same_origin {
+            if !json || !same_origin(&request) {
                 return respond_text(request, 403, "text/plain", "forbidden");
             }
 
@@ -168,8 +212,54 @@ fn handle(app: &App, mut request: Request) -> Result<()> {
             };
             chat_turn(app, request, req)
         }
+        (Method::Post, "/api/config") => {
+            let json = header_value(&request, "Content-Type")
+                .is_some_and(|c| c.starts_with("application/json"));
+            if !json || !same_origin(&request) {
+                return respond_text(request, 403, "text/plain", "forbidden");
+            }
+            let mut body = String::new();
+            request.as_reader().take(MAX_BODY).read_to_string(&mut body)?;
+            let req: SettingsRequest = match serde_json::from_str(&body) {
+                Ok(req) => req,
+                Err(err) => return respond_text(request, 400, "text/plain", format!("bad request: {err}")),
+            };
+            save_settings(app, request, req)
+        }
         _ => respond_text(request, 404, "text/plain", "not found"),
     }
+}
+
+fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()> {
+    if req.max_rounds == 0 {
+        return respond_text(request, 400, "text/plain", "max_rounds must be at least 1");
+    }
+    if !matches!(req.permission_mode.as_str(), "acceptEdits" | "plan") {
+        return respond_text(request, 400, "text/plain", "permission_mode must be acceptEdits or plan");
+    }
+    if req.sandbox_image.trim().is_empty() {
+        return respond_text(request, 400, "text/plain", "sandbox_image cannot be empty");
+    }
+
+    let mut global = Config::load_global()?;
+    let available = current_config(app);
+    if !available.agents.contains_key(&req.executor) || !available.agents.contains_key(&req.reviewer) {
+        return respond_text(request, 400, "text/plain", "executor and reviewer must name configured agents");
+    }
+    global.executor = req.executor;
+    global.reviewer = req.reviewer;
+    global.mode = req.mode;
+    global.max_rounds = req.max_rounds;
+    global.permission_mode = req.permission_mode;
+    global.default_base_branch = req.default_base_branch;
+    global.skip_permissions = req.skip_permissions;
+    global.sandbox = req.sandbox;
+    global.sandbox_image = req.sandbox_image;
+    global.save_global()?;
+
+    let effective = Config::load_merged(&app.repo_root)?;
+    *app.config.write().expect("chat config lock poisoned") = effective.clone();
+    respond_text(request, 200, "application/json", config_json(&effective).to_string())
 }
 
 /// One entry of `GET /api/skills`, read from a `SKILL.md` frontmatter.
@@ -188,7 +278,7 @@ struct Skill {
 /// mount it). Repo skills win on a name clash.
 fn list_skills(app: &App) -> Vec<Skill> {
     let mut dirs = vec![app.repo_root.join(".claude").join("skills")];
-    if app.config.sandbox == SandboxKind::None {
+    if current_config(app).sandbox == SandboxKind::None {
         if let Ok(home) = std::env::var("HOME") {
             dirs.push(PathBuf::from(home).join(".claude").join("skills"));
         }
@@ -291,14 +381,15 @@ fn send(tx: &Sender<Vec<u8>>, event: &ChatEvent) -> bool {
 }
 
 fn build_agent(app: &App, name: &str) -> Result<CliAgent> {
-    let cfg = app.config.agent(name)?;
+    let config = current_config(app);
+    let cfg = config.agent(name)?;
     Ok(CliAgent::with_defaults(
         name.to_string(),
         cfg.binary.clone(),
         cfg.model.clone(),
         cfg.effort.clone(),
     )
-    .with_sandbox(Sandbox::from_config(&app.config)?))
+    .with_sandbox(Sandbox::from_config(&config)?))
 }
 
 fn failed(error: String) -> ChatEvent {
@@ -315,7 +406,8 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
         Ok(agent) => agent,
         Err(err) => return respond_text(request, 400, "text/plain", format!("{err:#}")),
     };
-    let sandboxed = app.config.sandbox != SandboxKind::None;
+    let config = current_config(app);
+    let sandboxed = config.sandbox != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
 
     // Tell the agent what it may do, so it says so instead of hunting for a
@@ -335,7 +427,7 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
 
     let mut prompt = req.prompt;
     let mut system_prompt = Some(system.clone());
-    if agent.is_agy() {
+    if agent.is_agy() || agent.is_codex() {
         // No system-prompt flag: fold it into the first turn, which the
         // session then remembers.
         if resume.is_none() {
@@ -353,9 +445,9 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
         // A read-only participant can still read: the sandbox's read-only
         // mount makes skipping prompts safe. Without a sandbox, fall back to
         // plan mode (no edits) and keep prompts on.
-        skip_permissions: app.config.skip_permissions && (req.write || sandboxed),
+        skip_permissions: config.skip_permissions && (req.write || sandboxed),
         permission: if req.write {
-            Some(app.config.permission_mode.clone())
+            Some(config.permission_mode.clone())
         } else if sandboxed {
             None
         } else {
@@ -405,7 +497,7 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
                     }
                 })
             };
-            let result = pump_agent(agent.is_agy(), process, &tx);
+            let result = pump_agent(agent.is_agy(), agent.is_codex(), process, &tx);
             finished.store(true, Ordering::Relaxed);
             watcher.thread().unpark();
             let _ = watcher.join();
@@ -419,7 +511,7 @@ fn chat_turn(app: &App, request: Request, req: ChatRequest) -> Result<()> {
     Ok(())
 }
 
-fn pump_agent(is_agy: bool, process: AgentProcess, tx: &Sender<Vec<u8>>) -> Result<()> {
+fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<Vec<u8>>) -> Result<()> {
     let AgentProcess { mut child, killer } = process;
     let stdout = child.stdout.take().context("agent stdout was not piped")?;
     let mut stderr = child.stderr.take().context("agent stderr was not piped")?;
@@ -433,7 +525,7 @@ fn pump_agent(is_agy: bool, process: AgentProcess, tx: &Sender<Vec<u8>>) -> Resu
     let mut finished = false;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
-        let Some(event) = chat::parse_line(is_agy, &line) else { continue };
+        let Some(event) = chat::parse_line_for(is_agy, is_codex, &line) else { continue };
         let event = match event {
             // The agent only reports the reply at the end (no deltas seen):
             // surface it as one chunk so the page has something to render.

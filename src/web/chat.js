@@ -11,6 +11,7 @@ let meta = { agents: [], details: {}, default: "", repo: "", sandboxed: false };
 let skills = []; // [{ name, description, argument_hint, requires_write }]
 const running = new Map(); // `${conv id}\n${participant}` -> AbortController
 const cardParts = new WeakMap(); // log entry -> DOM parts of its card
+const MAX_PARTICIPANTS = 5;
 
 /* ---------- small helpers ---------- */
 function el(tag, cls, text) {
@@ -39,6 +40,7 @@ const ICONS = {
   download: I('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
   alert: I('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>'),
   rename: I('<path d="M4 20h16"/><path d="M6 16l9.5-9.5 3 3L9 19H6z"/>'),
+  settings: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.08A1.7 1.7 0 0 0 10.66 18.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 14.7 1.7 1.7 0 0 0 5.44 13.66H5v-3h.08A1.7 1.7 0 0 0 6.64 9.62 1.7 1.7 0 0 0 6.3 7.74l-.06-.06 2.12-2.12.06.06A1.7 1.7 0 0 0 10.3 6 1.7 1.7 0 0 0 11.34 4.44V4h3v.08A1.7 1.7 0 0 0 15.38 5.64a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06A1.7 1.7 0 0 0 19 9.3a1.7 1.7 0 0 0 1.56 1.04H21v3h-.08A1.7 1.7 0 0 0 19.4 15z"/>'),
 };
 function icon(kind) {
   const t = document.createElement("template");
@@ -89,6 +91,10 @@ function load() {
       if (e.pending) { e.pending = false; if (!e.text) { e.error = true; e.soft = true; e.text = "interrupted"; } }
     });
   });
+  // Older sessions may already contain placeholder conversations created by
+  // opening the chat and leaving it immediately. They have no chat entries,
+  // so remove them during migration too.
+  pruneEmptyConversations();
 }
 function storeItem(key, value) {
   try { localStorage.setItem(key, value); return true; }
@@ -111,6 +117,24 @@ function saveDraftsSoon() { clearTimeout(saveDrafts.t); saveDrafts.t = setTimeou
 window.addEventListener("pagehide", () => { if (save.t) save(); if (saveDrafts.t) saveDrafts(); });
 
 const cur = () => state.convs.find((c) => c.id === state.current);
+const hasInteraction = (c) => Array.isArray(c.log) && c.log.length > 0;
+function pruneEmptyConversations() {
+  const empty = new Set(state.convs.filter((c) => !hasInteraction(c)).map((c) => c.id));
+  if (!empty.size) return false;
+  state.convs = state.convs.filter((c) => !empty.has(c.id));
+  empty.forEach((id) => { delete drafts[id]; });
+  if (empty.has(state.current)) state.current = null;
+  saveDraftsSoon();
+  return true;
+}
+function discardEmptyConversation(c) {
+  if (!c || hasInteraction(c)) return false;
+  state.convs = state.convs.filter((x) => x !== c);
+  delete drafts[c.id];
+  if (state.current === c.id) state.current = null;
+  saveDraftsSoon();
+  return true;
+}
 const runKey = (c, p) => c.id + "\n" + p.name;
 const isRunning = (c, p) => running.has(runKey(c, p));
 const busy = (c) => !!c && [...running.keys()].some((k) => k.startsWith(c.id + "\n"));
@@ -148,14 +172,14 @@ function writeBadge() {
 /* ---------- participants / conversations ---------- */
 const NAME_OK = /^[\w-]+$/;
 const cleanName = (s) => s.trim().replace(/\s+/g, "-").replace(/[^\w-]/g, "");
-const agentLabel = (a) => a.charAt(0).toUpperCase() + a.slice(1); // "claude" -> "Claude"
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1); // "claude" -> "Claude", "opus" -> "Opus"
 function uniqueName(c, base) {
   let name = base, n = 2;
   while (c.participants.some((p) => p.name === name)) name = base + "-" + n++;
   return name;
 }
 function addParticipant(c, f) {
-  const p = { name: uniqueName(c, cleanName(f.name || agentLabel(f.agent)) || "agent"), agent: f.agent, role: f.role || "", write: !!f.write,
+  const p = { name: uniqueName(c, cleanName(f.name || cap(f.agent)) || "agent"), agent: f.agent, role: f.role || "", write: !!f.write,
     model: f.model || "", effort: f.effort || "", session: "", seen: 0 };
   p.hue = typeof f.hue === "number" ? f.hue : pickHue(c);
   c.participants.push(p);
@@ -172,7 +196,8 @@ function newConv() {
   if (!agent) toast("No agents configured: check `aic config show`.");
 }
 function switchTo(id) {
-  const old = cur(); if (old) { drafts[old.id] = $("input").value; saveDraftsSoon(); }
+  const old = cur();
+  if (old && !discardEmptyConversation(old)) { drafts[old.id] = $("input").value; saveDraftsSoon(); }
   state.current = id;
   $("input").value = drafts[id] || ""; autosize();
   document.body.classList.remove("drawer");
@@ -420,7 +445,7 @@ function exportConv(c, kind) {
   let text, type;
   if (kind === "json") { text = JSON.stringify(c, null, 2); type = "application/json"; }
   else {
-    const who = (name) => { const p = c.participants.find((x) => x.name === name); return p ? `${name} (${agentLabel(p.agent)}${p.model ? ", " + p.model : ""})` : name; };
+    const who = (name) => { const p = c.participants.find((x) => x.name === name); return p ? `${name} (${cap(p.agent)}${p.model ? ", " + cap(p.model) : ""})` : name; };
     const out = [`# ${c.title}`, "", "Participants: " + c.participants.map((p) => who(p.name)).join(", "), ""];
     c.log.forEach((e) => {
       const head = e.from === "you" ? "you" + (e.to ? " → " + e.to.join(", ") : "") : who(e.from);
@@ -443,12 +468,14 @@ function renderBar() {
     chip.title = (p.role ? p.role + "\n\n" : "") + "Edit " + p.name;
     chip.appendChild(avatar(c, p.name));
     chip.appendChild(el("span", "", p.name));
-    chip.appendChild(el("small", "", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
+    chip.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) chip.appendChild(writeBadge());
     chip.onclick = () => openDialog(p);
     chips.appendChild(chip);
   });
-  $("addbtn").disabled = !c || !meta.agents.length;
+  const add = $("addbtn");
+  add.hidden = !!c && c.participants.length >= MAX_PARTICIPANTS;
+  add.disabled = !c || !meta.agents.length;
 
   const lay = $("layout"); lay.textContent = "";
   if (c && c.participants.length > 1) {
@@ -511,7 +538,7 @@ function paintCard(c, e) {
     k.card.style.setProperty("--h", hueFor(c, e.from));
     k.head.textContent = "";
     k.head.append(avatar(c, e.from), el("span", "name", e.from));
-    if (p) k.head.appendChild(el("span", "badge", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
+    if (p) k.head.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p?.write) k.head.appendChild(writeBadge());
     if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
     k.head.appendChild(el("span", "grow"));
@@ -647,7 +674,7 @@ function deleteEntry(c, e) {
 // The log is appended to, not rebuilt: rebuilding re-announces everything to
 // screen readers and loses the reader's selection. It's rebuilt only when
 // something earlier changed (switch, delete, edit, participants, layout).
-const view = { id: null, sig: "", entries: [], wrap: null, after: null, row: null, lastUser: null };
+const view = { id: null, sig: "", entries: [], wrap: null, after: null, rows: new Map(), lastUser: null };
 const logSig = (c) => JSON.stringify([c.participants.map((p) => [p.name, p.agent, p.model, p.write, hueOf(p)]), state.layout]);
 function renderLog(force) {
   const c = cur(), msgs = $("msgs");
@@ -656,7 +683,7 @@ function renderLog(force) {
   if (!c || !c.log.length) { view.id = null; msgs.replaceChildren(emptyState(c)); return; }
   const prefix = view.id === c.id && view.sig === logSig(c) && view.entries.length <= c.log.length && view.entries.every((e, i) => c.log[i] === e);
   if (force || !prefix) {
-    view.id = c.id; view.sig = logSig(c); view.entries = []; view.row = null; view.lastUser = null;
+    view.id = c.id; view.sig = logSig(c); view.entries = []; view.rows = new Map(); view.lastUser = null;
     view.wrap = el("div", "wrap"); view.after = el("div", "after");
     view.wrap.appendChild(view.after);
     msgs.replaceChildren(view.wrap);
@@ -667,7 +694,6 @@ function renderLog(force) {
 function appendEntry(c, e) {
   view.entries.push(e);
   if (e.from === "you") {
-    view.row = null;
     const prev = view.lastUser;
     const u = userBubble(c, e);
     view.wrap.insertBefore(u, view.after);
@@ -675,8 +701,8 @@ function appendEntry(c, e) {
     if (prev) prev._fill(); // only the newest message can be edited
     return;
   }
-  let r = view.row;
-  if (!r || r.round !== e.round || r.cells.get(e.from)?.taken) r = newRow(c, e.round);
+  let r = view.rows.get(e.round);
+  if (!r || r.cells.get(e.from)?.taken) r = newRow(c, e.round);
   const node = card(c, e);
   let cell = r.cells.get(e.from);
   if (!cell) { // someone no longer in the conversation: extra column
@@ -701,7 +727,7 @@ function newRow(c, round) {
     r.el.appendChild(g); r.cells.set(n, { node: g, col: i + 1 });
   });
   view.wrap.insertBefore(r.el, view.after);
-  view.row = r;
+  view.rows.set(round, r);
   return r;
 }
 // "Ask them to comment" under the last round, when there's something to comment on.
@@ -741,7 +767,7 @@ function emptyState(c) {
     const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
     b.style.setProperty("--h", hueOf(p));
     b.append(avatar(c, p.name, true), el("span", "name", p.name));
-    const tags = el("span"); tags.appendChild(el("span", "badge", agentLabel(p.agent) + (p.model ? " · " + p.model : "")));
+    const tags = el("span"); tags.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) { tags.append(" "); tags.appendChild(writeBadge()); }
     b.appendChild(tags);
     if (p.role) b.appendChild(el("span", "role", p.role));
@@ -875,6 +901,35 @@ function promptFor(c, p, opts = {}) {
   }
   return { text: (regen ? regen + "\n\n" : "") + msgs.map(fmt).join("\n\n"), skill: "" };
 }
+// A session belongs to the underlying CLI, not to the participant displayed in
+// the page. When its agent changes, the old session cannot be resumed (for
+// example, a Claude session is not meaningful to agy). Give the replacement
+// agent everything this participant could already see before its next message.
+function historyForNewSession(c, p, until) {
+  return c.log.slice(0, until).filter((e) =>
+    !e.pending && !e.error && e.text && !(e.to && !e.to.includes(p.name))
+  ).map((e) => {
+    const who = e.from === "you" ? "user" : e.from;
+    const text = e.edited
+      ? "(edited: this replaces my previous message; disregard that one and any reply to it)\n" + e.text
+      : e.text;
+    return `[${who}]: ${text}`;
+  }).join("\n\n");
+}
+
+function bootstrapPrompt(c, job) {
+  // The current prompt already contains every message for a brand-new
+  // participant (whose `seen` is zero). A changed agent, however, has a
+  // participant with prior messages marked as seen but no resumable session.
+  const history = historyForNewSession(c, job.p, job.oldSeen);
+  if (!history) return job.text;
+  const context = "---\nConversation before this agent session. Use it as context; do not answer it separately.\n\n"
+    + history + "\n\n---\n";
+  // Claude skills only work when the slash command starts the prompt.
+  return job.skill
+    ? job.text + "\n\n" + context
+    : context + "New messages to answer:\n\n" + job.text;
+}
 function systemFor(c, p) {
   const others = c.participants.filter((q) => q !== p).map((q) => q.name);
   let s = others.length
@@ -892,18 +947,23 @@ function systemFor(c, p) {
 // placeholder is logged so replies from this same round stay unseen for the next one.
 function launch(c, targets, userText, to, opts = {}) {
   if (busy(c)) return;
-  c.round = (c.round || 0) + 1; c.updated = Date.now();
+  // A regenerated reply keeps its round, so it fills its own slot in that round's row.
+  const round = opts.round ?? (c.round = (c.round || 0) + 1);
+  c.updated = Date.now();
   if (userText) {
     const first = !c.log.some((e) => e.from === "you");
-    c.log.push({ from: "you", round: c.round, text: userText, t0: Date.now(), ...(to ? { to } : {}), ...(opts.edited ? { edited: true } : {}) });
+    c.log.push({ from: "you", round, text: userText, t0: Date.now(), ...(to ? { to } : {}), ...(opts.edited ? { edited: true } : {}) });
     if (first && !c.renamed) c.title = userText.slice(0, 48);
   }
   const jobs = targets
     .map((p) => ({ p, ...promptFor(c, p, opts), oldSeen: p.seen }))
     .filter((j) => j.text.trim() && unseen(c, j.p, opts.until).length);
+  jobs.forEach((j) => {
+    if (!j.p.session) j.text = bootstrapPrompt(c, j);
+  });
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
-    j.entry = { from: j.p.name, round: c.round, text: "", pending: true, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}) };
+    j.entry = { from: j.p.name, round, text: "", pending: true, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -921,7 +981,7 @@ function regenerate(c, e, p) {
   p.seen = seen;
   removeEntry(c, e);
   // Only what the original reply answered; later messages stay unread.
-  launch(c, [p], null, null, { regen: !e.error, until: idx });
+  launch(c, [p], null, null, { regen: !e.error, until: idx, round: e.round });
 }
 
 function stopAll(c) { running.forEach((ctl, k) => { if (k.startsWith(c.id + "\n")) ctl.abort(); }); }
@@ -1043,7 +1103,7 @@ function acUpdate() {
     const used = m[1].trim().split(/\s+/).filter(Boolean).map((n) => n.slice(1));
     const q = m[2].toLowerCase();
     acItems = c.participants.filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
-      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: agentLabel(p.agent) + (p.role ? " · " + p.role : "") }));
+      .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: cap(p.agent) + (p.role ? " · " + p.role : "") }));
   } else if (c && skills.length && (m = before.match(SKILL_Q))) {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
@@ -1107,12 +1167,12 @@ $("input").onclick = acUpdate;
 /* ---------- participant dialog ---------- */
 let editing = null; // participant being edited, or null when adding
 let dlgHue = 0;
-const MODELS = { claude: ["opus", "sonnet", "haiku"], agy: [] };
-const EFFORTS = { claude: ["low", "medium", "high", "xhigh", "max"], agy: [] };
+const MODELS = { claude: ["opus", "sonnet", "haiku"], agy: [], codex: [] };
+const EFFORTS = { claude: ["low", "medium", "high", "xhigh", "max"], agy: [], codex: ["low", "medium", "high", "xhigh"] };
 const access = () => document.querySelector('input[name="paccess"]:checked').value;
 function fillList(id, values) {
   const dl = $(id); dl.textContent = "";
-  uniq(values.filter(Boolean)).forEach((v) => { const o = el("option"); o.value = v; dl.appendChild(o); });
+  uniq(values.filter(Boolean).map(cap)).forEach((v) => { const o = el("option"); o.value = v; dl.appendChild(o); });
 }
 function openDialog(p) {
   const c = cur(); if (!c || !meta.agents.length) return;
@@ -1121,7 +1181,7 @@ function openDialog(p) {
   $("psave").textContent = p ? "Save" : "Add";
   $("pname").value = p ? p.name : "";
   $("pagent").value = p ? p.agent : defaultAgent();
-  $("pmodel").value = p?.model || ""; $("peffort").value = p?.effort || "";
+  $("pmodel").value = cap(p?.model || ""); $("peffort").value = cap(p?.effort || "");
   $("prole").value = p?.role || "";
   document.querySelector(`input[name="paccess"][value="${p?.write ? "write" : "read"}"]`).checked = true;
   dlgHue = p ? hueOf(p) : pickHue(c);
@@ -1136,11 +1196,13 @@ function openDialog(p) {
 }
 function updateDialog() {
   const c = cur(), agent = $("pagent").value, d = meta.details?.[agent] || {}, kind = d.kind || "claude";
-  $("pmodel").placeholder = "agent default" + (d.model ? ` (${d.model})` : "");
-  $("peffort").placeholder = "agent default" + (d.effort ? ` (${d.effort})` : "");
+  $("pmodel").placeholder = "agent default" + (d.model ? ` (${cap(d.model)})` : "");
+  $("peffort").placeholder = "agent default" + (d.effort ? ` (${cap(d.effort)})` : "");
   fillList("pmodels", [d.model, ...MODELS[kind]]);
   fillList("pefforts", [d.effort, ...EFFORTS[kind]]);
-  $("pagentwarn").hidden = !(editing && editing.agent !== agent && editing.session);
+  // A new participant, or an existing one moved to another agent, starts a
+  // fresh native session. Explain how its first prompt is seeded.
+  $("pagentwarn").hidden = !!editing && editing.agent === agent;
   const w = $("pwritewarn");
   w.hidden = access() !== "write";
   w.replaceChildren(icon("alert"), el("span", "", `Can create, change and delete files in ${meta.repo || "this repository"}, following the permission mode in your config.`));
@@ -1183,11 +1245,14 @@ $("premove").onclick = () => {
 $("pform").onsubmit = (e) => {
   e.preventDefault();
   const c = cur(); if (!c) return;
+  if (!editing && c.participants.length >= MAX_PARTICIPANTS) {
+    return dialogError(`A conversation can have at most ${MAX_PARTICIPANTS} participants.`);
+  }
   const agent = $("pagent").value;
-  const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(agentLabel(agent)) || "agent"));
+  const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(cap(agent)) || "agent"));
   if (!NAME_OK.test(name)) return dialogError("Use letters, digits, - and _ in the name.");
   if (c.participants.some((q) => q !== editing && q.name === name)) return dialogError(`There's already a participant called ${name}.`);
-  const fields = { agent, role: $("prole").value.trim(), write: access() === "write", model: $("pmodel").value.trim(), effort: $("peffort").value.trim(), hue: dlgHue };
+  const fields = { agent, role: $("prole").value.trim(), write: access() === "write", model: $("pmodel").value.trim().toLowerCase(), effort: $("peffort").value.trim().toLowerCase(), hue: dlgHue };
   if (editing) {
     const p = editing;
     if (isRunning(c, p) && (name !== p.name || agent !== p.agent)) return dialogError(`Wait for ${p.name} to finish replying.`);
@@ -1212,6 +1277,77 @@ $("pform").onsubmit = (e) => {
   c.updated = Date.now(); save(); render();
 };
 
+/* ---------- configuration dialog ---------- */
+function setOptions(id, names, selected) {
+  const select = $(id); select.textContent = "";
+  names.forEach((name) => {
+    const option = el("option", "", cap(name)); option.value = name;
+    option.selected = name === selected;
+    select.appendChild(option);
+  });
+}
+async function openConfig() {
+  const error = $("cerror"), saveBtn = $("csave");
+  error.hidden = true; $("cwarn").hidden = true;
+  saveBtn.disabled = true;
+  try {
+    const res = await fetch("/api/config");
+    if (!res.ok) throw new Error(await res.text());
+    const config = await res.json();
+    setOptions("cexecutor", config.agents, config.executor);
+    setOptions("creviewer", config.agents, config.reviewer);
+    $("cmode").value = config.mode;
+    $("cmaxrounds").value = config.max_rounds;
+    $("cpermission").value = config.permission_mode;
+    $("cbasebranch").value = config.default_base_branch || "";
+    $("cskippermissions").checked = !!config.skip_permissions;
+    $("csandbox").value = config.sandbox;
+    $("csandboximage").value = config.sandbox_image;
+    $("cdialog").showModal();
+  } catch (err) {
+    error.textContent = "Couldn't load configuration: " + (err.message || err);
+    error.hidden = false;
+    $("cdialog").showModal();
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+$("ccancel").onclick = () => $("cdialog").close();
+$("cform").onsubmit = async (e) => {
+  e.preventDefault();
+  const error = $("cerror"), saveBtn = $("csave");
+  error.hidden = true; saveBtn.disabled = true;
+  const payload = {
+    executor: $("cexecutor").value,
+    reviewer: $("creviewer").value,
+    mode: $("cmode").value,
+    max_rounds: Number($("cmaxrounds").value),
+    permission_mode: $("cpermission").value,
+    default_base_branch: $("cbasebranch").value.trim(),
+    skip_permissions: $("cskippermissions").checked,
+    sandbox: $("csandbox").value,
+    sandbox_image: $("csandboximage").value.trim(),
+  };
+  try {
+    const res = await fetch("/api/config", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const config = await res.json();
+    meta.default = config.executor;
+    meta.agents = config.agents;
+    meta.sandboxed = config.sandbox !== "none";
+    $("cdialog").close();
+    render();
+    toast("Configuration saved. New agent turns use it.");
+  } catch (err) {
+    error.textContent = "Couldn't save configuration: " + (err.message || err);
+    error.hidden = false;
+  } finally {
+    saveBtn.disabled = false;
+  }
+};
+
 /* ---------- buttons and shortcuts ---------- */
 $("new").appendChild(icon("plus"));
 $("new").setAttribute("aria-label", "New conversation");
@@ -1221,12 +1357,14 @@ $("menu").onclick = () => document.body.classList.add("drawer");
 $("scrim").onclick = () => document.body.classList.remove("drawer");
 $("addbtn").appendChild(icon("plus"));
 $("addbtn").onclick = () => openDialog(null);
+$("configbtn").appendChild(icon("settings"));
+$("configbtn").onclick = openConfig;
 $("search").oninput = renderSidebar;
 $("search").onkeydown = (e) => { if (e.key === "Escape" && $("search").value) { e.stopPropagation(); $("search").value = ""; renderSidebar(); } };
 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { e.preventDefault(); newConv(); return; }
-  if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open) return;
+  if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open || $("cdialog").open) return;
   if (openMenu) { closeMenu(); return; }
   if (document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
   const c = cur();
@@ -1241,7 +1379,7 @@ document.addEventListener("keydown", (e) => {
     $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
   }
   try { skills = await (await fetch("/api/skills")).json(); } catch { skills = []; }
-  meta.agents.forEach((a) => { const o = el("option", "", agentLabel(a)); o.value = a; $("pagent").appendChild(o); });
+  meta.agents.forEach((a) => { const o = el("option", "", cap(a)); o.value = a; $("pagent").appendChild(o); });
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
 })();

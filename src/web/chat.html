@@ -23,6 +23,7 @@
     <button id="menu" class="icon" aria-label="Conversations"></button>
     <span id="chips"></span>
     <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
+    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
   </div>
   <div id="banner" role="alert" hidden></div>
   <div id="view">
@@ -55,7 +56,7 @@
     </div>
     <datalist id="pmodels"></datalist>
     <datalist id="pefforts"></datalist>
-    <p class="note warn" id="pagentwarn" hidden>The new agent starts without this conversation's history.</p>
+    <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
     <fieldset class="colours">
       <legend>Colour</legend>
       <span id="phues" role="radiogroup" aria-label="Colour"></span>
@@ -75,6 +76,31 @@
       <span class="grow"></span>
       <button type="button" id="pcancel">Cancel</button>
       <button type="submit" id="psave" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cdialog" aria-labelledby="ctitle">
+  <form id="cform" method="dialog">
+    <h2 id="ctitle">Configuration</h2>
+    <div class="grid2">
+      <label>Executor <select id="cexecutor"></select></label>
+      <label>Reviewer <select id="creviewer"></select></label>
+      <label>Review mode <select id="cmode"><option value="manual">Manual</option><option value="auto">Auto</option></select></label>
+      <label>Maximum rounds <input type="number" id="cmaxrounds" min="1" step="1" required></label>
+      <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
+      <label>Base branch <input type="text" id="cbasebranch" placeholder="Auto-detect" autocomplete="off" spellcheck="false"></label>
+      <label>Sandbox <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
+      <label>Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="cskippermissions"> Automatically approve tool permissions in headless runs</label>
+    <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
+    <p class="note warn" id="cwarn" hidden></p>
+    <p class="note err" id="cerror" hidden></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="ccancel">Cancel</button>
+      <button type="submit" id="csave" class="primary">Save</button>
     </div>
   </form>
 </dialog>

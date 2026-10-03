@@ -164,7 +164,12 @@ fn binary_stem(binary: &str) -> &str {
 
 fn apply_permission_flag(cmd: &mut Command, binary: &str, permission: &str) {
     let is_plan = permission.eq_ignore_ascii_case("plan");
-    if binary_stem(binary) == "agy" {
+    if binary_stem(binary) == "codex" {
+        cmd.args(["--sandbox", if is_plan { "read-only" } else { "workspace-write" }]);
+        if !is_plan {
+            cmd.arg("--approve-for-me");
+        }
+    } else if binary_stem(binary) == "agy" {
         cmd.arg("--mode").arg(if is_plan { "plan" } else { "accept-edits" });
     } else {
         cmd.arg("--permission-mode")

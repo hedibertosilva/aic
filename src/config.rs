@@ -112,6 +112,14 @@ impl Default for Config {
                 effort: String::new(),
             },
         );
+        agents.insert(
+            "codex".to_string(),
+            AgentConfig {
+                binary: "codex".to_string(),
+                model: String::new(),
+                effort: String::new(),
+            },
+        );
         Config {
             executor: "claude".to_string(),
             reviewer: "gemini".to_string(),
@@ -231,7 +239,17 @@ impl Config {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        let mut config: Config = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        config.ensure_builtin_agents();
+        Ok(config)
+    }
+
+    /// Add agents introduced by newer aic versions without replacing custom
+    /// entries in an existing config file.
+    fn ensure_builtin_agents(&mut self) {
+        for (name, agent) in Config::default().agents {
+            self.agents.entry(name).or_insert(agent);
+        }
     }
 
     pub fn save_global(&self) -> Result<()> {
@@ -287,10 +305,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_config_has_claude_and_gemini_agents() {
+    fn default_config_has_claude_gemini_and_codex_agents() {
         let config = Config::default();
         assert_eq!(config.agent("claude").unwrap().binary, "claude");
         assert_eq!(config.agent("gemini").unwrap().binary, "agy");
+        assert_eq!(config.agent("codex").unwrap().binary, "codex");
         assert_eq!(config.mode, Mode::Manual);
         assert_eq!(config.max_rounds, 3);
     }
@@ -340,6 +359,14 @@ mod tests {
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.executor, config.executor);
         assert_eq!(parsed.agents.len(), config.agents.len());
+    }
+
+    #[test]
+    fn older_config_gains_codex_without_overwriting_agents() {
+        let mut config: Config = toml::from_str("[agents.claude]\nbinary = 'custom-claude'\n").unwrap();
+        config.ensure_builtin_agents();
+        assert_eq!(config.agent("claude").unwrap().binary, "custom-claude");
+        assert_eq!(config.agent("codex").unwrap().binary, "codex");
     }
 
     #[test]

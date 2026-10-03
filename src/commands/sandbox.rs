@@ -28,13 +28,20 @@ pub fn build(config: &Config, tag: Option<String>, claude_version: Option<String
     let tmp = tempfile::tempdir().context("creating build context")?;
     let context = tmp.path().to_path_buf();
     let agy = find_on_path("agy");
+    let codex = find_on_path("codex");
     if let Some(agy) = &agy {
         std::fs::copy(agy, context.join("agy"))
             .with_context(|| format!("copying {} into the build context", agy.display()))?;
     } else {
         eprintln!("warning: 'agy' not found on PATH; the image will only contain claude");
     }
-    std::fs::write(context.join("Dockerfile"), templates::sandbox_dockerfile(agy.is_some()))?;
+    if let Some(codex) = &codex {
+        std::fs::copy(codex, context.join("codex"))
+            .with_context(|| format!("copying {} into the build context", codex.display()))?;
+    } else {
+        eprintln!("warning: 'codex' not found on PATH; the image will not contain codex");
+    }
+    std::fs::write(context.join("Dockerfile"), templates::sandbox_dockerfile(agy.is_some(), codex.is_some()))?;
 
     let mut build_args = Vec::new();
     if let Some(v) = claude_version {

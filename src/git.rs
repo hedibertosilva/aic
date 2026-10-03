@@ -177,16 +177,6 @@ fn split_nul_keep_empty(bytes: &[u8]) -> Vec<String> {
     fields
 }
 
-pub fn is_repo(dir: &Path) -> bool {
-    Command::new(git_binary())
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// The top-level directory of the repo containing `dir`.
 pub fn repo_root(dir: &Path) -> Result<std::path::PathBuf> {
     let out = run_git(dir, &["rev-parse", "--show-toplevel"])?;
@@ -295,13 +285,13 @@ mod tests {
     #[test]
     fn detects_a_real_repo() {
         let dir = init_repo();
-        assert!(is_repo(dir.path()));
+        assert_eq!(repo_root(dir.path()).unwrap(), dir.path());
     }
 
     #[test]
     fn non_repo_is_not_a_repo() {
         let dir = tempdir().unwrap();
-        assert!(!is_repo(dir.path()));
+        assert!(repo_root(dir.path()).is_err());
     }
 
     #[test]

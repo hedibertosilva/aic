@@ -1,4 +1,4 @@
-//! Turns the raw `stream-json` lines of `claude` and `agy` into one small
+//! Turns the raw JSON event lines of Claude, Gemini and Codex into one small
 //! event vocabulary the web chat understands.
 
 use serde::Serialize;
@@ -63,12 +63,46 @@ impl Usage {
 
 /// Parses one stdout line. Lines that aren't JSON, or events the chat has no
 /// use for (hooks, tool calls, ...), yield `None`.
+#[cfg(test)]
 pub fn parse_line(is_agy: bool, line: &str) -> Option<ChatEvent> {
+    parse_line_for(is_agy, false, line)
+}
+
+pub fn parse_line_for(is_agy: bool, is_codex: bool, line: &str) -> Option<ChatEvent> {
     let value: Value = serde_json::from_str(line.trim()).ok()?;
-    if is_agy {
+    if is_codex {
+        parse_codex(&value)
+    } else if is_agy {
         parse_agy(&value)
     } else {
         parse_claude(&value)
+    }
+}
+
+fn parse_codex(value: &Value) -> Option<ChatEvent> {
+    match str_of(value, "type")? {
+        "thread.started" => Some(ChatEvent::Session { id: str_of(value, "thread_id")?.to_string() }),
+        "item.started" => {
+            let item = value.get("item")?;
+            (str_of(item, "type") == Some("command_execution")).then(|| {
+                let command = str_of(item, "command").unwrap_or("command");
+                ChatEvent::Activity { text: format!("Bash: {}", command.lines().next().unwrap_or("")) }
+            })
+        }
+        "item.completed" => {
+            let item = value.get("item")?;
+            (str_of(item, "type") == Some("agent_message")).then(|| ChatEvent::Delta {
+                text: str_of(item, "text").unwrap_or_default().to_string(),
+            })
+        }
+        "turn.completed" => Some(ChatEvent::Done { ok: true, text: String::new(), error: None, usage: None }),
+        "turn.failed" => Some(ChatEvent::Done {
+            ok: false,
+            text: String::new(),
+            error: value.get("error").and_then(Value::as_str).map(str::to_string).or_else(|| Some("Codex turn failed".into())),
+            usage: None,
+        }),
+        _ => None,
     }
 }
 
@@ -243,6 +277,15 @@ mod tests {
             parse_line(true, done),
             Some(ChatEvent::Done { ok: true, text: "hi".into(), error: None, usage: None })
         );
+    }
+
+    #[test]
+    fn codex_thread_message_and_completion() {
+        let init = r#"{"type":"thread.started","thread_id":"t1"}"#;
+        assert_eq!(parse_line_for(false, true, init), Some(ChatEvent::Session { id: "t1".into() }));
+        let message = r#"{"type":"item.completed","item":{"type":"agent_message","text":"hi"}}"#;
+        assert_eq!(parse_line_for(false, true, message), Some(ChatEvent::Delta { text: "hi".into() }));
+        assert_eq!(parse_line_for(false, true, r#"{"type":"turn.completed"}"#), Some(ChatEvent::Done { ok: true, text: String::new(), error: None, usage: None }));
     }
 
     #[test]

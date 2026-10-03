@@ -6,7 +6,7 @@ It follows the "config-first" model of Claude Code's `/config`: you set the defa
 
 ## Installation
 
-Requires Rust (`cargo`/`rustc`) and the `claude` and `agy` (Antigravity CLI) binaries, already installed and authenticated.
+Requires Rust (`cargo`/`rustc`) and whichever agent binaries you configure (`claude`, `agy`/Antigravity CLI, and/or `codex`), already installed and authenticated.
 
 ```
 cargo build --release
@@ -49,6 +49,11 @@ effort = ""
 
 [agents.gemini]
 binary = "agy"
+model = ""
+effort = ""
+
+[agents.codex]
+binary = "codex"
 model = ""
 effort = ""
 ```
@@ -94,10 +99,10 @@ Or set `sandbox = "none"` (globally or in `.aic/config.toml`) to keep running ag
 aic chat [--host 127.0.0.1] [--port 7878]
 ```
 
-Serves a local chat page where one conversation can have several participants — each a named instance of any agent under `[agents]` (e.g. two `claude`s with different roles, plus `gemini`) — and every message goes to them in parallel, with replies side by side, one fixed column per participant. The **To:** pills under the message box show who receives it (all by default; typing `@name` at the start picks them too). When a round is done, **Ask them to comment on each other's replies** under the replies lets them answer what the others said since their last turn, for debate or cross-review (so does sending an empty message). Conversations live in the browser's `localStorage`; the server is stateless and continues each participant by passing the agent's own session id back (`claude --resume`, `agy --conversation`).
+Serves a local chat page where one conversation can have several participants — each a named instance of any agent under `[agents]` (e.g. two `claude`s with different roles, plus `gemini` or `codex`) — and every message goes to them in parallel, with replies side by side, one fixed column per participant. The **To:** pills under the message box show who receives it (all by default; typing `@name` at the start picks them too). When a round is done, **Ask them to comment on each other's replies** under the replies lets them answer what the others said since their last turn, for debate or cross-review (so does sending an empty message). Conversations live in the browser's `localStorage`; the server is stateless and continues each participant by passing the agent's own session id back (`claude --resume`, `agy --conversation`, `codex exec resume`).
 
 - Runs in the repo you start it from, through the same sandbox and `skip_permissions` settings as the other commands.
-- **Participants** are added and edited in a dialog (click a participant's name): name, agent, model and effort (default: the agent's config), colour, role, and file access. Renaming rewrites the conversation's log; changing the agent starts it without this conversation's history.
+- **Participants:** up to five can be added and edited in a dialog (click a participant's name): name, agent, model and effort (default: the agent's config), colour, role, and file access. The add button is hidden at the limit. Renaming rewrites the conversation's log; changing the agent starts a new native session and supplies the participant's visible conversation history in its first prompt.
 - **Roles** are sent as an appended system prompt on every turn for `claude`; `agy` has no such flag, so its role goes in the first message only.
 - **Read-only by default:** participants can read the repo but not change it (read-only mount in the sandbox, plan mode without one) and are told so, instead of hunting for workarounds. Set *Can edit* on a participant to let it write, with your `permission_mode`; it then shows a pencil badge.
 - While an agent works, the card shows what it is doing (`Read: src/agent.rs`, `Bash: Run tests`) and the elapsed time; afterwards a collapsible list keeps every action. The card footer shows time, duration, tokens and cost when the agent reports them, plus copy, regenerate and delete. Your last message can be edited and resent.

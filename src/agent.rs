@@ -247,6 +247,10 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
         self.binary_stem() == "agy"
     }
 
+    pub fn is_codex(&self) -> bool {
+        self.binary_stem() == "codex"
+    }
+
     pub fn run(&self, opts: &RunOpts) -> Result<AgentRunResult> {
         let mut cmd = self.build_command(opts, None)?;
 
@@ -300,6 +304,33 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
     /// are allowed: `claude` uses `--permission-mode acceptEdits`, `agy` uses
     /// `--mode accept-edits`.
     fn push_args(&self, cmd: &mut Command, opts: &RunOpts) {
+        if self.is_codex() {
+            cmd.arg("exec");
+            if let Some(id) = &opts.resume {
+                cmd.arg("resume").arg(id);
+            }
+            cmd.arg("--json");
+            if let Some(model) = opts.model.as_ref().or(self.model.as_ref()) {
+                cmd.arg("--model").arg(model);
+            }
+            if let Some(effort) = opts.effort.as_ref().or(self.effort.as_ref()) {
+                cmd.arg("-c").arg(format!("model_reasoning_effort={effort}"));
+            }
+            if opts.skip_permissions {
+                cmd.arg("--dangerously-bypass-approvals-and-sandbox");
+            } else if opts.permission.as_deref().is_some_and(|p| p.eq_ignore_ascii_case("plan")) || opts.read_only {
+                cmd.args(["--sandbox", "read-only"]);
+            } else {
+                cmd.args(["--sandbox", "workspace-write", "--approve-for-me"]);
+            }
+            let prompt = if let Some(schema) = &opts.json_schema {
+                format!("{}\n\nReturn only a JSON value that conforms exactly to this JSON Schema:\n{}", opts.prompt, schema)
+            } else {
+                opts.prompt.clone()
+            };
+            cmd.arg(prompt);
+            return;
+        }
         cmd.arg("-p").arg(&opts.prompt);
         cmd.arg("--output-format")
             .arg(if opts.stream { "stream-json" } else { "json" });
@@ -344,6 +375,9 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
     }
 
     fn parse_envelope(&self, stdout: &str) -> Result<AgentRunResult> {
+        if self.is_codex() {
+            return self.parse_codex_envelope(stdout);
+        }
         let value: Value = serde_json::from_str(stdout.trim()).with_context(|| {
             format!(
                 "agent '{}' did not return valid JSON on stdout: {stdout}",
@@ -383,6 +417,20 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
             structured_output,
         })
     }
+
+    fn parse_codex_envelope(&self, stdout: &str) -> Result<AgentRunResult> {
+        let values: Vec<Value> = stdout.lines().filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).with_context(|| format!("agent '{}' did not return valid JSONL: {line}", self.name)))
+            .collect::<Result<_>>()?;
+        let success = values.iter().any(|v| v.get("type").and_then(Value::as_str) == Some("turn.completed"));
+        let text = values.iter().rev().find_map(|v| {
+            let item = v.get("item")?;
+            (item.get("type").and_then(Value::as_str) == Some("agent_message"))
+                .then(|| item.get("text").and_then(Value::as_str).unwrap_or_default().to_string())
+        }).unwrap_or_default();
+        let structured_output = serde_json::from_str(&text).ok();
+        Ok(AgentRunResult { success, text, structured_output })
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +461,15 @@ mod tests {
             result.structured_output.unwrap()["approved"],
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn parses_codex_jsonl_result_and_structured_output() {
+        let agent = CliAgent::new("codex", "codex");
+        let stdout = "{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"approved\\\":true}\"}}\n{\"type\":\"turn.completed\"}";
+        let result = agent.parse_envelope(stdout).unwrap();
+        assert!(result.success);
+        assert_eq!(result.structured_output.unwrap()["approved"], Value::Bool(true));
     }
 
     #[test]
@@ -526,6 +583,12 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--conversation", "abc"]));
         assert!(args.windows(2).any(|w| w == ["--output-format", "stream-json"]));
         assert!(!args.iter().any(|a| a == "--verbose"));
+
+        let mut codex_cmd = Command::new("codex");
+        CliAgent::new("codex", "codex").push_args(&mut codex_cmd, &opts);
+        let args = args_of(&codex_cmd);
+        assert!(args.windows(2).any(|w| w == ["resume", "abc"]));
+        assert!(args.iter().any(|a| a == "--json"));
     }
 
     #[test]

@@ -265,6 +265,13 @@ impl Sandbox {
                     args.push(format!("{}:{CONTAINER_HOME}/.gemini", path_str(&gemini)));
                 }
             }
+            "codex" => {
+                let codex = self.host_home.join(".codex");
+                if codex.exists() {
+                    args.push("-v".into());
+                    args.push(format!("{}:{CONTAINER_HOME}/.codex", path_str(&codex)));
+                }
+            }
             _ => {}
         }
     }
