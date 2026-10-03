@@ -176,7 +176,8 @@ pub enum SandboxCommands {
     /// Build the sandbox image from the Dockerfile embedded in aic.
     ///
     /// Also the upgrade path: the image's agent versions win over the
-    /// host's inside the sandbox, so rebuild to pick up newer ones.
+    /// host's inside the sandbox, so rebuild to pick up newer ones. With
+    /// sandbox_bind_agents enabled, agy/Codex use host binaries instead.
     Build {
         /// Image tag to build. Defaults to the configured `sandbox_image`.
         tag: Option<String>,
@@ -195,7 +196,7 @@ pub enum ConfigCommands {
     /// Keys: executor, reviewer, mode (manual|auto), max_rounds,
     /// permission_mode (acceptEdits|plan), default_base_branch,
     /// skip_permissions (true|false), sandbox (docker|podman|none),
-    /// sandbox_image.
+    /// sandbox_image, sandbox_bind_agents (true|false).
     Set {
         /// Config key to set (see above for the full list).
         key: String,

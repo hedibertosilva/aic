@@ -86,6 +86,9 @@ pub struct Config {
     pub sandbox: SandboxKind,
     /// Image the sandbox runs; `aic sandbox build` produces the default.
     pub sandbox_image: String,
+    /// Bind the host's agy/Codex executables read-only instead of baking
+    /// them into the image. Claude remains installed in the image.
+    pub sandbox_bind_agents: bool,
     /// Extra `host:container[:ro]` binds (caches, toolchains).
     pub sandbox_mounts: Vec<String>,
     /// Names of host environment variables forwarded into the sandbox.
@@ -132,6 +135,7 @@ impl Default for Config {
             git_diff_include_patterns: Vec::new(),
             sandbox: SandboxKind::Docker,
             sandbox_image: DEFAULT_SANDBOX_IMAGE.to_string(),
+            sandbox_bind_agents: false,
             sandbox_mounts: Vec::new(),
             sandbox_env: Vec::new(),
             agents,
@@ -154,6 +158,7 @@ pub struct ConfigOverrides {
     pub git_diff_include_patterns: Option<Vec<String>>,
     pub sandbox: Option<SandboxKind>,
     pub sandbox_image: Option<String>,
+    pub sandbox_bind_agents: Option<bool>,
     pub sandbox_mounts: Option<Vec<String>>,
     pub sandbox_env: Option<Vec<String>>,
     pub agents: Option<HashMap<String, AgentConfig>>,
@@ -193,6 +198,9 @@ impl Config {
         }
         if let Some(v) = overrides.sandbox_image {
             self.sandbox_image = v;
+        }
+        if let Some(v) = overrides.sandbox_bind_agents {
+            self.sandbox_bind_agents = v;
         }
         if let Some(v) = overrides.sandbox_mounts {
             self.sandbox_mounts = v;
@@ -335,6 +343,20 @@ mod tests {
         });
         assert_eq!(config.sandbox, SandboxKind::None);
         assert_eq!(config.sandbox_image, "aic-sandbox");
+    }
+
+    #[test]
+    fn agent_binds_are_opt_in_and_can_be_overridden_per_repo() {
+        let mut config: Config = toml::from_str("sandbox = 'podman'").unwrap();
+        assert!(!config.sandbox_bind_agents);
+        let overrides: ConfigOverrides = toml::from_str("sandbox_bind_agents = true").unwrap();
+        config.apply_overrides(overrides);
+        assert!(config.sandbox_bind_agents);
+        config.apply_overrides(ConfigOverrides {
+            sandbox_bind_agents: Some(false),
+            ..Default::default()
+        });
+        assert!(!config.sandbox_bind_agents);
     }
 
     #[test]

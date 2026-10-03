@@ -49,7 +49,11 @@ pub fn set(key: &str, value: &str) -> Result<()> {
                 .with_context(|| format!("unknown sandbox '{value}', expected 'docker', 'podman' or 'none'"))?;
         }
         "sandbox_image" => config.sandbox_image = value.to_string(),
-        other => bail!("unknown config key '{other}' (executor, reviewer, mode, max_rounds, permission_mode, default_base_branch, skip_permissions, sandbox, sandbox_image)"),
+        "sandbox_bind_agents" => {
+            config.sandbox_bind_agents = value.parse()
+                .with_context(|| format!("'{value}' isn't 'true' or 'false'"))?;
+        }
+        other => bail!("unknown config key '{other}' (executor, reviewer, mode, max_rounds, permission_mode, default_base_branch, skip_permissions, sandbox, sandbox_image, sandbox_bind_agents)"),
     }
     config.save_global()?;
     println!("Set {key} = {value}");
@@ -82,6 +86,7 @@ pub fn interactive() -> Result<()> {
             ),
             format!("sandbox = {} (docker | podman | none)", config.sandbox.label()),
             format!("sandbox_image = {}", config.sandbox_image),
+            format!("sandbox_bind_agents = {} (host agy/Codex binaries; rebuild image after changing)", config.sandbox_bind_agents),
             "Save and exit".to_string(),
             "Exit without saving".to_string(),
         ];
@@ -151,6 +156,9 @@ pub fn interactive() -> Result<()> {
                 }
             }
             9 => {
+                config.sandbox_bind_agents = !config.sandbox_bind_agents;
+            }
+            10 => {
                 config.save_global()?;
                 println!("Saved.");
                 break;

@@ -24,6 +24,39 @@ const CONTAINER_AIC: &str = "/usr/local/bin/aic";
 /// Where the host's global aic config dir shows up inside the container.
 const CONTAINER_CONFIG: &str = "/etc/aic";
 
+/// Resolve symlinks before copying or binding a host executable.
+pub(crate) fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .and_then(|p| p.canonicalize().ok())
+}
+
+/// Standalone Codex installations put the helper beside the real binary,
+/// not necessarily beside the symlink exposed on PATH.
+pub(crate) fn codex_code_mode_host(codex: &Path) -> Option<PathBuf> {
+    let codex = codex.canonicalize().ok()?;
+    let helper = codex.parent()?.join("codex-code-mode-host");
+    helper.is_file().then_some(helper)
+}
+
+fn host_agent_binaries() -> Vec<(String, PathBuf)> {
+    let mut binaries = Vec::new();
+    if let Some(agy) = find_on_path("agy") {
+        binaries.push(("agy".into(), agy));
+    }
+    if let Some(codex) = find_on_path("codex") {
+        if let Some(helper) = codex_code_mode_host(&codex)
+            .or_else(|| find_on_path("codex-code-mode-host"))
+        {
+            binaries.push(("codex-code-mode-host".into(), helper));
+        }
+        binaries.push(("codex".into(), codex));
+    }
+    binaries
+}
+
 /// Whether the repo is mounted writable (executor) or read-only (reviewer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -68,6 +101,9 @@ pub struct Sandbox {
     /// Host global config dir, mounted read-only so `aic` inside sees the
     /// same agents, models and permission mode.
     config_dir: Option<PathBuf>,
+    /// All available host agents are mounted, including when the outer
+    /// agent is Claude, so an `aic` inside can start another agent.
+    bound_binaries: Option<Vec<(String, PathBuf)>>,
 }
 
 impl Sandbox {
@@ -96,6 +132,7 @@ impl Sandbox {
             gid: meta.gid(),
             aic_binary: std::env::current_exe().ok().filter(|p| p.is_file()),
             config_dir: Config::global_dir().ok().filter(|p| p.is_dir()),
+            bound_binaries: config.sandbox_bind_agents.then(host_agent_binaries),
         }))
     }
 
@@ -135,9 +172,28 @@ impl Sandbox {
     /// Creates host-side state dirs that get bind-mounted, so the runtime
     /// doesn't create them root-owned.
     fn prepare(&self, agent: &str) -> Result<()> {
+        self.validate_bound_agent(agent)?;
         if agent == "claude" {
             let dir = self.claude_state_dir();
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        Ok(())
+    }
+
+    fn validate_bound_agent(&self, agent: &str) -> Result<()> {
+        if let Some(binaries) = &self.bound_binaries {
+            let required: &[&str] = match agent {
+                "agy" => &["agy"],
+                "codex" => &["codex", "codex-code-mode-host"],
+                _ => &[],
+            };
+            for name in required {
+                if !binaries.iter().any(|(binary, _)| binary == *name) {
+                    bail!(
+                        "sandbox_bind_agents is enabled but host binary '{name}' was not found; install it on PATH (the Codex helper may also be beside codex) or disable sandbox_bind_agents and rebuild the image"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -161,6 +217,10 @@ impl Sandbox {
         let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
         if spec.interactive {
             args.push("-it".into());
+        } else {
+            // Queries such as Codex's stdio RPC need stdin without a TTY.
+            // Headless turns still use Stdio::null() on the runtime client.
+            args.push("-i".into());
         }
         if let Some(name) = &spec.name {
             args.push("--name".into());
@@ -208,6 +268,12 @@ impl Sandbox {
         if let Some(aic) = &self.aic_binary {
             args.push("-v".into());
             args.push(format!("{}:{CONTAINER_AIC}:ro", path_str(aic)));
+        }
+        if let Some(binaries) = &self.bound_binaries {
+            for (name, binary) in binaries {
+                args.push("-v".into());
+                args.push(format!("{}:/usr/local/bin/{name}:ro", path_str(binary)));
+            }
         }
         if let Some(dir) = &self.config_dir {
             // Not under $HOME/.config: the runtime would create that parent
@@ -312,6 +378,7 @@ mod tests {
             gid: 1001,
             aic_binary: Some(PathBuf::from("/host/bin/aic")),
             config_dir: Some(PathBuf::from("/nonexistent-home/.config/aic")),
+            bound_binaries: None,
         }
     }
 
@@ -407,6 +474,34 @@ mod tests {
         let kill = sandbox(SandboxKind::Podman).kill_command("aic-1-2");
         assert_eq!(kill.get_program(), "podman");
         assert_eq!(kill.get_args().collect::<Vec<_>>(), ["kill", "aic-1-2"]);
+    }
+
+    #[test]
+    fn binds_all_host_agents_read_only_even_when_claude_is_selected() {
+        let mut bound = sandbox(SandboxKind::Podman);
+        bound.bound_binaries = Some(vec![
+            ("agy".into(), "/host/bin/agy".into()),
+            ("codex".into(), "/host/releases/codex".into()),
+            ("codex-code-mode-host".into(), "/host/releases/codex-code-mode-host".into()),
+        ]);
+        let args = bound.run_args(&spec(Access::ReadWrite, false));
+        assert!(has_pair(&args, "-v", "/host/bin/agy:/usr/local/bin/agy:ro"));
+        assert!(has_pair(&args, "-v", "/host/releases/codex:/usr/local/bin/codex:ro"));
+        assert!(has_pair(&args, "-v", "/host/releases/codex-code-mode-host:/usr/local/bin/codex-code-mode-host:ro"));
+        assert!(bound.validate_bound_agent("codex").is_ok());
+        assert!(bound.validate_bound_agent("agy").is_ok());
+        let unbound = sandbox(SandboxKind::Podman).run_args(&spec(Access::ReadWrite, false));
+        assert!(!unbound.iter().any(|arg| arg.contains("/usr/local/bin/codex") || arg.contains("/usr/local/bin/agy")));
+    }
+
+    #[test]
+    fn bind_mode_requires_codex_helper_and_does_not_fall_back_to_image() {
+        let mut bound = sandbox(SandboxKind::Docker);
+        bound.bound_binaries = Some(vec![("codex".into(), "/host/bin/codex".into())]);
+        assert!(bound.validate_bound_agent("codex").unwrap_err().to_string().contains("codex-code-mode-host"));
+        assert!(bound.validate_bound_agent("agy").unwrap_err().to_string().contains("agy"));
+        assert!(bound.validate_bound_agent("claude").is_ok());
+        assert!(sandbox(SandboxKind::Docker).validate_bound_agent("codex").is_ok());
     }
 
     #[test]
