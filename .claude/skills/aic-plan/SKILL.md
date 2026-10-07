@@ -6,7 +6,6 @@ allowed-tools:
   - Bash
   - Read
   - Edit
-  - AskUserQuestion
 ---
 
 <objective>
@@ -36,9 +35,11 @@ optional `--title` value to pass through.
      that explicitly rather than inventing ones.
    - **Impact**: what changes for users, other teams, infrastructure.
    - **Open questions**: anything still undecided.
-   Have a normal back-and-forth conversation for this — these are prose answers, not
-   discrete choices, so plain chat turns fit better than AskUserQuestion here. Use your
-   own judgment on follow-up questions when an answer is vague or incomplete.
+   Have a normal back-and-forth conversation for this, one question per reply, and wait
+   for the user's answer in their next message — these are prose answers, not discrete
+   choices. Don't depend on a question tool: it doesn't exist in headless runs such as
+   `aic chat`. Use your own judgment on follow-up questions when an answer is vague or
+   incomplete.
 5. After each section is answered, use Edit to write it into the corresponding heading
    in `PLAN.md`, replacing the placeholder comment. Keep the user's own words and
    framing — don't rewrite them into corporate-speak.

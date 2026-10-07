@@ -20,22 +20,30 @@ pub const DEFAULT_CLAUDE_VERSION: &str = "2.1.287";
 
 /// Dockerfile for `aic sandbox build`. `agy` has no pinned public install
 /// method, so the host's binary is copied into the build context and
-/// `COPY`d in when `include_agy` is set.
-pub fn sandbox_dockerfile(include_agy: bool) -> String {
+/// `COPY`d in when `include_agy` is set. `aic` itself is bind-mounted on
+/// every run (see `Sandbox::run_args`); a trixie base keeps a glibc build
+/// from a recent host runnable, and a static musl build runs anywhere.
+pub fn sandbox_dockerfile(include_agy: bool, include_codex: bool) -> String {
     let agy = if include_agy {
         "COPY agy /usr/local/bin/agy\n"
     } else {
         ""
     };
+    let codex = if include_codex {
+        "COPY codex /usr/local/bin/codex\nCOPY codex-code-mode-host /usr/local/bin/codex-code-mode-host\n"
+    } else {
+        ""
+    };
     format!(
-        "FROM docker.io/library/node:22-bookworm-slim\n\
+        "FROM docker.io/library/node:22-trixie-slim\n\
 ARG CLAUDE_VERSION={DEFAULT_CLAUDE_VERSION}\n\
 RUN apt-get update \\\n\
- && apt-get install -y --no-install-recommends git ca-certificates ripgrep openssh-client curl \\\n\
+ && apt-get install -y --no-install-recommends git ca-certificates ripgrep openssh-client curl gcc libc6-dev musl-tools \\\n\
  && rm -rf /var/lib/apt/lists/* \\\n\
  && npm install -g @anthropic-ai/claude-code@${{CLAUDE_VERSION}} \\\n\
+ && npm cache clean --force \\\n\
  && mkdir -p /home/aic && chmod 1777 /home/aic\n\
-{agy}ENV HOME=/home/aic\n"
+{agy}{codex}ENV HOME=/home/aic\n"
     )
 }
 
@@ -45,11 +53,19 @@ mod tests {
 
     #[test]
     fn dockerfile_pins_claude_and_optionally_copies_agy() {
-        let with = sandbox_dockerfile(true);
+        let with = sandbox_dockerfile(true, true);
         assert!(with.contains("ARG CLAUDE_VERSION=2.1.287"));
         assert!(with.contains("claude-code@${CLAUDE_VERSION}"));
+        assert!(with.contains("&& npm cache clean --force"));
+        assert_eq!(with.lines().filter(|line| line.starts_with("RUN ")).count(), 1);
         assert!(with.contains("COPY agy /usr/local/bin/agy"));
+        assert!(with.contains("COPY codex /usr/local/bin/codex"));
+        assert!(with.contains("COPY codex-code-mode-host /usr/local/bin/codex-code-mode-host"));
         assert!(with.contains("chmod 1777 /home/aic"));
-        assert!(!sandbox_dockerfile(false).contains("COPY agy"));
+        assert!(with.starts_with("FROM docker.io/library/node:22-trixie-slim\n"));
+        // aic is mounted at run time, not baked in.
+        assert!(!with.contains("aic /usr/local/bin/aic"));
+        assert!(!sandbox_dockerfile(false, false).contains("COPY agy"));
+        assert!(!sandbox_dockerfile(false, false).contains("COPY codex"));
     }
 }

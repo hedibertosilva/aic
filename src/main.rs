@@ -1,20 +1,23 @@
-mod agent;
+mod chat;
 mod cli;
 mod commands;
-mod config;
-mod diff_filter;
-mod git;
-mod review;
-mod sandbox;
-mod state;
-mod templates;
+mod common;
+mod workflow;
+
+// Modules keep resolving as `crate::agent`, `crate::state`, ... from anywhere.
+use chat::{consumption, quotas};
+use common::{agent, config, diagnostics, git, sandbox, templates};
+use workflow::{diff_filter, review, state};
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
 
-use cli::{Cli, Commands, ConfigCommands, DevCommands, PlanCommands, SandboxCommands};
+use cli::{
+    AgentCommands, Cli, Commands, ConfigCommands, DevCommands, PlanCommands, SandboxCommands,
+    WorkflowCommands,
+    DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT,
+};
 
 fn main() {
     if let Err(err) = run() {
@@ -24,120 +27,44 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_args();
 
     match cli.command {
-        Commands::Init => {
+        None => start_chat(DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT, !cli.no_open),
+
+        Some(Commands::Init) => {
             let repo_root = resolve_repo_root()?;
             commands::init::run(&repo_root)
         }
 
-        Commands::Plan { command } => match command {
-            PlanCommands::New {
-                slug,
-                title,
-                no_open,
-            } => {
-                let repo_root = resolve_repo_root()?;
-                commands::plan::new(&repo_root, &slug, title, no_open)
-            }
-            PlanCommands::Review {
-                slug,
-                reviewer,
-                executor,
-                mode,
-                max_rounds,
-            } => {
-                let repo_root = resolve_repo_root()?;
-                commands::plan::review(
-                    &repo_root,
-                    &slug,
-                    commands::plan::ReviewOverrides {
-                        reviewer,
-                        executor,
-                        mode: mode.map(Into::into),
-                        max_rounds,
-                    },
-                )
-            }
+        Some(Commands::Chat { host, port, no_open }) => start_chat(&host, port, !no_open),
+        Some(Commands::Setup { agent, yes, no_open }) => commands::setup::run(&resolve_repo_root()?, agent, yes, no_open),
+        Some(Commands::Doctor { json }) => commands::setup::doctor(&std::env::current_dir()?, json),
+
+        Some(Commands::Workflow { command }) => match command {
+            WorkflowCommands::Plan { command } => plan(command),
+            WorkflowCommands::Dev { command } => dev(command),
+            WorkflowCommands::Status { slug } => status(slug),
         },
 
-        Commands::Dev { command } => match command {
-            DevCommands::Execute {
-                slug,
-                mode,
-                executor,
-                permission_mode,
-            } => {
-                let repo_root = resolve_repo_root()?;
-                let slug = resolve_slug(&repo_root, slug)?;
-                commands::dev::execute(
-                    &repo_root,
-                    &slug,
-                    commands::dev::ExecuteOverrides {
-                        mode,
-                        executor,
-                        permission_mode,
-                    },
-                )
-            }
-            DevCommands::Review {
-                slug,
-                target,
-                range,
-                reviewer,
-                executor,
-                mode,
-                max_rounds,
-                no_filter,
-            } => {
-                let repo_root = resolve_repo_root()?;
-                let explicit = slug.is_some();
-                // Only use the branch-inferred slug if it actually names a
-                // tracked feature — otherwise this is an ad-hoc review
-                // (e.g. on `main`, which is never itself a feature). An
-                // *explicit* slug that isn't tracked is a mistake (likely a
-                // typo), not an invitation to go ad-hoc, so that errors
-                // instead.
-                let slug = slug.or_else(|| git::current_branch_slug(&repo_root).ok());
-                let slug = match slug {
-                    Some(slug) if state::State::load(&repo_root)?.feature(&slug).is_some() => Some(slug),
-                    Some(slug) if explicit => {
-                        anyhow::bail!("no feature '{slug}' found; run `aic plan new {slug}` first")
-                    }
-                    _ => None,
-                };
-                commands::dev::review(
-                    &repo_root,
-                    slug.as_deref(),
-                    commands::dev::ReviewOverrides {
-                        target,
-                        range,
-                        reviewer,
-                        executor,
-                        mode: mode.map(Into::into),
-                        max_rounds,
-                        no_filter,
-                    },
-                )
-            }
-        },
+        // Hidden aliases of the `workflow` subcommands.
+        Some(Commands::Plan { command }) => plan(command),
+        Some(Commands::Dev { command }) => dev(command),
+        Some(Commands::Status { slug }) => status(slug),
 
-        Commands::Status { slug } => {
-            let repo_root = resolve_repo_root()?;
-            commands::status::run(&repo_root, slug)
-        }
-
-        Commands::Sandbox { command } => match command {
+        Some(Commands::Sandbox { command }) => match command {
             SandboxCommands::Build { tag, claude_version } => {
                 let repo_root = resolve_repo_root()
                     .or_else(|_| std::env::current_dir().context("reading current directory"))?;
                 let config = config::Config::load_merged(&repo_root)?;
                 commands::sandbox::build(&config, tag, claude_version)
             }
+            SandboxCommands::Login { agent } => agent_command(AgentCommands::Login { agent }),
         },
 
-        Commands::Config { command } => match command {
+        Some(Commands::Agent { command }) => agent_command(command),
+
+        Some(Commands::Config { command }) => match command {
             None => commands::config_cmd::interactive(),
             Some(ConfigCommands::Show) => {
                 // Falls back to the current directory outside a git repo —
@@ -150,6 +77,127 @@ fn run() -> Result<()> {
             Some(ConfigCommands::Set { key, value }) => commands::config_cmd::set(&key, &value),
         },
     }
+}
+
+fn plan(command: PlanCommands) -> Result<()> {
+    match command {
+        PlanCommands::New {
+            slug,
+            title,
+            no_open,
+        } => {
+            let repo_root = resolve_repo_root()?;
+            workflow::plan::new(&repo_root, &slug, title, no_open)
+        }
+        PlanCommands::Review {
+            slug,
+            reviewer,
+            executor,
+            mode,
+            max_rounds,
+        } => {
+            let repo_root = resolve_repo_root()?;
+            workflow::plan::review(
+                &repo_root,
+                &slug,
+                workflow::plan::ReviewOverrides {
+                    reviewer,
+                    executor,
+                    mode: mode.map(Into::into),
+                    max_rounds,
+                },
+            )
+        }
+    }
+}
+
+fn dev(command: DevCommands) -> Result<()> {
+    match command {
+        DevCommands::Execute {
+            slug,
+            mode,
+            executor,
+            permission_mode,
+        } => {
+            let repo_root = resolve_repo_root()?;
+            let slug = resolve_slug(&repo_root, slug)?;
+            workflow::dev::execute(
+                &repo_root,
+                &slug,
+                workflow::dev::ExecuteOverrides {
+                    mode,
+                    executor,
+                    permission_mode,
+                },
+            )
+        }
+        DevCommands::Review {
+            slug,
+            target,
+            range,
+            reviewer,
+            executor,
+            mode,
+            max_rounds,
+            no_filter,
+        } => {
+            let repo_root = resolve_repo_root()?;
+            let explicit = slug.is_some();
+            // Only use the branch-inferred slug if it actually names a
+            // tracked feature — otherwise this is an ad-hoc review
+            // (e.g. on `main`, which is never itself a feature). An
+            // *explicit* slug that isn't tracked is a mistake (likely a
+            // typo), not an invitation to go ad-hoc, so that errors
+            // instead.
+            let slug = slug.or_else(|| git::current_branch_slug(&repo_root).ok());
+            let slug = match slug {
+                Some(slug) if state::State::load(&repo_root)?.feature(&slug).is_some() => Some(slug),
+                Some(slug) if explicit => {
+                    anyhow::bail!("no feature '{slug}' found; run `aic workflow plan new {slug}` first")
+                }
+                _ => None,
+            };
+            workflow::dev::review(
+                &repo_root,
+                slug.as_deref(),
+                workflow::dev::ReviewOverrides {
+                    target,
+                    range,
+                    reviewer,
+                    executor,
+                    mode: mode.map(Into::into),
+                    max_rounds,
+                    no_filter,
+                },
+            )
+        }
+    }
+}
+
+fn agent_command(command: AgentCommands) -> Result<()> {
+    // Works outside a git repo too: falls back to the current directory.
+    let repo_root = resolve_repo_root()
+        .or_else(|_| std::env::current_dir().context("reading current directory"))?;
+    let config = config::Config::load_merged(&repo_root)?;
+    match command {
+        AgentCommands::Test { agent, yes, timeout } => commands::setup::agent_test(&repo_root, agent, yes, timeout),
+        AgentCommands::List => commands::agent::list(&config),
+        AgentCommands::Status { agent } => commands::agent::status(&config, &repo_root, agent),
+        AgentCommands::Login { agent } => commands::agent::login(&config, &repo_root, &agent),
+    }
+}
+
+fn status(slug: Option<String>) -> Result<()> {
+    let repo_root = resolve_repo_root()?;
+    workflow::status::run(&repo_root, slug)
+}
+
+/// Starts the chat from the repo it was launched in, setting up `.aic/` and
+/// the global config first (idempotent).
+fn start_chat(host: &str, port: u16, open: bool) -> Result<()> {
+    let repo_root = resolve_repo_root()?;
+    commands::init::run(&repo_root)?;
+    chat::server::run(&repo_root, host, port, open)
 }
 
 fn resolve_repo_root() -> Result<PathBuf> {

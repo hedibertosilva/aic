@@ -88,7 +88,7 @@ pub fn filter_paths(repo_root: &Path, config: &Config, paths: Vec<String>) -> Re
     let mut excluded = vec![false; paths.len()];
     for (i, path) in paths.iter().enumerate() {
         excluded[i] = matches_any(DEFAULT_EXCLUDES, path)
-            || matches_any(&config.git_diff_exclude_patterns, path);
+            || matches_any(&config.workflow.git_diff_exclude_patterns, path);
     }
 
     let remaining: Vec<String> = paths
@@ -106,7 +106,7 @@ pub fn filter_paths(repo_root: &Path, config: &Config, paths: Vec<String>) -> Re
         .zip(excluded)
         .filter(|(p, e)| {
             let is_excluded = *e || git_excluded.contains(p);
-            !is_excluded || matches_any(&config.git_diff_include_patterns, p)
+            !is_excluded || matches_any(&config.workflow.git_diff_include_patterns, p)
         })
         .map(|(p, _)| p)
         .collect())

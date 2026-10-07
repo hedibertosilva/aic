@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aic chat</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+<aside aria-label="Conversations">
+  <header>
+    <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
+    <button id="new" class="primary" title="New conversation (Ctrl+Shift+O)"></button>
+    <input id="importfile" type="file" accept=".json,.md,application/json,text/markdown" hidden>
+    <input type="search" id="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
+  </header>
+  <nav id="list"></nav>
+  <footer id="repobar">
+    <div class="repoinfo">
+      <div id="reponame"></div>
+      <span id="repobranch"></span>
+      <span id="repo"></span>
+    </div>
+    <button id="copyrepo" class="icon" aria-label="Copy repository path" title="Copy repository path"></button>
+  </footer>
+</aside>
+<div id="scrim"></div>
+<main>
+  <div id="bar">
+    <button id="menu" class="icon" aria-label="Conversations"></button>
+    <span id="chips"></span>
+    <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
+    <button id="readybtn" type="button">Environment</button>
+    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
+    <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
+    <section id="quotas" aria-labelledby="quotatitle" hidden>
+      <header><strong id="quotatitle">Usage limits</strong><span class="grow"></span>
+        <button id="quotarefresh" class="icon" type="button" aria-label="Refresh usage limits" title="Refresh usage limits"></button>
+        <button id="quotaclose" class="icon" type="button" aria-label="Close usage limits" title="Close usage limits"></button>
+      </header>
+      <div id="quotarows"></div>
+      <p id="quotaunknown" class="note" hidden>Earlier replies in this conversation weren't attributed to an agent and are not included in these totals.</p>
+    </section>
+  </div>
+  <div id="contextbar" aria-label="Current repository context"><strong id="contextrepo"></strong><span id="contextbranch"></span><span id="contextcheckout"></span></div>
+  <div id="banner" role="alert" hidden></div>
+  <div id="view">
+    <div id="layout" role="group" aria-label="Reply layout"></div>
+    <div id="msgs" aria-label="Messages"></div>
+  </div>
+  <footer id="composer">
+    <button id="jump" type="button"></button>
+    <div id="ac" role="listbox"></div>
+    <form id="form">
+      <textarea id="input" rows="2" aria-label="Message" placeholder="Write your message…" autofocus></textarea>
+      <div class="toolbar">
+        <span class="tolabel" id="tolabel">To:</span>
+        <span id="to" role="group" aria-labelledby="tolabel"></span>
+        <button class="send" id="send" aria-label="Send"></button>
+      </div>
+    </form>
+    <div class="hint" id="hint">Enter sends · Shift+Enter new line · @ mentions · /fork · / skills</div>
+  </footer>
+</main>
+
+<dialog id="pdialog" aria-labelledby="ptitle">
+  <form id="pform" method="dialog">
+    <div class="phead">
+      <h2 id="ptitle">Add participant</h2>
+      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="lbl">Active</span><span class="knob"></span></button>
+    </div>
+    <div class="grid2">
+      <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
+      <label>Agent <select id="pagent"></select></label>
+      <label>Model <select id="pmodel"></select></label>
+      <label>Effort <select id="peffort"></select></label>
+    </div>
+    <p class="note" id="pquota"></p>
+    <p class="note" id="preadiness"></p>
+    <p class="note">A participant is an agent instance in this conversation. Its role and file access do not change the global agent configuration.</p>
+    <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
+    <fieldset class="colours">
+      <legend>Colour</legend>
+      <span id="phues" role="radiogroup" aria-label="Colour"></span>
+    </fieldset>
+    <label>Role / instructions <input type="text" id="prole" placeholder="E.g. strict code reviewer (optional)" autocomplete="off"></label>
+    <fieldset>
+      <legend>File access</legend>
+      <div class="seg" role="radiogroup" aria-label="File access">
+        <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
+        <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
+      </div>
+      <p class="note warn" id="pwritewarn" hidden></p>
+    </fieldset>
+    <p class="note err" id="perror" hidden></p>
+    <button type="button" id="penvironment">View environment and recovery commands</button>
+    <div class="buttons" id="pbuttons">
+      <button type="button" id="premove" class="danger" hidden>Remove</button>
+      <span class="grow"></span>
+      <button type="button" id="pcancel">Cancel</button>
+      <button type="submit" id="psave" class="primary">Save</button>
+    </div>
+    <div id="pconfirm" hidden>
+      <p class="note warn" id="pconfirmtext"></p>
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="pkeep">Cancel</button>
+        <button type="button" id="pdoremove" class="danger">Remove</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="ddialog" aria-labelledby="dtitle">
+  <div id="dform">
+    <h2 id="dtitle">Delete conversation?</h2>
+    <p id="dtext"></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="dcancel" autofocus>Cancel</button>
+      <button type="button" id="ddelete" class="danger">Delete</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="rdialog" aria-labelledby="rtitle">
+  <form id="rform" method="dialog">
+    <h2 id="rtitle">Rename conversation</h2>
+    <label>Title <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35"></label>
+    <div id="rcount" aria-live="polite"></div>
+    <div class="rgen">
+      <label>Generate with <select id="rwho"></select></label>
+      <button type="button" id="rgen">Generate title</button>
+    </div>
+    <p class="note err" id="rerror" hidden></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="rcancel">Cancel</button>
+      <button type="submit" id="rsave" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="cdialog" aria-labelledby="ctitle">
+  <form id="cform" method="dialog">
+    <h2 id="ctitle">Configuration</h2>
+    <div class="grid2">
+      <label>Default agent for new chats <select id="cdefault"></select></label>
+      <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
+      <label>Sandbox <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
+      <label>Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+    </div>
+    <label class="check"><input type="checkbox" id="cskippermissions"> Automatically approve tool permissions in headless runs</label>
+    <p class="note">Plan and review settings (executor, reviewer, rounds, base branch) belong to <code>aic workflow</code>: edit them with <code>aic config</code>.</p>
+    <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
+    <label class="check"><input type="checkbox" id="cconfirmdefault"> Confirm changing the default agent for new chats</label>
+    <fieldset id="agentvisibility"><legend>Agents shown in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The effective default agent always stays visible. Hiding an agent keeps its configuration and existing participants.</p></fieldset>
+    <details id="cadvanced"><summary>Advanced</summary><p class="note">Changing the working checkout restarts participant sessions and keeps visible history.</p><button id="worktreebtn" type="button">Change working checkout…</button></details>
+    <p class="note warn" id="cwarn" hidden></p>
+    <p class="note err" id="cerror" hidden></p>
+    <div class="buttons">
+      <span class="grow"></span>
+      <button type="button" id="ccancel">Cancel</button>
+      <button type="submit" id="csave" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="readydialog" aria-labelledby="readytitle">
+  <h2 id="readytitle">Your environment</h2>
+  <p id="readyreason" role="status"></p>
+  <div id="readyrows"></div>
+  <p class="note">Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</p>
+  <p class="note err" id="readyerror" hidden></p>
+  <div class="buttons"><button id="readyrefresh" type="button">Refresh environment</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
+</dialog>
+<dialog id="worktreedialog" aria-labelledby="worktreetitle">
+  <h2 id="worktreetitle">Working checkout for this conversation</h2>
+  <p>Select a registered worktree. Visible history stays; native participant sessions restart. Readiness must be verified in the selected checkout.</p>
+  <label>Checkout <select id="worktreeselect"></select></label>
+  <p class="note err" id="worktreeerror" hidden></p>
+  <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><button id="worktreeconfirm" type="button">Confirm checkout and restart sessions</button></div>
+</dialog>
+<dialog id="branchdialog" aria-labelledby="branchtitle">
+  <h2 id="branchtitle">Git context changed</h2>
+  <p id="branchtext"></p>
+  <p>This conversation keeps its history and participant sessions. The next sends will use the files in the current branch.</p>
+  <details><summary>Details</summary><pre id="branchdetails"></pre></details>
+  <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create new chat</button><button id="branchcontinue" type="button" class="primary">Continue on this branch</button></div>
+</dialog>
+<div id="toast" role="status"><span id="toasttext"></span><button id="undo" type="button">Undo</button></div>
+<div id="announce" class="sr-only" aria-live="polite"></div>
+<script src="/chat-import.js"></script>
+<script src="/chat-quotas.js"></script>
+<script src="/chat-onboarding.js"></script>
+<script src="/chat.js"></script>
+</body>
+</html>

@@ -177,16 +177,6 @@ fn split_nul_keep_empty(bytes: &[u8]) -> Vec<String> {
     fields
 }
 
-pub fn is_repo(dir: &Path) -> bool {
-    Command::new(git_binary())
-        .arg("-C")
-        .arg(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// The top-level directory of the repo containing `dir`.
 pub fn repo_root(dir: &Path) -> Result<std::path::PathBuf> {
     let out = run_git(dir, &["rev-parse", "--show-toplevel"])?;
@@ -295,13 +285,13 @@ mod tests {
     #[test]
     fn detects_a_real_repo() {
         let dir = init_repo();
-        assert!(is_repo(dir.path()));
+        assert_eq!(repo_root(dir.path()).unwrap(), dir.path());
     }
 
     #[test]
     fn non_repo_is_not_a_repo() {
         let dir = tempdir().unwrap();
-        assert!(!is_repo(dir.path()));
+        assert!(repo_root(dir.path()).is_err());
     }
 
     #[test]
@@ -398,7 +388,7 @@ mod filter_tests {
     fn filters_defaults_generated_and_config_excludes() {
         let dir = setup();
         let mut config = Config::default();
-        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        config.workflow.git_diff_exclude_patterns = vec!["skip.txt".into()];
         let args = vec!["--staged".to_string()];
 
         let diff = filtered_diff(dir.path(), &config, &args, false).unwrap();
@@ -415,8 +405,8 @@ mod filter_tests {
     fn include_patterns_win_over_every_exclusion() {
         let dir = setup();
         let mut config = Config::default();
-        config.git_diff_exclude_patterns = vec!["skip.txt".into()];
-        config.git_diff_include_patterns = vec!["Cargo.lock".into(), "gen/**".into(), "skip.txt".into()];
+        config.workflow.git_diff_exclude_patterns = vec!["skip.txt".into()];
+        config.workflow.git_diff_include_patterns = vec!["Cargo.lock".into(), "gen/**".into(), "skip.txt".into()];
         let diff = filtered_diff(dir.path(), &config, &["--staged".to_string()], false).unwrap();
         assert!(diff.contains("Cargo.lock"));
         assert!(diff.contains("gen/out.txt"));
