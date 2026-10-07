@@ -52,8 +52,8 @@ process.stderr.write('fixture process failed after start\\n');process.exit(1);
   const listener=net.createServer(); await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
   const port=listener.address().port; await new Promise(resolve=>listener.close(resolve));
   const base=`http://127.0.0.1:${port}`; let server;
-  async function start() {
-    server=spawn(path.resolve(process.env.AIC_TEST_BINARY),['chat','--no-open','--port',String(port)],{cwd:root,env:{...process.env,AIC_CONFIG_DIR:config,AIC_IN_SANDBOX:'1'},stdio:['ignore','ignore','pipe']});
+  async function start(extraEnv = {}) {
+    server=spawn(path.resolve(process.env.AIC_TEST_BINARY),['chat','--no-open','--port',String(port)],{cwd:root,env:{...process.env,AIC_CONFIG_DIR:config,AIC_IN_SANDBOX:'1',...extraEnv},stdio:['ignore','ignore','pipe']});
     let errors='';server.stderr.on('data',chunk=>errors+=chunk);
     for(let i=0;i<100;i++){try{if((await fetch(base+'/api/agents')).ok)return;}catch{}if(server.exitCode!==null)throw new Error(errors);await delay(50);}
     throw new Error('Fixture server failed to start: '+errors);

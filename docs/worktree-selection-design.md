@@ -4,6 +4,8 @@ Selection is restricted to live Git worktrees registered by the server's origina
 repository. Canonical paths must match `git worktree list --porcelain -z`; callers
 cannot select arbitrary directories, symlink escapes, deleted/prunable worktrees
 or another repository. No worktrees are created or removed by the web server.
+The selector is a P2 control under Configuration → Advanced, separated from the
+permanent context display and the consultative Environment panel.
 
 The conversation stores its selected checkout and Git origin. Selecting another
 worktree explicitly confirms the change, clears participant native session IDs

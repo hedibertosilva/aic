@@ -8,6 +8,11 @@
   and participants. New chats ask for selection when a default is missing/unavailable.
 - `aic` opens a browser; use `aic chat --no-open` for terminal/SSH environments.
 - Persistent Git context and branch-change warnings with history/session preservation.
+- Consultative Environment panel with recovery commands and bounded, scrollable
+  dialogs. Chat creation uses only `+`; multiple participants use Add participant.
+- Targeted cached send validation without full catalog/auth/container probes.
+- Agent visibility in Configuration with default protection; checkout switching
+  under Advanced, requiring explicit confirmation and session restart.
 
 Settings and local `.aic/` data remain compatible. Run setup after upgrading and
 confirm a ready agent. A repository-level default still overrides the global one.

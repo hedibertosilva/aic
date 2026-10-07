@@ -291,6 +291,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 
 /* ---------- participant dialog ---------- */
 dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--fg); padding: 0; width: min(520px, calc(100vw - 24px)); box-shadow: var(--shadow); }
+dialog { box-sizing: border-box; max-height: calc(100dvh - 32px); overflow-y: auto; }
 dialog::backdrop { background: rgba(0, 0, 0, .4); }
 #pform, #cform { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
 #pform h2, #cform h2 { margin: 0; font-size: 17px; }
@@ -386,7 +387,16 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 
 /* Environment and Git context */
 #readydialog { width: min(860px, calc(100vw - 32px)); }
-#readyrows { overflow-x: auto; max-height: 45vh; }
+#readydialog, #worktreedialog, #branchdialog { padding: 20px 24px; overflow-wrap: anywhere; }
+#readydialog > * + *, #worktreedialog > * + *, #branchdialog > * + * { margin-top: 14px; }
+#readydialog h2, #worktreedialog h2, #branchdialog h2 { margin: 0; font-size: 17px; }
+#readydialog .buttons, #worktreedialog .buttons, #branchdialog .buttons { flex-wrap: wrap; }
+#readyrows .note { flex-wrap: wrap; }
+#worktreedialog label { display: flex; flex-direction: column; gap: 6px; }
+#worktreeselect { max-width: 100%; min-width: 0; }
+#cadvanced > * + * { margin-top: 10px; }
+#readybtn { font-size: 12px; color: var(--muted); }
+#readybtn[data-state="blocked"] { color: var(--warn); }
 #readyrows article { padding: 12px 0; border-bottom: 1px solid var(--border, #8884); }
 #readyrows dl { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 8px 0; }
 #readyrows dl div { min-width: 105px; }
@@ -394,7 +404,6 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 #readyrows dd { margin: 0; }
 #repobranch, #repo { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #branchdetails { white-space: pre-wrap; overflow-wrap: anywhere; }
-#newoptions { font-size: 12px; }
 
 #contextbar { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border, #8884); }
 #contextcheckout { flex: 1 1 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

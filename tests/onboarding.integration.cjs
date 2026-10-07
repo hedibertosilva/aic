@@ -98,3 +98,57 @@ test('interactive setup can finish later without losing an existing preference',
   assert.equal(status,0);assert.match(output,/Resume with aic setup/);assert.equal(JSON.parse(cli(f,['doctor','--json']).stdout).default_agent,'codex');
  }finally{await f.close();}
 });
+
+test('send preflight validates recipients and cache without auth probes or changes to unrelated agents', {skip:!binary}, async()=>{
+ const f=await fixture();try{
+  for(const name of ['codex','claude']) {
+   const file=path.join(f.root,name), source=fs.readFileSync(file,'utf8');
+   fs.writeFileSync(file,source.replace("if(process.argv.includes('"+(name==='codex'?'login':'auth')+"'))", "if(process.argv.includes('"+(name==='codex'?'login':'auth')+"') && (require('fs').appendFileSync(__dirname+'/auth-probes','"+name+"\\n'),true))"));
+   assert.equal(cli(f,['agent','test',name,'--yes']).status,0);
+  }
+  const probes=path.join(f.root,'auth-probes');fs.writeFileSync(probes,'');
+  let report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();
+  assert.deepEqual(report.agents.map(a=>a.agent),['codex']);assert.equal(report.agents[0].readiness,'ready');assert.ok(report.git);
+  await f.request('/api/chat',{agent:'codex',prompt:'hello'});
+  assert.equal(fs.readFileSync(probes,'utf8'),'','cached send must not run auth CLI probes');
+  // A removed non-recipient cannot block a valid codex turn.
+  fs.rmSync(path.join(f.root,'claude'));
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'ready');
+  await f.request('/api/chat',{agent:'codex',prompt:'still works'});
+  let response=await fetch(f.base+'/api/chat/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:['unknown']})});assert.equal(response.status,400);
+  response=await fetch(f.base+'/api/chat/preflight',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:JSON.stringify({agents:['codex']})});assert.equal(response.status,403);
+  // Changed binary, expired test, and missing executable must all block cached sends.
+  fs.appendFileSync(path.join(f.root,'codex'),'\n// upgrade\n');
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'unknown');
+  response=await fetch(f.base+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:'codex',prompt:'blocked'})});assert.equal(response.status,409);
+  assert.equal(cli(f,['agent','test','codex','--yes']).status,0);
+  const cacheFile=path.join(f.root,'.aic/diagnostics/tests.json'),data=JSON.parse(fs.readFileSync(cacheFile,'utf8'));data.tests.codex.result.tested_at-=90000;fs.writeFileSync(cacheFile,JSON.stringify(data));
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'unknown');
+  fs.chmodSync(path.join(f.root,'codex'),0o644);
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'blocked');
+ }finally{await f.close();}
+});
+
+test('sandbox sends use cached recipient tests without launching diagnostic containers', {skip:!binary}, async()=>{
+ const f=await fixture();try{
+  await f.stop();
+  const config=path.join(f.root,'config/config.toml');fs.writeFileSync(config,fs.readFileSync(config,'utf8').replace('sandbox="none"','sandbox="docker"'));
+  const docker=path.join(f.root,'docker');fs.writeFileSync(docker,`#!${process.execPath}
+const fs=require('fs');fs.appendFileSync(__dirname+'/docker-calls',process.argv.slice(2).join(' ')+'\\n');
+if(process.argv.includes('inspect'))console.log(fs.readFileSync(__dirname+'/image-id','utf8'));
+else if(process.argv.includes('run')&&!process.argv.includes('--entrypoint')){console.log(JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'READY'}}));console.log(JSON.stringify({type:'turn.completed'}));}
+`,{mode:0o755});
+  fs.writeFileSync(path.join(f.root,'image-id'),'image-one');
+  const env={AIC_IN_SANDBOX:'0',PATH:f.root+':'+process.env.PATH,XDG_DATA_HOME:path.join(f.root,'data')};
+  assert.equal(cli(f,['agent','test','codex','--yes'],env).status,0);
+  await f.start(env);fs.writeFileSync(path.join(f.root,'docker-calls'),'');
+  let report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].execution,'ready_sandbox');
+  await f.request('/api/chat',{agent:'codex',prompt:'hello'});
+  let calls=fs.readFileSync(path.join(f.root,'docker-calls'),'utf8');
+  assert.equal(calls.split('\n').filter(line=>line.startsWith('run ')).length,1,'only the actual response launches a container');
+  assert.ok(!calls.includes('aic-check-')&&!calls.includes('--entrypoint sh'),'no diagnostic containers on send');
+  fs.writeFileSync(path.join(f.root,'image-id'),'image-two');
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'unknown');
+  const response=await fetch(f.base+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:'codex',prompt:'new image'})});assert.equal(response.status,409);
+ }finally{await f.close();}
+});

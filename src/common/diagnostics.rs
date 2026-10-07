@@ -363,6 +363,17 @@ fn auth_status(binary: &str) -> String {
     }
 }
 pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
+    snapshot_selected(root, config, None)
+}
+
+/// Validate only the requested agents against their last real test. This path
+/// checks runtime/image identity and local metadata, without auth CLI calls or
+/// starting probe containers. A missing/expired test still blocks execution.
+pub fn for_send(root: &Path, config: &Config, agents: &[String]) -> Diagnostic {
+    snapshot_selected(root, config, Some(agents))
+}
+
+fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) -> Diagnostic {
     let now = chrono::Utc::now().timestamp();
     let git = git_context(root).ok();
     let (runtime, image, image_id) = environment(config);
@@ -372,7 +383,9 @@ pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
         "sandbox"
     };
     let cache = load_cache(root);
-    let mut names: Vec<_> = config.agents.keys().collect();
+    let mut names: Vec<_> = config.agents.keys()
+        .filter(|name| selected.is_none_or(|agents| agents.contains(name)))
+        .collect();
     names.sort();
     let agents = names
         .into_iter()
@@ -382,7 +395,7 @@ pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
             let mut installation = if host { "installed" } else { "missing" }.to_owned();
             if context == "sandbox" {
                 installation = "unknown".into();
-                if runtime.state == "ready" && image.state == "ready" {
+                if selected.is_none() && runtime.state == "ready" && image.state == "ready" {
                     let mut cmd = Command::new(config.sandbox.runtime.label());
                     let probe_name = format!(
                         "aic-check-{}-{}",
@@ -422,6 +435,11 @@ pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
                         installation = if host { "installed" } else { "missing" }.into();
                     }
                 }
+                if selected.is_some() && config.sandbox.bind_agents
+                    && !CliAgent::new(name, &cfg.binary).is_claude()
+                {
+                    installation = if host { "installed" } else { "missing" }.into();
+                }
             }
             let action = format!("aic agent test {name}");
             let mut d = AgentDiagnostic {
@@ -429,7 +447,7 @@ pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
                 configuration: "configured".into(),
                 host_installation: if host { "installed" } else { "missing" }.into(),
                 installation,
-                authentication: if context == "host" && host {
+                authentication: if selected.is_none() && context == "host" && host {
                     auth_status(&cfg.binary)
                 } else {
                     "unknown".into()
@@ -453,7 +471,9 @@ pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
                 let installation = d.installation.clone();
                 let host = d.host_installation.clone();
                 d = record.result.clone();
-                d.installation = installation;
+                if selected.is_none() || installation != "unknown" {
+                    d.installation = installation;
+                }
                 d.host_installation = host;
                 if passive_auth == "login_required" {
                     d.authentication = passive_auth;

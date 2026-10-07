@@ -29,3 +29,11 @@ Diagnosis does not generate provider responses. `agent test` requires interactiv
 confirmation or explicit `--yes`, caps time/output and uses the existing read-only
 agent invocation. The web refresh only rereads diagnosis/cache; paid retries use
 the terminal command displayed by the panel. New chats never run paid tests.
+
+`POST /api/chat/preflight` accepts a checkout and a list of configured recipient
+agents and returns schema version 1 restricted to those agents, with current Git
+context. It reads cached real test results and validates context fingerprints;
+it never starts diagnostic containers or calls vendor authentication commands.
+`/api/chat` repeats that targeted validation. Full `/api/diagnostics` remains the
+source for Environment and explicit refresh. Neither endpoint changes participant
+configuration or native sessions; invalid cache/context blocks sends safely.

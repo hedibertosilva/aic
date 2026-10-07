@@ -12,7 +12,6 @@
   <header>
     <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
     <button id="new" class="primary" title="New conversation (Ctrl+Shift+O)"></button>
-    <button id="newoptions" type="button">Individual · Compare · Team</button>
     <input id="importfile" type="file" accept=".json,.md,application/json,text/markdown" hidden>
     <input type="search" id="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
   </header>
@@ -23,7 +22,6 @@
       <span id="repobranch"></span>
       <span id="repo"></span>
     </div>
-    <button id="worktreebtn" type="button">Choose checkout</button>
     <button id="copyrepo" class="icon" aria-label="Copy repository path" title="Copy repository path"></button>
   </footer>
 </aside>
@@ -33,7 +31,7 @@
     <button id="menu" class="icon" aria-label="Conversations"></button>
     <span id="chips"></span>
     <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
-    <button id="readybtn" type="button">Readiness</button>
+    <button id="readybtn" type="button">Environment</button>
     <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
     <section id="quotas" aria-labelledby="quotatitle" hidden>
@@ -96,6 +94,7 @@
       <p class="note warn" id="pwritewarn" hidden></p>
     </fieldset>
     <p class="note err" id="perror" hidden></p>
+    <button type="button" id="penvironment">View environment and recovery commands</button>
     <div class="buttons" id="pbuttons">
       <button type="button" id="premove" class="danger" hidden>Remove</button>
       <span class="grow"></span>
@@ -156,6 +155,8 @@
     <p class="note">Plan and review settings (executor, reviewer, rounds, base branch) belong to <code>aic workflow</code>: edit them with <code>aic config</code>.</p>
     <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
     <label class="check"><input type="checkbox" id="cconfirmdefault"> Confirm changing the default agent for new chats</label>
+    <fieldset id="agentvisibility"><legend>Agents shown in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The effective default agent always stays visible. Hiding an agent keeps its configuration and existing participants.</p></fieldset>
+    <details id="cadvanced"><summary>Advanced</summary><p class="note">Changing the working checkout restarts participant sessions and keeps visible history.</p><button id="worktreebtn" type="button">Change working checkout…</button></details>
     <p class="note warn" id="cwarn" hidden></p>
     <p class="note err" id="cerror" hidden></p>
     <div class="buttons">
@@ -170,13 +171,9 @@
   <h2 id="readytitle">Your environment</h2>
   <p id="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <fieldset id="agentvisibility"><legend>Agents shown in selectors</legend><div id="agentvisibilityrows"></div></fieldset>
   <p class="note">Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</p>
-  <label>Conversation mode <select id="readymode"><option value="individual">Individual — one agent</option><option value="compare">Compare — responses side by side</option><option value="team">Team — participants with different roles</option></select></label>
-  <label>Agent for this conversation <select id="readyagent"></select></label>
-  <label id="readysecondlabel" hidden>Second agent <select id="readysecond"></select></label>
   <p class="note err" id="readyerror" hidden></p>
-  <div class="buttons"><button id="readyrefresh" type="button">Refresh readiness</button><span class="grow"></span><button id="readyclose" type="button">Close</button><button id="readycontinue" type="button" class="primary">Confirm agent</button></div>
+  <div class="buttons"><button id="readyrefresh" type="button">Refresh environment</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
 </dialog>
 <dialog id="worktreedialog" aria-labelledby="worktreetitle">
   <h2 id="worktreetitle">Working checkout for this conversation</h2>

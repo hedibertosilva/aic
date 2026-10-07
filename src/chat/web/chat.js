@@ -8,7 +8,9 @@ const DRAFTS_KEY = "aic-chat-drafts";
 let state = { convs: [], current: null, layout: "auto" };
 let drafts = {}; // conversation id -> unsent text, saved apart from the (big) state
 let meta = { agents: [], details: {}, default: "", repo: "", sandboxed: false };
-let readiness = null, gitContext = null, pendingSelection = null;
+let serverCheckout = "";
+let readiness = null, gitContext = null;
+let environmentFocus = null;
 let skills = []; // [{ name, description, argument_hint, requires_write }]
 const running = new Map(); // `${conv id}\n${participant}` -> AbortController
 const cardParts = new WeakMap(); // log entry -> DOM parts of its card
@@ -402,7 +404,7 @@ function addParticipant(c, f) {
   c.participants.push(p);
   return p;
 }
-const defaultAgent = () => (state.hiddenAgents || []).includes(meta.default) ? "" : ChatOnboarding.initial(readiness, meta.default);
+const defaultAgent = () => ChatOnboarding.initial(readiness, meta.default);
 async function newConv() {
   try { await refreshReadiness(); } catch { readiness = {agents: []}; }
   const c = { id: crypto.randomUUID(), title: "New conversation", participants: [], log: [], round: 0, updated: Date.now(), sendTo: null, checkout: cur()?.checkout || null, gitOrigin: gitContext ? structuredClone(gitContext) : null };
@@ -411,7 +413,11 @@ async function newConv() {
   state.convs.unshift(c);
   $("search").value = "";
   switchTo(c.id);
-  if (!agent) openReadiness(c);
+  if (!agent) {
+    const selection = ChatOnboarding.selection(readiness, meta.default);
+    if (selection.reason === 'none_ready' || selection.reason === 'preferred_unavailable') openReadiness();
+    else openDialog(null);
+  }
 }
 function copyParticipants(source, seen) {
   // Native CLI sessions cannot be forked. Start fresh sessions in the new
@@ -1797,14 +1803,15 @@ function fillSelect(id, values, chosen, fallback) {
   uniq([...values.filter(Boolean), chosen].filter(Boolean)).forEach((v) => { const o = el("option", "", cap(v)); o.value = v; sel.appendChild(o); });
   sel.value = chosen;
 }
-function openDialog(p) {
+async function openDialog(p) {
   const c = cur(); if (!c || !meta.agents.length) return;
+  try { await refreshReadiness(c); } catch { toast('Environment status unavailable. Check Environment before adding an agent.'); }
+  if (cur() !== c) return;
   editing = p || null;
   $("ptitle").textContent = p ? "Edit " + p.name : "Add participant";
   $("psave").textContent = p ? "Save" : "Add";
   $("pname").value = p ? p.name : "";
-  updateAgentOptions();
-  $("pagent").value = p ? p.agent : defaultAgent();
+  updateAgentOptions(p ? p.agent : defaultAgent());
   updateParticipantReadiness();
   dlgModel = p?.model || ""; dlgEffort = p?.effort || "";
   $("prole").value = p?.role || "";
@@ -1920,6 +1927,7 @@ $("pform").onsubmit = (e) => {
   }
   const agent = $("pagent").value;
   if (!meta.agents.includes(agent)) return dialogError("Choose an available agent.");
+  if ((!editing || editing.agent !== agent) && !ChatOnboarding.ready(readiness, agent)) return dialogError("Choose a ready agent. Check Environment for recovery commands.");
   const name = cleanName($("pname").value) || (editing ? editing.name : uniqueName(c, cleanName(cap(agent)) || "agent"));
   if (!NAME_OK.test(name)) return dialogError("Use letters, digits, - and _ in the name.");
   if (c.participants.some((q) => q !== editing && q.name === name)) return dialogError(`There's already a participant called ${name}.`);
@@ -1976,6 +1984,8 @@ async function openConfig() {
     $("cdefault").options[0].textContent = "No preference — ask for each new chat";
     for (const option of $("cdefault").options) option.disabled = !!option.value && option.value !== config.default_agent && !ChatOnboarding.ready(readiness, option.value);
     $("cconfirmdefault").checked = false;
+    renderAgentVisibility();
+    $('cadvanced').open = false;
     $("cpermission").value = config.permission_mode;
     $("cskippermissions").checked = !!config.skip_permissions;
     $("csandbox").value = config.sandbox;
@@ -2012,6 +2022,7 @@ $("cform").onsubmit = async (e) => {
     meta.agents = config.agents;
     meta.sandboxed = config.sandbox !== "none";
     $("cdialog").close();
+    await refreshReadiness(cur(), { full: true, catalog: true });
     render();
     toast("Configuration saved. New agent turns use it.");
   } catch (err) {
@@ -2069,6 +2080,7 @@ document.addEventListener("keydown", (e) => {
   loadLocal();
   try {
     meta = Object.assign(meta, await (await fetch("/api/agents")).json());
+    serverCheckout = meta.repo;
   } catch (err) {
     $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
   }
@@ -2095,7 +2107,7 @@ document.addEventListener("keydown", (e) => {
   }
   try { await refreshReadiness(); } catch { readiness = {agents: []}; }
   try { skills = await (await fetch("/api/skills")).json(); } catch { skills = []; }
-  meta.agents.forEach((a) => { const o = el("option", "", cap(a)); o.value = a; $("pagent").appendChild(o); });
+  updateAgentOptions('');
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) await newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
   fetchQuotaState();
@@ -2117,19 +2129,33 @@ setInterval(() => {
 setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);
 
 /* ---------- onboarding and contextual preflight ---------- */
-async function refreshReadiness(conversation = cur()) {
+async function refreshReadiness(conversation = cur(), { full = false, catalog = false, targets = null } = {}) {
   const query = conversation?.checkout ? '?checkout=' + encodeURIComponent(conversation.checkout) : '';
-  const response = await fetch('/api/diagnostics' + query);
-  if (!response.ok) throw new Error('Readiness unavailable. Run aic doctor in the terminal.');
+  // Agent/skill catalogs change with checkout or configuration, not every send.
+  if (catalog || (conversation?.checkout || serverCheckout) !== meta.repo) {
+    const [agents, catalogResponse] = await Promise.all([fetch('/api/agents' + query), fetch('/api/skills' + query)]);
+    const nextMeta = agents.ok ? await agents.json() : null;
+    const nextSkills = catalogResponse.ok ? await catalogResponse.json() : [];
+    if (cur() !== conversation) return null;
+    if (nextMeta) meta = Object.assign(meta, nextMeta);
+    skills = nextSkills;
+  }
+  const response = full ? await fetch('/api/diagnostics' + query) : await fetch('/api/chat/preflight', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ checkout: conversation?.checkout || null, agents: targets ? uniq(targets.map(p => p.agent)) : meta.agents }),
+  });
+  if (!response.ok) throw new Error('Environment status unavailable. Run aic doctor in the terminal.');
   const report = await response.json();
   if (cur() !== conversation) return report;
-  const agents = await fetch('/api/agents' + query);
-  if (cur() !== conversation) return report;
-  if (agents.ok) meta = Object.assign(meta, await agents.json());
-  try { const catalog = await fetch('/api/skills' + query); if (catalog.ok) skills = await catalog.json(); } catch {}
-  if (cur() !== conversation) return report;
-  readiness = report; gitContext = report.git; meta.default = report.default_agent;
-  renderSidebar(); renderComposer(); return report;
+  // A targeted send must not erase other agents' known state.
+  if (targets && readiness) {
+    const updated = new Map(report.agents.map(a => [a.agent, a]));
+    readiness = { ...report, agents: readiness.agents.map(a => updated.get(a.agent) || a) };
+  } else readiness = report;
+  gitContext = report.git; meta.default = report.default_agent;
+  renderSidebar(); renderComposer(); renderEnvironmentStatus();
+  if ($('pdialog').open) { updateAgentOptions(); updateParticipantReadiness(); }
+  return report;
 }
 function readinessCommand(parent, text) {
   if (!text) return;
@@ -2137,52 +2163,69 @@ function readinessCommand(parent, text) {
   const copy = el('button', '', 'Copy command'); copy.type = 'button';
   copy.onclick = () => copyText(text, copy); row.append(code, document.createTextNode(' '), copy); parent.appendChild(row);
 }
+function renderEnvironmentStatus() {
+  const button = $('readybtn');
+  const agents = readiness?.agents || [];
+  const ready = agents.some(a => a.readiness === 'ready');
+  const infrastructure = [readiness?.repository, readiness?.runtime, readiness?.image];
+  const blocked = infrastructure.some(c => c && !['ready', 'not_required'].includes(c.state));
+  const pending = agents.filter(a => a.readiness !== 'ready').length + infrastructure.filter(c => c && !['ready', 'not_required'].includes(c.state)).length;
+  button.dataset.state = blocked || (readiness && !ready) ? 'blocked' : pending ? 'pending' : 'ready';
+  button.textContent = !readiness ? 'Environment' : button.dataset.state === 'blocked' ? 'Environment blocked' : pending ? 'Environment · ' + pending + (pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
+}
 function renderReadiness() {
   const rows = $('readyrows'); rows.textContent = '';
-  const summary = el('p', '', 'Repository: ' + (readiness?.repository.state || 'unknown') + ' · Runtime: ' + (readiness?.runtime.state || 'unknown') + ' · Sandbox: ' + (readiness?.image.state || 'unknown'));
-  rows.append(summary); readinessCommand(rows, readiness?.image.action || readiness?.runtime.action);
+  for (const [label, check] of [['Repository', readiness?.repository], ['Runtime', readiness?.runtime], ['Sandbox', readiness?.image]]) {
+    const item = el('article'); item.append(el('strong', '', label + ' · ' + (check?.state || 'unknown')), el('p', 'note', check?.reason || 'Not checked'));
+    readinessCommand(item, check?.action); rows.append(item);
+  }
   const selection = ChatOnboarding.selection(readiness, meta.default);
-  $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Choose a ready agent for this conversation; the global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Confirm the agent for this conversation. A participant is an instance of that agent.';
+  $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Recover it in the terminal, or choose another ready agent with Add participant. The global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Environment status for this checkout. Add or edit participants using Add participant; usage limits are in their own panel.';
   for (const a of readiness?.agents || []) {
     const card = el('article'); card.appendChild(el('strong', '', cap(a.agent) + ' · ' + a.readiness));
     const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution', 'quota']) { const field = el('div'); field.append(el('dt', '', cap(key)), el('dd', '', a[key])); fields.append(field); } card.append(fields);
     card.append(el('p', 'note', a.reason), el('p', 'note', 'Last test: ' + (a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : 'never') + ' · ' + a.context));
     readinessCommand(card, a.action); rows.append(card);
   }
-  for (const id of ['readyagent', 'readysecond']) { const select = $(id); const previous = select.value; select.textContent = ''; const placeholder = el('option', '', 'Choose a ready agent'); placeholder.value = ''; select.append(placeholder); for (const name of selection.ready.filter(name => !(state.hiddenAgents || []).includes(name))) { const option = el('option', '', cap(name)); option.value = name; select.append(option); } select.value = selection.ready.includes(previous) ? previous : ''; }
-  const visibility = $('agentvisibilityrows'); visibility.textContent = '';
-  for (const a of readiness?.agents || []) { const label = el('label', 'check'); const box = document.createElement('input'); box.type = 'checkbox'; box.checked = !(state.hiddenAgents || []).includes(a.agent); box.onchange = () => { const hidden = new Set(state.hiddenAgents || []); if (box.checked) hidden.delete(a.agent); else hidden.add(a.agent); state.hiddenAgents = [...hidden]; saveSoon(); updateAgentOptions(); renderReadiness(); }; label.append(box, document.createTextNode(cap(a.agent))); visibility.append(label); }
-  $('readycontinue').disabled = !selection.ready.length;
+  renderEnvironmentStatus();
 }
-async function openReadiness(conversation = null) {
-  pendingSelection = conversation; $('readyerror').hidden = true; $('readycontinue').disabled = true; $('readyreason').textContent = 'Checking environment…';
+async function openReadiness() {
+  environmentFocus = document.activeElement; $('readyerror').hidden = true; $('readyreason').textContent = 'Checking environment…';
+  $('readyrows').textContent = ''; $('readyrefresh').disabled = true;
   if (!$('readydialog').open) $('readydialog').showModal();
-  try { await refreshReadiness(); renderReadiness(); }
-  catch (error) { $('readyerror').textContent = error.message; $('readyerror').hidden = false; $('readycontinue').disabled = true; }
+  try { await refreshReadiness(cur(), { full: true, catalog: true }); renderReadiness(); }
+  catch (error) { $('readyerror').textContent = error.message; $('readyerror').hidden = false; }
+  finally { $('readyrefresh').disabled = false; }
 }
-$('readybtn').onclick = () => openReadiness(cur()?.participants.length ? null : cur());
-$('readyclose').onclick = () => { $('readydialog').close(); $('readybtn').focus(); };
-$('readyrefresh').onclick = async () => { $('readyrefresh').disabled = true; try { await refreshReadiness(); renderReadiness(); } catch (e) { $('readyerror').textContent = e.message; $('readyerror').hidden = false; } finally { $('readyrefresh').disabled = false; } };
-$('readymode').onchange = () => { $('readysecondlabel').hidden = $('readymode').value === 'individual'; };
-$('newoptions').onclick = async () => { await newConv(); openReadiness(cur()); };
-$('readycontinue').onclick = async () => {
-  await refreshReadiness(); const name = $('readyagent').value, second = $('readysecond').value, mode = $('readymode').value;
-  if (!ChatOnboarding.ready(readiness, name) || (mode !== 'individual' && !ChatOnboarding.ready(readiness, second))) { $('readyerror').textContent = 'Confirm a ready agent for each participant.'; $('readyerror').hidden = false; return; }
-  const c = pendingSelection || cur(); if (!c) return;
-  if (!c.log.length && !busy(c)) c.participants = [];
-  const added = [addParticipant(c, { agent: name, role: mode === 'team' ? 'Lead developer' : '' })];
-  if (mode !== 'individual') added.push(addParticipant(c, { agent: second, role: mode === 'team' ? 'Reviewer' : '' }));
-  c.sendTo = added.length === active(c).length ? null : added.map(p => p.name);
-  saveSoon(); render(); $('readydialog').close(); $('input').focus();
-};
+$('readybtn').onclick = () => openReadiness();
+$('penvironment').onclick = () => openReadiness();
+$('readyclose').onclick = () => $('readydialog').close();
+$('readydialog').addEventListener('close', () => { (environmentFocus?.isConnected ? environmentFocus : $('readybtn')).focus(); });
+$('readyrefresh').onclick = async () => { $('readyrefresh').disabled = true; $('readyerror').hidden = true; try { await refreshReadiness(cur(), { full: true, catalog: true }); renderReadiness(); } catch (e) { $('readyerror').textContent = e.message; $('readyerror').hidden = false; } finally { $('readyrefresh').disabled = false; } };
 function updateParticipantReadiness() {
-  const a = readiness?.agents?.find(a => a.agent === $('pagent').value);
-  $('preadiness').textContent = a ? a.agent + ' · ' + a.readiness + ' · ' + a.reason + (a.action ? ' · Next: ' + a.action : '') : 'Choose an agent. Readiness must be verified before sending.';
+  const agent = $('pagent').value, a = readiness?.agents?.find(a => a.agent === agent);
+  $('preadiness').textContent = a ? a.agent + ' · ' + a.readiness + ' · ' + a.reason + (a.action ? ' · Next: ' + a.action : '') : 'Choose a ready agent. Environment shows verification and recovery commands.';
+  $('psave').disabled = (!editing || editing.agent !== agent) && !ChatOnboarding.ready(readiness, agent);
 }
 $('pagent').addEventListener('change', updateParticipantReadiness);
+function renderAgentVisibility() {
+  const rows = $('agentvisibilityrows'); rows.textContent = '';
+  for (const name of meta.agents) {
+    const label = el('label', 'check'), box = document.createElement('input'); box.type = 'checkbox';
+    box.checked = name === meta.default || !(state.hiddenAgents || []).includes(name);
+    box.disabled = name === meta.default;
+    box.onchange = () => {
+      if (name === meta.default) return;
+      const hidden = new Set(state.hiddenAgents || []);
+      if (box.checked) hidden.delete(name); else hidden.add(name);
+      state.hiddenAgents = [...hidden]; saveSoon(); updateAgentOptions();
+    };
+    label.append(box, document.createTextNode(cap(name) + (name === meta.default ? ' — default' : ''))); rows.append(label);
+  }
+}
 async function prepareSend(c, targets) {
   try {
-    const report = await refreshReadiness(c);
+    const report = await refreshReadiness(c, { targets });
     if (cur() !== c) return false;
     const context = report.git;
     const blocked = targets.filter(p => !ChatOnboarding.ready(report, p.agent));
@@ -2216,7 +2259,7 @@ $('worktreebtn').onclick = async () => {
     const response = await fetch('/api/worktrees'); if (!response.ok) throw new Error('Worktree list unavailable');
     const trees = await response.json(); const select = $('worktreeselect'); select.textContent = '';
     for (const tree of trees) { const option = el('option', '', tree.label + ' · ' + tree.checkout); option.value = tree.checkout; select.append(option); }
-    select.value = c.checkout || meta.repo; $('worktreedialog').showModal();
+    select.value = c.checkout || meta.repo; $('cdialog').close(); $('worktreedialog').showModal();
   } catch (e) { toast(e.message); }
 };
 $('worktreecancel').onclick = () => $('worktreedialog').close();
@@ -2225,11 +2268,16 @@ $('worktreeconfirm').onclick = async () => {
   c.checkout = $('worktreeselect').value;
   for (const p of c.participants) { p.session = ''; p.seen = 0; }
   c.gitOrigin = null; c.gitAcknowledged = null; saveSoon(); $('worktreedialog').close();
-  await refreshReadiness(); c.gitOrigin = structuredClone(gitContext); saveSoon(); render();
+  await refreshReadiness(c, { full: true, catalog: true }); c.gitOrigin = structuredClone(gitContext); saveSoon(); render();
 };
 
-function updateAgentOptions() {
-  const select = $('pagent'), selected = select.value; select.textContent = '';
-  for (const a of meta.agents.filter(a => !(state.hiddenAgents || []).includes(a) || a === selected)) { const option = el('option', '', cap(a)); option.value = a; select.append(option); }
+function updateAgentOptions(selected = $('pagent').value) {
+  const select = $('pagent'); select.textContent = '';
+  const placeholder = el('option', '', 'Choose a ready agent'); placeholder.value = ''; select.append(placeholder);
+  for (const a of meta.agents.filter(a => a === meta.default || !(state.hiddenAgents || []).includes(a) || a === selected || a === editing?.agent)) {
+    const available = ChatOnboarding.ready(readiness, a);
+    const option = el('option', '', cap(a) + (available ? ' — ready' : ' — unavailable')); option.value = a;
+    option.disabled = !available && a !== editing?.agent; select.append(option);
+  }
   select.value = selected;
 }

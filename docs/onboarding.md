@@ -36,9 +36,13 @@ aic doctor --json
 aic chat --no-open
 ```
 
-The web panel shows installation, authentication, execution, quota and readiness
-separately, with last-test time and commands to copy. Use the terminal for build,
-login and paid tests, then Refresh readiness. The web does not execute those commands.
+The Environment panel shows repository, runtime, sandbox and independent agent
+states, with last-test time and commands to copy. It opens automatically when no
+agent is ready or the preferred/selected agent is unavailable. Otherwise it is a
+secondary status control. Opening, refreshing or closing it never changes the
+conversation, participants, roles or sessions. Usage limits retain their own panel.
+Use the terminal for build, login and paid tests, then Refresh environment.
+The web does not execute those commands.
 The configuration dialog can change the global chat default only with explicit
 confirmation and a ready agent; repository overrides retain precedence.
 
@@ -47,7 +51,23 @@ one conversation, with name, model, effort, role and file access. New individual
 chats use a ready explicit default. Without one, confirm/select a ready agent;
 an unavailable default is explained and never silently replaced. Existing chats
 keep participants and sessions after upgrading. Blocked sends preserve drafts.
-Individual, Compare and Team are shortcuts for participant configuration.
+The sidebar `+` is the only entry for creating a new chat. Without a ready default,
+the participant form asks for an explicit choice, even with only one ready agent.
+Add is disabled until a ready agent is selected. To compare replies or form a
+team, add participants with the existing Add participant control and set their
+roles there; Environment never creates participants or assigns roles.
+
+Before each send, a targeted preflight reads Git context and validates only the
+recipient agents' cached tests. The backend repeats this validation before
+starting an agent, protecting against changes after preflight. It checks local
+binary/credential/configuration metadata and runtime/image identity, without
+auth CLI calls or diagnostic containers. Catalogs are refreshed when the checkout
+or configuration changes. Full diagnosis runs in Environment, setup and doctor.
+
+Agent visibility lives in Configuration. Hiding an agent does not invalidate the
+default or change existing participants; the effective default cannot be hidden.
+Working checkout selection lives under Configuration → Advanced, with an explicit
+confirmation that restarts native sessions while preserving visible history.
 
 By default `aic` opens the browser with `xdg-open`. In SSH/headless environments,
 open the printed URL manually; `aic chat --no-open` suppresses launching a browser.

@@ -1,7 +1,7 @@
 # Onboarding validation
 
 Validation uses isolated temporary Git checkouts/configuration and fixture CLIs.
-Final checks passed: 116 Rust tests and 34 Node/policy/CLI/HTTP/Chromium tests,
+Refactoring checks passed: 116 Rust tests and 38 Node/policy/CLI/HTTP/Chromium tests,
 without failures or skips; `git diff --check` passed.
 
 No provider generation, OAuth or quota consumption was performed during automated
@@ -14,16 +14,26 @@ CLI/HTTP and Chromium tests cover explicit selection, no agents ready, consent,
 cache expiration/invalidation, contextual sandbox results, real failure downgrade,
 quota versus logout, timeout/invalid output, interactive setup cancellation,
 keyboard recovery, copied commands, drafts, Git acknowledgement, sessions across
-worktrees, visibility controls, team shortcuts and skill constraints. Existing
+worktrees, protected default visibility, team configuration through participants
+and skill constraints. Browser tests verify that Environment never changes empty
+or populated conversations, participants, roles, native sessions or drafts. They
+measure dialog padding, viewport bounds and internal scrolling on short mobile
+screens, verify keyboard recovery and keep checkout selection under Advanced.
+Integration tests count auth/container invocations: preflight and sends perform
+no auth probes or diagnostic container launches, validate only recipients, and
+reject expired tests, changed binaries/images and unregistered paths. Existing
 quota, consumption and import tests remain included.
 
-Static musl binaries were built for Linux x86_64 and aarch64. Both executed in
+During the initial distribution validation, static musl binaries were built for
+Linux x86_64 and aarch64. Both executed in
 fresh Alpine 3.22.2 root filesystems without Cargo or Rust, using unprivileged
 PRoot and QEMU for aarch64. The x86_64 install path was exercised by verifying
 checksums, extracting the archive, installing on PATH, initializing a Git checkout,
 running setup and doctor with a fixture provider. Checksum instructions use
 portable `awk` and `sha256sum -c`, validated with BusyBox as well as GNU tools. This validates installation,
 not a real vendor account or a human first-response measurement.
+The interface refactoring was verified with a fresh debug build; the earlier
+distribution artifacts were not repackaged or published during this revision.
 
 Release CI builds each architecture natively; ARM64 local verification used Zig
 for cross compilation and QEMU for execution. The artifact is static; compatibility

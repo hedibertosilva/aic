@@ -68,6 +68,13 @@ struct ChatStateRequest {
 }
 
 #[derive(Deserialize)]
+struct PreflightRequest {
+    agents: Vec<String>,
+    #[serde(default)]
+    checkout: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct ChatRequest {
     agent: String,
     prompt: String,
@@ -271,6 +278,23 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             let trees = crate::common::workspaces::list(&app.repo_root)?;
             respond_text(request, 200, "application/json", serde_json::to_string(&trees)?)
         }
+        (Method::Post, "/api/chat/preflight") => {
+            if !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+            let req: PreflightRequest = match serde_json::from_reader(request.as_reader().take(64 * 1024)) {
+                Ok(req) => req,
+                Err(_) => return respond_text(request, 400, "text/plain", "Invalid preflight request"),
+            };
+            let root = match crate::common::workspaces::resolve(&app.repo_root, req.checkout.as_deref()) {
+                Ok(root) => root,
+                Err(_) => return respond_text(request, 400, "text/plain", "Select a registered worktree"),
+            };
+            let config = Config::load_merged(&root)?;
+            if req.agents.len() > config.agents.len() || req.agents.iter().any(|name| !config.agents.contains_key(name)) {
+                return respond_text(request, 400, "text/plain", "Select configured recipient agents");
+            }
+            let report = diagnostics::for_send(&root, &config, &req.agents);
+            respond_text(request, 200, "application/json", serde_json::to_string(&report)?)
+        }
         (Method::Get, "/api/diagnostics") | (Method::Post, "/api/diagnostics/refresh") => {
             if request.method() == &Method::Post && !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
             let requested = query_value(request.url(), "checkout");
@@ -290,7 +314,11 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             respond_text(request, 200, "application/json", serde_json::to_string(&report)?)
         }
         (Method::Get, "/api/git") => {
-            match diagnostics::git_context(&app.repo_root) {
+            let selected = query_value(request.url(), "checkout");
+            let root = match crate::common::workspaces::resolve(&app.repo_root, selected.as_deref()) {
+                Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Select a registered worktree"),
+            };
+            match diagnostics::git_context(&root) {
                 Ok(git) => respond_text(request, 200, "application/json", serde_json::to_string(&git)?),
                 Err(_) => respond_text(request, 503, "text/plain", "Git context unavailable; check the checkout in the terminal"),
             }
@@ -739,7 +767,7 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
             return respond_text(request, 409, "text/plain", "Native session belongs to another checkout; create a fresh participant session");
         }
     }
-    let readiness = diagnostics::snapshot(&work_root, &config);
+    let readiness = diagnostics::for_send(&work_root, &config, std::slice::from_ref(&req.agent));
     if !readiness.agents.iter().any(|a| a.agent == req.agent && a.readiness == "ready") {
         return respond_text(request, 409, "text/plain", "Agent is not ready in this context. Run aic setup or aic agent test in the terminal, then refresh readiness. Your draft is preserved.");
     }
