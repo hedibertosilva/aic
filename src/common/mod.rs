@@ -6,3 +6,7 @@ pub mod config;
 pub mod git;
 pub mod sandbox;
 pub mod templates;
+
+pub mod diagnostics;
+pub mod browser;
+pub mod workspaces;

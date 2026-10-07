@@ -64,6 +64,9 @@ pub struct Killer {
 }
 
 impl Killer {
+    /// For a subprocess placed in its own process group by the caller.
+    pub(crate) fn process_group(pgid: u32) -> Self { Self { pgid, container: None } }
+
     pub fn kill(&self) {
         if let Some((sandbox, name)) = &self.container {
             let _ = sandbox.kill_command(name).status();

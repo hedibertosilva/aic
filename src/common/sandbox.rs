@@ -150,23 +150,14 @@ impl Sandbox {
     /// Fails with a clear message if the runtime binary is missing or the
     /// image hasn't been built. Run before starting any agent.
     pub fn preflight(&self) -> Result<()> {
-        let status = Command::new(self.runtime())
-            .args(["image", "inspect", &self.image])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => bail!(
-                "sandbox runtime '{rt}' not found on PATH; install it or set [sandbox] runtime = \"none\"",
-                rt = self.runtime()
-            ),
-            Err(err) => Err(err).with_context(|| format!("running '{} image inspect'", self.runtime())),
-            Ok(status) if status.success() => Ok(()),
-            Ok(_) => bail!(
-                "sandbox image '{img}' not found; run 'aic sandbox build' or set [sandbox] runtime = \"none\"",
-                img = self.image
-            ),
+        if find_on_path(self.runtime()).is_none() {
+            bail!("sandbox runtime '{}' not found on PATH; install it or set [sandbox] runtime = \"none\"", self.runtime());
         }
+        let mut command = Command::new(self.runtime());
+        command.args(["image", "inspect", &self.image]);
+        if crate::diagnostics::command_succeeds(command, std::time::Duration::from_secs(3))? { return Ok(()); }
+        bail!("sandbox image '{}' not found; run 'aic sandbox build' or set [sandbox] runtime = \"none\"", self.image)
+
     }
 
     /// Creates host-side state dirs that get bind-mounted, so the runtime

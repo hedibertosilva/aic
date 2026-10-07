@@ -147,8 +147,7 @@ impl Default for SandboxConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
-    /// Agent preselected for new conversations. Empty (or not configured):
-    /// the workflow executor.
+    /// Explicit agent preference for new chats. Empty requires a user choice.
     pub default_agent: String,
 }
 
@@ -267,15 +266,9 @@ impl Config {
             .with_context(|| format!("no agent named '{name}' configured (check `aic config show`)"))
     }
 
-    /// Agent the chat preselects: `[chat] default_agent`, else the
-    /// workflow executor.
+    /// Preserve the explicit preference, including unavailable names; never fall back.
     pub fn chat_default_agent(&self) -> &str {
-        let chosen = &self.chat.default_agent;
-        if !chosen.is_empty() && self.agents.contains_key(chosen) {
-            chosen
-        } else {
-            &self.workflow.executor
-        }
+        &self.chat.default_agent
     }
 
     pub fn global_dir() -> Result<PathBuf> {
@@ -524,12 +517,12 @@ mod tests {
     }
 
     #[test]
-    fn chat_default_agent_falls_back_to_the_workflow_executor() {
+    fn chat_default_agent_never_inherits_workflow() {
         let mut config = Config::default();
-        assert_eq!(config.chat_default_agent(), "claude");
+        assert_eq!(config.chat_default_agent(), "");
         config.chat.default_agent = "codex".into();
         assert_eq!(config.chat_default_agent(), "codex");
         config.chat.default_agent = "not-configured".into();
-        assert_eq!(config.chat_default_agent(), "claude");
+        assert_eq!(config.chat_default_agent(), "not-configured");
     }
 }

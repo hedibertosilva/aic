@@ -383,3 +383,18 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 #ptoggle.off { flex-direction: row-reverse; padding: 3px 12px 3px 4px; color: var(--muted); background: var(--bg); border-color: var(--line); }
 #ptoggle.off .knob { background: var(--muted); }
 #pconfirm { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+
+/* Environment and Git context */
+#readydialog { width: min(860px, calc(100vw - 32px)); }
+#readyrows { overflow-x: auto; max-height: 45vh; }
+#readyrows article { padding: 12px 0; border-bottom: 1px solid var(--border, #8884); }
+#readyrows dl { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 8px 0; }
+#readyrows dl div { min-width: 105px; }
+#readyrows dt { font-size: 12px; opacity: .7; }
+#readyrows dd { margin: 0; }
+#repobranch, #repo { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#branchdetails { white-space: pre-wrap; overflow-wrap: anywhere; }
+#newoptions { font-size: 12px; }
+
+#contextbar { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border, #8884); }
+#contextcheckout { flex: 1 1 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

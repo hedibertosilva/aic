@@ -1,0 +1,21 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo test --locked && cargo build --locked
+      - run: npm install --prefix /tmp/aic-browser-tools playwright@1.63.0
+      - run: /tmp/aic-browser-tools/node_modules/.bin/playwright install --with-deps chromium
+      - name: CLI, policy and browser tests (no provider calls)
+        run: |
+          AIC_TEST_BINARY="$PWD/target/debug/aic" \
+          AIC_PLAYWRIGHT_MODULE=/tmp/aic-browser-tools/node_modules/playwright \
+          node --test tests/*.test.cjs tests/*.integration.cjs tests/*.browser.cjs

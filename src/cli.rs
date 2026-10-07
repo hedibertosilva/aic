@@ -6,9 +6,13 @@ use crate::config::Mode;
 #[derive(Parser)]
 #[command(
     name = "aic",
+    version,
     about = "Local web chat for Claude Code, Gemini (Antigravity CLI) and Codex, plus a plan/dev review workflow. Without a subcommand, starts the chat."
 )]
 pub struct Cli {
+    /// Start the default chat without launching a browser.
+    #[arg(long)]
+    pub no_open: bool,
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -52,6 +56,18 @@ pub const DEFAULT_CHAT_PORT: u16 = 7878;
 pub enum Commands {
     /// Set up `.aic/` in this repo and the global config, if missing.
     Init,
+    /// Prepare environment, test agents and explicitly choose the chat default.
+    Setup {
+        #[arg(long)]
+        agent: Option<String>,
+        /// Consent to a real provider test for --agent in unattended setup.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// Diagnose environment and agents without provider generation or configuration changes.
+    Doctor { #[arg(long)] json: bool },
     /// Run a local web chat that talks to the configured agents (the default).
     ///
     /// Runs `aic init` first, so `.aic/` and the config exist.
@@ -62,6 +78,9 @@ pub enum Commands {
         host: String,
         #[arg(long, default_value_t = DEFAULT_CHAT_PORT)]
         port: u16,
+        /// Print the URL without launching a browser.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Plan, execute and review a feature with two agents.
     #[command(visible_alias = "wf")]
@@ -261,6 +280,15 @@ pub enum SandboxCommands {
 
 #[derive(Subcommand)]
 pub enum AgentCommands {
+    /// Test a real minimal response in the configured context (may consume quota).
+    Test {
+        agent: Option<String>,
+        /// Consent to the provider call without an interactive question.
+        #[arg(long)]
+        yes: bool,
+        #[arg(long, default_value_t = 45)]
+        timeout: u64,
+    },
     /// List the configured agents (binary, model, effort, default roles).
     List,
     /// Read the account quota of each agent (or one) through its CLI.

@@ -6,26 +6,48 @@ Local web chat where Claude Code, Gemini (via the [Antigravity CLI](https://anti
 
 It follows the "config-first" model of Claude Code's `/config`: you set the defaults (who reviews, who executes, manual/auto mode) once, and the day-to-day commands stay short.
 
-## Installation
+## Installation and first chat
 
-Requires Rust (`cargo`/`rustc`) and whichever agent binaries you configure (`claude`, `agy`/Antigravity CLI, and/or `codex`), already installed and authenticated.
+Download a versioned binary from [Releases](https://github.com/hedibertosilva/aic/releases).
+Release builds target Linux x86_64 and arm64 with static musl; macOS/Windows are
+not supported by this release pipeline. A version becomes downloadable after its
+release workflow completes; a build from source remains available until then.
+Git, a supported system, network access and a provider account are needed for the
+first response. Rust is only needed for [building from source](docs/build-from-source.md).
 
+Choose an existing release version (replace VERSION), then:
+
+```sh
+version=VERSION
+# On arm64 use aarch64-unknown-linux-musl instead.
+target=x86_64-unknown-linux-musl
+archive="aic-$version-$target.tar.gz"
+curl -fLO "https://github.com/hedibertosilva/aic/releases/download/v$version/$archive"
+curl -fLO "https://github.com/hedibertosilva/aic/releases/download/v$version/SHA256SUMS"
+awk -v archive="$archive" '$2 == archive { print }' SHA256SUMS > "$archive.sha256"
+test -s "$archive.sha256"
+sha256sum -c "$archive.sha256"
+tar -xzf "$archive" aic
+mkdir -p "$HOME/.local/bin"
+install -m 755 aic "$HOME/.local/bin/aic"
+export PATH="$HOME/.local/bin:$PATH"
+cd /path/to/your/git-repository
+aic setup
+aic
 ```
-cargo build --release
-cp target/release/aic ~/.local/bin/aic   # or another directory on your PATH
-```
 
-> If you build inside a distrobox/container, copy the binary straight to the host instead of using `distrobox-export --bin` — the generated wrapper runs `aic` *inside* the container on every call, which can make its own tools (`git`, etc.) resolve inside the container too.
+Setup prepares the sandbox separately, detects agents, offers login and a real
+availability test (with cost confirmation), and asks you to choose the default.
+It can be resumed with `aic setup`. Unused provider CLIs can be skipped.
+In the chat, confirm the agent and Git context, then send your first message.
+See [setup and recovery](docs/onboarding.md) and [worktrees](docs/worktrees.md).
 
-The [sandbox](#sandbox) mounts this same binary into its containers, so it has to run there too. A static build runs on any image:
-
-```
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release/aic ~/.local/bin/aic
-```
-
-A regular (glibc) build also works as long as your build host's glibc isn't newer than the image's (Debian trixie, glibc 2.41).
+To update, download and verify the next release, stop your server and replace the
+binary with `install` as above. Configuration and conversations remain local;
+rerun setup to verify the updated environment. To uninstall, remove the installed
+`aic` binary from your PATH. Keep `~/.config/aic` and each checkout's `.aic/`
+unless you deliberately want to delete configuration and conversation history.
+Provider logins and container images are managed separately by their own tools.
 
 ## Configuration
 
@@ -61,7 +83,7 @@ effort = ""
 
 # --- `aic chat` ------------------------------------------------------------
 [chat]
-default_agent = ""               # agent preselected for new conversations; empty = workflow.executor
+default_agent = ""               # agent preselected for new conversations; empty = ask for an explicit choice
 
 # --- `aic workflow` --------------------------------------------------------
 [workflow]
@@ -126,7 +148,7 @@ Enable the option with `aic config set sandbox.bind_agents true` (globally), or 
 ## Web chat
 
 ```
-aic chat [--host 127.0.0.1] [--port 7878]   # or just `aic`; runs `aic init` first
+aic chat [--host 127.0.0.1] [--port 7878] [--no-open]   # or just `aic`; runs `aic init` first
 ```
 
 Serves a local chat page where one conversation can have several participants — each a named instance of any agent under `[agents]` (e.g. two `claude`s with different roles, plus `gemini` or `codex`) — and every message goes to them in parallel, with replies side by side, one fixed column per participant. The **To:** pills under the message box show who receives it (all by default; typing `@name` at the start picks them too). When a round is done, **Ask them to comment on each other's replies** under the replies lets them answer what the others said since their last turn, for debate or cross-review (so does sending an empty message). Conversations, drafts, participant settings and native agent session IDs are persisted locally in `.aic/chat/chat.sqlite3`; the browser's `localStorage` is only a startup/offline cache and is migrated on first launch. The server continues each participant by passing the agent's own session id back (`claude --resume`, `agy --conversation`, `codex exec resume`).
@@ -151,6 +173,9 @@ Running a command without its required arguments (e.g. `aic agent login`, `aic w
 
 | Command | What it does |
 |---|---|
+| `aic setup [--agent NAME --yes] [--no-open]` | Prepare environment, test and choose the chat default. |
+| `aic agent test [NAME] [--yes] [--timeout N]` | Real minimal availability test; may consume quota. |
+| `aic doctor [--json]` | Read-only diagnosis, without provider generation. |
 | `aic init` | Creates `.aic/` in the current repo (`plans/`, `dev/`, `adhoc/reviews/`, `state.json`) and the global config, if they don't exist. Adds `.aic/` to `.gitignore`. |
 | `aic` / `aic chat [--host H] [--port P]` | Starts the [web chat](#web-chat) (runs `aic init` first; binds to loopback by default). |
 | `aic workflow plan new <slug> [--title "..."] [--no-open]` | Creates `.aic/plans/<slug>/PLAN.md` from a template (Problem, Proposal, Alternatives, Impact, Open questions) and registers the feature. Then opens the executor (claude/gemini) interactively to start the discussion; `--no-open` skips that. |

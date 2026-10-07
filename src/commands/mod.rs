@@ -2,3 +2,5 @@ pub mod agent;
 pub mod config_cmd;
 pub mod init;
 pub mod sandbox;
+
+pub mod setup;

@@ -18,6 +18,8 @@ async function fixture() {
   fs.writeFileSync(cli, `#!${process.execPath}
 const fs=require('fs'),path=require('path');const root=__dirname;
 const send=x=>process.stdout.write(JSON.stringify(x)+'\\n');
+if(process.argv.includes('login')) { console.log('Logged in'); process.exit(0); }
+if(process.argv.some(a=>a.includes('single word READY'))){ send({type:'item.completed',item:{type:'agent_message',text:'READY'}});send({type:'turn.completed'});process.exit(0); }
 if(process.argv.includes('app-server')){
   require('readline').createInterface({input:process.stdin}).on('line',line=>{
     const q=JSON.parse(line);if(!q.id)return;
@@ -36,19 +38,22 @@ else{const turns=path.join(root,'turns');const n=(fs.existsSync(turns)?Number(fs
   const usageReport={rate_limits:{limits:[{kind:'session',percent:0,resets_at:'2026-10-03T23:30:00+00:00',severity:'normal'},{kind:'weekly_all',percent:8,resets_at:'2026-10-09T03:00:00+00:00',severity:'normal'}]}};
   fs.writeFileSync(claude, `#!${process.execPath}
 const fs=require('fs');
+if(process.argv.includes('auth')){console.log(JSON.stringify({loggedIn:true}));process.exit(0);}
+if(process.argv.some(a=>a.includes('single word READY'))){console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'READY'}));process.exit(0);}
 if(process.argv.includes('/usage')){fs.appendFileSync(__dirname+'/claude-args',process.argv.slice(2).join(' ')+'\\n');console.log(JSON.stringify({type:'system',subtype:'init'}));console.log(JSON.stringify({type:'assistant',usage_report:${JSON.stringify(usageReport)}}));process.exit(0);}
 process.stderr.write('fixture process failed after start\\n');process.exit(1);
 `, { mode: 0o755 });
   const agyData={groups:[{name:'Gemini Models',description:'Models within this group: Gemini Flash, Gemini Pro',buckets:[{id:'gemini-weekly',window:'weekly',remaining_fraction:0,reset_time:'2026-10-08T00:35:13Z'}]},{name:'Claude and GPT models',description:'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',buckets:[{id:'3p-weekly',window:'weekly',remaining_fraction:1,reset_time:'2026-10-10T18:37:32Z'}]}]};
   const agy = path.join(root, 'agy');
-  fs.writeFileSync(agy, `#!${process.execPath}\nconsole.log(JSON.stringify({status:'SUCCESS',command:{name:'usage',data:${JSON.stringify(agyData)}}}));\n`, { mode: 0o755 });
+  fs.writeFileSync(agy, `#!${process.execPath}\nif(process.argv.some(a=>a.includes('single word READY'))){console.log(JSON.stringify({event:'result',result:{status:'SUCCESS',response:'READY'}}));}else console.log(JSON.stringify({status:'SUCCESS',command:{name:'usage',data:${JSON.stringify(agyData)}}}));\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(root,'quota.json'), JSON.stringify({pct:34}));
-  fs.writeFileSync(path.join(config,'config.toml'), `sandbox="none"\nexecutor="codex"\n[agents.codex]\nbinary=${JSON.stringify(cli)}\n[agents.claude]\nbinary=${JSON.stringify(claude)}\n[agents.gemini]\nbinary=${JSON.stringify(agy)}\n`);
+  fs.writeFileSync(path.join(config,'config.toml'), `sandbox="none"\nexecutor="codex"\n[chat]\ndefault_agent="codex"\n[agents.codex]\nbinary=${JSON.stringify(cli)}\n[agents.claude]\nbinary=${JSON.stringify(claude)}\n[agents.gemini]\nbinary=${JSON.stringify(agy)}\n`);
+  for (const name of ["claude", "codex", "gemini"]) execFileSync(path.resolve(process.env.AIC_TEST_BINARY), ["agent", "test", name, "--yes"], {cwd:root,env:{...process.env,AIC_CONFIG_DIR:config,AIC_IN_SANDBOX:"1"}});
   const listener=net.createServer(); await new Promise(resolve=>listener.listen(0,'127.0.0.1',resolve));
   const port=listener.address().port; await new Promise(resolve=>listener.close(resolve));
   const base=`http://127.0.0.1:${port}`; let server;
   async function start() {
-    server=spawn(path.resolve(process.env.AIC_TEST_BINARY),['chat','--port',String(port)],{cwd:root,env:{...process.env,AIC_CONFIG_DIR:config,AIC_IN_SANDBOX:'1'},stdio:['ignore','ignore','pipe']});
+    server=spawn(path.resolve(process.env.AIC_TEST_BINARY),['chat','--no-open','--port',String(port)],{cwd:root,env:{...process.env,AIC_CONFIG_DIR:config,AIC_IN_SANDBOX:'1'},stdio:['ignore','ignore','pipe']});
     let errors='';server.stderr.on('data',chunk=>errors+=chunk);
     for(let i=0;i<100;i++){try{if((await fetch(base+'/api/agents')).ok)return;}catch{}if(server.exitCode!==null)throw new Error(errors);await delay(50);}
     throw new Error('Fixture server failed to start: '+errors);
@@ -87,7 +92,8 @@ if(require.main===module) test('quota cache and durable conversation counters wo
     await f.request('/api/chat',{agent:'claude',conversation_id:'conversation',prompt:'started but failed'});
     s=await f.settled();assert.equal(s.consumption.claude.missing_usage,1);
     fs.rmSync(path.join(f.root,'claude'));
-    await f.request('/api/chat',{agent:'claude',conversation_id:'conversation',prompt:'could not start'});
+    const blocked = await fetch(f.base + '/api/chat', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:'claude',conversation_id:'conversation',prompt:'could not start'})});
+    assert.equal(blocked.status,409);
     s=await f.settled();assert.equal(s.consumption.claude.turns,1);
     const fetched=s.agents.find(q=>q.agent==='codex').fetched_at;
     const readsBefore=fs.readFileSync(path.join(f.root,'reads'),'utf8').trim().split('\n').length;

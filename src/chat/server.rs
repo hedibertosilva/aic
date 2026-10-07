@@ -15,7 +15,7 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::agent::{AgentProcess, CliAgent, RunOpts};
 use crate::chat::store::{self as chat, ChatEvent};
-use crate::{consumption, quotas};
+use crate::{consumption, quotas, diagnostics};
 use crate::config::{Config, SandboxKind};
 use crate::sandbox::Sandbox;
 
@@ -24,6 +24,7 @@ const CHAT_CSS: &str = include_str!("web/chat.css");
 const CHAT_JS: &str = include_str!("web/chat.js");
 const CHAT_IMPORT_JS: &str = include_str!("web/chat-import.js");
 const CHAT_QUOTAS_JS: &str = include_str!("web/chat-quotas.js");
+const ONBOARDING_JS: &str = include_str!("web/chat-onboarding.js");
 const FAVICON_SVG: &str = include_str!("web/favicon.svg");
 
 /// Cap on the request body, so a stray client can't make us buffer forever.
@@ -70,6 +71,10 @@ struct ChatStateRequest {
 struct ChatRequest {
     agent: String,
     prompt: String,
+    #[serde(default)]
+    checkout: Option<String>,
+    #[serde(default)]
+    git_context: Option<diagnostics::GitContext>,
     /// Omitted by auxiliary requests (e.g. title generation). Historical
     /// imported/copied entries never trigger accounting.
     #[serde(default)]
@@ -96,13 +101,15 @@ struct ChatRequest {
 #[derive(Deserialize)]
 struct SettingsRequest {
     default_agent: String,
+    #[serde(default)]
+    confirm_default: bool,
     permission_mode: String,
     skip_permissions: bool,
     sandbox: SandboxKind,
     sandbox_image: String,
 }
 
-pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
+pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
     let chat_db = open_chat_db(repo_root)?;
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
@@ -117,6 +124,7 @@ pub fn run(repo_root: &Path, host: &str, port: u16) -> Result<()> {
     let server = tiny_http::Server::http((host, port))
         .map_err(|e| anyhow!("binding {host}:{port}: {e}"))?;
     println!("aic chat on http://{host}:{port}  (repo: {})", repo_root.display());
+    if open { crate::common::browser::open(&format!("http://{}:{port}",if host == "::1" {"[::1]"} else {host})); }
     if !loopback {
         eprintln!(
             "warning: listening on {host}: anyone who can reach this port can run your agents \
@@ -155,6 +163,10 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
              state_json TEXT NOT NULL,
              drafts_json TEXT NOT NULL,
              updated_at INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS native_session_context (
+             agent TEXT NOT NULL, session_id TEXT NOT NULL, checkout TEXT NOT NULL,
+             PRIMARY KEY (agent, session_id)
          );",
     )?;
     consumption::init(&db)?;
@@ -248,14 +260,47 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     match (request.method().clone(), path.as_str()) {
         (Method::Get, "/") => respond_text(request, 200, "text/html; charset=utf-8", INDEX_HTML),
         (Method::Get, "/chat.css") => respond_text(request, 200, "text/css; charset=utf-8", CHAT_CSS),
+        (Method::Get, "/chat-onboarding.js") => respond_text(request, 200, "text/javascript; charset=utf-8", ONBOARDING_JS),
         (Method::Get, "/chat.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_JS),
         (Method::Get, "/chat-import.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_IMPORT_JS),
         (Method::Get, "/chat-quotas.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_QUOTAS_JS),
         (Method::Get, "/favicon.svg" | "/favicon.ico") => {
             respond_text(request, 200, "image/svg+xml", FAVICON_SVG)
         }
+        (Method::Get, "/api/worktrees") => {
+            let trees = crate::common::workspaces::list(&app.repo_root)?;
+            respond_text(request, 200, "application/json", serde_json::to_string(&trees)?)
+        }
+        (Method::Get, "/api/diagnostics") | (Method::Post, "/api/diagnostics/refresh") => {
+            if request.method() == &Method::Post && !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+            let requested = query_value(request.url(), "checkout");
+            let root = match crate::common::workspaces::resolve(&app.repo_root, requested.as_deref()) {
+                Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Select a registered worktree of this repository"),
+            };
+            let config = Config::load_merged(&root)?;
+            if root == app.repo_root { *app.config.write().expect("chat config lock poisoned") = config.clone(); }
+            let mut report = diagnostics::snapshot(&root, &config);
+            // Reuse the existing safe quota cache, without triggering generation.
+            let cached = app.quotas.lock().expect("quota cache lock poisoned");
+            for agent in &mut report.agents {
+                if let Some(q) = cached.get(&agent.agent)
+                    && q.signature == quota_signature(&config, &agent.agent) { agent.quota = if q.status.windows.iter().any(|w| w.used_pct.is_some_and(|p| p >= 100.0)) { "exhausted" } else if q.status.windows.iter().any(|w| w.used_pct.is_some_and(|p| p >= 80.0)) { "near_limit" } else if !q.status.windows.is_empty() { "available" } else { "unavailable" }.into();
+                }
+            }
+            respond_text(request, 200, "application/json", serde_json::to_string(&report)?)
+        }
+        (Method::Get, "/api/git") => {
+            match diagnostics::git_context(&app.repo_root) {
+                Ok(git) => respond_text(request, 200, "application/json", serde_json::to_string(&git)?),
+                Err(_) => respond_text(request, 503, "text/plain", "Git context unavailable; check the checkout in the terminal"),
+            }
+        }
         (Method::Get, "/api/agents") => {
-            let config = current_config(app);
+            let selected = query_value(request.url(), "checkout");
+            let root = match crate::common::workspaces::resolve(&app.repo_root, selected.as_deref()) {
+                Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Select a registered worktree"),
+            };
+            let config = Config::load_merged(&root)?;
             let mut names: Vec<&String> = config.agents.keys().collect();
             names.sort();
             let details: serde_json::Map<String, serde_json::Value> = names
@@ -272,7 +317,7 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
                 "agents": names,
                 "details": details,
                 "default": config.chat_default_agent(),
-                "repo": app.repo_root.display().to_string(),
+                "repo": root.display().to_string(),
                 "sandboxed": config.sandbox.runtime != SandboxKind::None,
             });
             respond_text(request, 200, "application/json", body.to_string())
@@ -320,7 +365,11 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             respond_text(request, 200, "application/json", config_json(&current_config(app)).to_string())
         }
         (Method::Get, "/api/skills") => {
-            let body = serde_json::to_string(&list_skills(app))?;
+            let selected = query_value(request.url(), "checkout");
+            let root = match crate::common::workspaces::resolve(&app.repo_root, selected.as_deref()) {
+                Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Select a registered worktree"),
+            };
+            let body = serde_json::to_string(&list_skills(&root, &Config::load_merged(&root)?))?;
             respond_text(request, 200, "application/json", body)
         }
         (Method::Get, "/api/chat/state") => {
@@ -512,8 +561,14 @@ fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()
 
     let mut global = Config::load_global()?;
     let available = current_config(app);
-    if !available.agents.contains_key(&req.default_agent) {
+    if !req.default_agent.is_empty() && !available.agents.contains_key(&req.default_agent) {
         return respond_text(request, 400, "text/plain", "default_agent must name a configured agent");
+    }
+    if req.default_agent != global.chat.default_agent {
+        if !req.confirm_default { return respond_text(request, 400, "text/plain", "Confirm the default agent change explicitly"); }
+        if !req.default_agent.is_empty() && !diagnostics::snapshot(&app.repo_root, &available).agents.iter().any(|a| a.agent == req.default_agent && a.readiness == "ready") {
+            return respond_text(request, 409, "text/plain", "Default agent must be ready; run aic agent test in the terminal");
+        }
     }
     global.chat.default_agent = req.default_agent;
     global.permissions.mode = req.permission_mode;
@@ -541,9 +596,9 @@ struct Skill {
 /// Skills the agents can see: the repo's `.claude/skills/`, plus
 /// `~/.claude/skills/` when agents run on the host (the sandbox doesn't
 /// mount it). Repo skills win on a name clash.
-fn list_skills(app: &App) -> Vec<Skill> {
-    let mut dirs = vec![app.repo_root.join(".claude").join("skills")];
-    if current_config(app).sandbox.runtime == SandboxKind::None {
+fn list_skills(root: &Path, config: &Config) -> Vec<Skill> {
+    let mut dirs = vec![root.join(".claude").join("skills")];
+    if config.sandbox.runtime == SandboxKind::None {
         if let Ok(home) = std::env::var("HOME") {
             dirs.push(PathBuf::from(home).join(".claude").join("skills"));
         }
@@ -667,11 +722,31 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
     if req.prompt.trim().is_empty() {
         return respond_text(request, 400, "text/plain", "empty prompt");
     }
-    let agent = match build_agent(app, &req.agent) {
+    let work_root = match crate::common::workspaces::resolve(&app.repo_root, req.checkout.as_deref()) {
+        Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Selected checkout is not a registered worktree"),
+    };
+    let config = Config::load_merged(&work_root)?;
+    if let Some(expected) = &req.git_context {
+        let actual = diagnostics::git_context(&work_root).ok();
+        if actual.as_ref().is_none_or(|a| a.checkout != expected.checkout || a.branch != expected.branch || (a.branch.is_none() && a.sha != expected.sha)) {
+            return respond_text(request, 409, "text/plain", "Git context changed before execution; review the branch notice and send again. Your draft is preserved.");
+        }
+    }
+    if let Some(session) = &req.session_id {
+        let db = app.chat_db.lock().expect("chat database lock poisoned");
+        let recorded: Option<String> = db.query_row("SELECT checkout FROM native_session_context WHERE agent=?1 AND session_id=?2", params![req.agent, session], |r|r.get(0)).optional()?;
+        if recorded.as_deref().is_some_and(|p| p != work_root.to_string_lossy()) || (recorded.is_none() && work_root != app.repo_root) {
+            return respond_text(request, 409, "text/plain", "Native session belongs to another checkout; create a fresh participant session");
+        }
+    }
+    let readiness = diagnostics::snapshot(&work_root, &config);
+    if !readiness.agents.iter().any(|a| a.agent == req.agent && a.readiness == "ready") {
+        return respond_text(request, 409, "text/plain", "Agent is not ready in this context. Run aic setup or aic agent test in the terminal, then refresh readiness. Your draft is preserved.");
+    }
+    let agent = match config.agent(&req.agent).and_then(|cfg| Ok(CliAgent::with_defaults(&req.agent, cfg.binary.clone(), cfg.model.clone(), cfg.effort.clone()).with_sandbox(Sandbox::from_config(&config)?))) {
         Ok(agent) => agent,
         Err(err) => return respond_text(request, 400, "text/plain", format!("{err:#}")),
     };
-    let config = current_config(app);
     let sandboxed = config.sandbox.runtime != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
     let mut native_session = resume.clone();
@@ -709,7 +784,7 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
 
     let opts = RunOpts {
         prompt,
-        cwd: Some(app.repo_root.clone()),
+        cwd: Some(work_root.clone()),
         system_prompt,
         model: req.model.filter(|s| !s.trim().is_empty()),
         effort: req.effort.filter(|s| !s.trim().is_empty()),
@@ -746,7 +821,8 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
 
     match agent.spawn_stream(&opts) {
         Err(err) => {
-            send(&tx, &failed(format!("{err:#}")));
+            let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
+                send(&tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
         }
         Ok(process) => {
             started = true;
@@ -770,7 +846,15 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
                 })
             };
             let result = pump_agent(agent.is_agy(), agent.is_codex(), process, &tx, |event| {
-                if let ChatEvent::Session { id } = event { native_session = Some(id.clone()); }
+                if let ChatEvent::Session { id } = event {
+                    native_session = Some(id.clone());
+                    let db = app.chat_db.lock().expect("chat database lock poisoned");
+                    let _ = db.execute("INSERT OR IGNORE INTO native_session_context (agent, session_id, checkout) VALUES (?1,?2,?3)", params![agent_name, id.as_str(), work_root.to_string_lossy()]);
+                }
+                if let ChatEvent::Done { ok: false, error, .. } = event {
+                    let _ = diagnostics::record_failure(&work_root, &config, &agent_name, error.as_deref().unwrap_or("execution failed"));
+                    *error = Some(diagnostics::classify_error(error.as_deref().unwrap_or("execution failed")).1.into());
+                }
                 if let ChatEvent::Done { usage, .. } = event {
                     if !accounted {
                         if let Some(conversation) = &conversation {
@@ -793,7 +877,8 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
             watcher.thread().unpark();
             let _ = watcher.join();
             if let Err(err) = result {
-                send(&tx, &failed(format!("{err:#}")));
+                let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
+                send(&tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
             }
         }
     }

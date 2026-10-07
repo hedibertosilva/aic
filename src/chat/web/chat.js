@@ -8,6 +8,7 @@ const DRAFTS_KEY = "aic-chat-drafts";
 let state = { convs: [], current: null, layout: "auto" };
 let drafts = {}; // conversation id -> unsent text, saved apart from the (big) state
 let meta = { agents: [], details: {}, default: "", repo: "", sandboxed: false };
+let readiness = null, gitContext = null, pendingSelection = null;
 let skills = []; // [{ name, description, argument_hint, requires_write }]
 const running = new Map(); // `${conv id}\n${participant}` -> AbortController
 const cardParts = new WeakMap(); // log entry -> DOM parts of its card
@@ -300,6 +301,8 @@ async function refreshQuotas(agent, silent = false) {
     const res = await fetch("/api/quotas/refresh", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ agent: agent || null }) });
     if (!res.ok) throw new Error(await res.text());
+    // A snapshot begun before the POST cannot establish the refresh result.
+    if (quotaRequest) await quotaRequest;
     await fetchQuotaState();
   } catch (err) { quotaManualReads.clear(); if (!silent) toast("Couldn't refresh usage limits: " + err.message); }
   finally { quotaRefreshPending = false; renderQuotas(); }
@@ -399,15 +402,16 @@ function addParticipant(c, f) {
   c.participants.push(p);
   return p;
 }
-const defaultAgent = () => (meta.agents.includes(meta.default) ? meta.default : meta.agents[0] || "");
-function newConv() {
-  const c = { id: crypto.randomUUID(), title: "New conversation", participants: [], log: [], round: 0, updated: Date.now(), sendTo: null };
+const defaultAgent = () => (state.hiddenAgents || []).includes(meta.default) ? "" : ChatOnboarding.initial(readiness, meta.default);
+async function newConv() {
+  try { await refreshReadiness(); } catch { readiness = {agents: []}; }
+  const c = { id: crypto.randomUUID(), title: "New conversation", participants: [], log: [], round: 0, updated: Date.now(), sendTo: null, checkout: cur()?.checkout || null, gitOrigin: gitContext ? structuredClone(gitContext) : null };
   const agent = defaultAgent();
   if (agent) addParticipant(c, { agent });
   state.convs.unshift(c);
   $("search").value = "";
   switchTo(c.id);
-  if (!agent) toast("No agents configured: check `aic config show`.");
+  if (!agent) openReadiness(c);
 }
 function copyParticipants(source, seen) {
   // Native CLI sessions cannot be forked. Start fresh sessions in the new
@@ -435,6 +439,8 @@ function copyConversation(source, withHistory) {
   const c = {
     id: crypto.randomUUID(),
     title: (withHistory ? `Fork: ${source.title}` : agentNames).slice(0, 80),
+    checkout: source.checkout || null,
+    gitOrigin: source.gitOrigin ? structuredClone(source.gitOrigin) : null,
     participants: copyParticipants(source, log.length),
     log,
     round: withHistory ? source.round || 0 : 0,
@@ -475,6 +481,7 @@ function switchTo(id) {
   $("input").value = drafts[id] || ""; autosize();
   document.body.classList.remove("drawer");
   save(); render(true); $("input").focus();
+  refreshReadiness(cur()).catch(() => {});
 }
 /* ---------- rename dialog ---------- */
 const TITLE_HINT = 35; // roughly what fits in the sidebar next to the "more" button; guidance, not a limit
@@ -797,7 +804,11 @@ function renderSidebar() {
   });
   const name = (meta.repo || "").split(/[\\/]/).filter(Boolean).pop() || meta.repo;
   $("reponame").textContent = name; $("reponame").title = name;
-  $("repo").textContent = meta.repo; $("repo").title = meta.repo;
+  $("repo").textContent = gitContext?.checkout || meta.repo; $("repo").title = gitContext?.checkout || meta.repo;
+  $("contextrepo").textContent = gitContext?.repository || name;
+  $("contextbranch").textContent = gitContext?.label || "Git context unavailable";
+  $("contextcheckout").textContent = gitContext?.checkout || meta.repo; $("contextcheckout").title = gitContext?.checkout || meta.repo;
+  $("repobranch").textContent = gitContext?.label || "Git context unavailable"; $("repobranch").title = gitContext?.label || "";
 }
 function convRow(c) {
   const row = el("div", "conv" + (c.id === state.current ? " active" : ""));
@@ -1458,7 +1469,8 @@ function systemFor(c, p) {
 
 // Starts one turn for each target, concurrently. Prompts are built before any
 // placeholder is logged so replies from this same round stay unseen for the next one.
-function launch(c, targets, userText, to, opts = {}) {
+async function launch(c, targets, userText, to, opts = {}) {
+  if (!opts.preflightDone && !(await prepareSend(c, targets))) return;
   if (busy(c)) return;
   targets = targets.filter((p) => !p.inactive && meta.agents.includes(p.agent));
   if (!targets.length) { toast("Choose an available, active participant first."); return; }
@@ -1520,12 +1532,15 @@ async function turn(c, { p, text: prompt, entry }) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: !!p.write,
+        checkout: c.checkout || null, git_context: c.gitCurrent || c.gitOrigin || null, agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: !!p.write,
         model: p.model || null, effort: p.effort || null,
       }),
       signal: running.get(key).signal,
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) {
+      if (res.status === 409) { const last = [...c.log].reverse().find(e => e.from === "you"); if (last && !drafts[c.id]) { drafts[c.id] = last.text; if (cur() === c && !$("input").value) { $("input").value = last.text; autosize(); } saveDraftsSoon(); } }
+      throw new Error(await res.text());
+    }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "", gap = false;
@@ -1576,8 +1591,12 @@ async function turn(c, { p, text: prompt, entry }) {
 
 /* ---------- input ---------- */
 function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
-$("form").onsubmit = (e) => {
+let sendPending = false;
+$("form").onsubmit = async (e) => {
   e.preventDefault();
+  if (sendPending) return;
+  sendPending = true;
+  try {
   const c = cur();
   if (!c) return;
   // While replies are coming in, the button is Stop; Enter does nothing, so
@@ -1610,12 +1629,15 @@ $("form").onsubmit = (e) => {
   if (!body) { // nothing to add: let them answer what's new to them
     const ready = targets.filter((p) => unseen(c, p).length);
     if (!ready.length) { toast(text ? "Nothing new for them to answer yet." : "Write a message first."); return; }
-    clearInput(c); launch(c, ready); return;
+    if (!(await prepareSend(c, ready))) return;
+    clearInput(c); launch(c, ready, null, null, { preflightDone: true }); return;
   }
   const sk = skillOf(body), problem = sk && skillProblem(sk, targets);
   if (problem) { toast(problem); return; }
+  if (!(await prepareSend(c, targets))) return;
   clearInput(c);
-  launch(c, targets, body, to);
+  launch(c, targets, body, to, { preflightDone: true });
+  } finally { sendPending = false; }
 };
 
 // Autocomplete for the mention chain and a "/skill" right after it.
@@ -1642,7 +1664,8 @@ function acUpdate() {
     acItems = [fork, clear, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint, sub: s.description,
-        off: allAgy ? "agy participants can't run skills" : "" }))]
+        off: skillProblem(s.name, recipients(c)),
+        sub: s.description + " · Claude/Codex · one recipient" + (s.requires_write ? " · edit access required" : " · read access") }))]
       .filter((item) => item.value.toLowerCase().includes(q));
   }
   acSel = Math.min(acSel, Math.max(acItems.length - 1, 0));
@@ -1780,7 +1803,9 @@ function openDialog(p) {
   $("ptitle").textContent = p ? "Edit " + p.name : "Add participant";
   $("psave").textContent = p ? "Save" : "Add";
   $("pname").value = p ? p.name : "";
+  updateAgentOptions();
   $("pagent").value = p ? p.agent : defaultAgent();
+  updateParticipantReadiness();
   dlgModel = p?.model || ""; dlgEffort = p?.effort || "";
   $("prole").value = p?.role || "";
   document.querySelector(`input[name="paccess"][value="${p?.write ? "write" : "read"}"]`).checked = true;
@@ -1946,7 +1971,11 @@ async function openConfig() {
     const res = await fetch("/api/config");
     if (!res.ok) throw new Error(await res.text());
     const config = await res.json();
-    setOptions("cdefault", config.agents, config.default_agent);
+    await refreshReadiness();
+    setOptions("cdefault", ["", ...config.agents], config.default_agent);
+    $("cdefault").options[0].textContent = "No preference — ask for each new chat";
+    for (const option of $("cdefault").options) option.disabled = !!option.value && option.value !== config.default_agent && !ChatOnboarding.ready(readiness, option.value);
+    $("cconfirmdefault").checked = false;
     $("cpermission").value = config.permission_mode;
     $("cskippermissions").checked = !!config.skip_permissions;
     $("csandbox").value = config.sandbox;
@@ -1967,6 +1996,7 @@ $("cform").onsubmit = async (e) => {
   error.hidden = true; saveBtn.disabled = true;
   const payload = {
     default_agent: $("cdefault").value,
+    confirm_default: $("cconfirmdefault").checked,
     permission_mode: $("cpermission").value,
     skip_permissions: $("cskippermissions").checked,
     sandbox: $("csandbox").value,
@@ -2063,10 +2093,11 @@ document.addEventListener("keydown", (e) => {
     // The app remains usable with its cache when an old server is still
     // running during an upgrade.
   }
+  try { await refreshReadiness(); } catch { readiness = {agents: []}; }
   try { skills = await (await fetch("/api/skills")).json(); } catch { skills = []; }
   meta.agents.forEach((a) => { const o = el("option", "", cap(a)); o.value = a; $("pagent").appendChild(o); });
   if (!cur()) state.current = state.convs[0]?.id || null;
-  if (!cur()) newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
+  if (!cur()) await newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
   fetchQuotaState();
 })();
 
@@ -2084,3 +2115,121 @@ setInterval(() => {
   });
 }, 1000);
 setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);
+
+/* ---------- onboarding and contextual preflight ---------- */
+async function refreshReadiness(conversation = cur()) {
+  const query = conversation?.checkout ? '?checkout=' + encodeURIComponent(conversation.checkout) : '';
+  const response = await fetch('/api/diagnostics' + query);
+  if (!response.ok) throw new Error('Readiness unavailable. Run aic doctor in the terminal.');
+  const report = await response.json();
+  if (cur() !== conversation) return report;
+  const agents = await fetch('/api/agents' + query);
+  if (cur() !== conversation) return report;
+  if (agents.ok) meta = Object.assign(meta, await agents.json());
+  try { const catalog = await fetch('/api/skills' + query); if (catalog.ok) skills = await catalog.json(); } catch {}
+  if (cur() !== conversation) return report;
+  readiness = report; gitContext = report.git; meta.default = report.default_agent;
+  renderSidebar(); renderComposer(); return report;
+}
+function readinessCommand(parent, text) {
+  if (!text) return;
+  const row = el('p', 'note'); const code = el('code', '', text);
+  const copy = el('button', '', 'Copy command'); copy.type = 'button';
+  copy.onclick = () => copyText(text, copy); row.append(code, document.createTextNode(' '), copy); parent.appendChild(row);
+}
+function renderReadiness() {
+  const rows = $('readyrows'); rows.textContent = '';
+  const summary = el('p', '', 'Repository: ' + (readiness?.repository.state || 'unknown') + ' · Runtime: ' + (readiness?.runtime.state || 'unknown') + ' · Sandbox: ' + (readiness?.image.state || 'unknown'));
+  rows.append(summary); readinessCommand(rows, readiness?.image.action || readiness?.runtime.action);
+  const selection = ChatOnboarding.selection(readiness, meta.default);
+  $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Choose a ready agent for this conversation; the global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Confirm the agent for this conversation. A participant is an instance of that agent.';
+  for (const a of readiness?.agents || []) {
+    const card = el('article'); card.appendChild(el('strong', '', cap(a.agent) + ' · ' + a.readiness));
+    const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution', 'quota']) { const field = el('div'); field.append(el('dt', '', cap(key)), el('dd', '', a[key])); fields.append(field); } card.append(fields);
+    card.append(el('p', 'note', a.reason), el('p', 'note', 'Last test: ' + (a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : 'never') + ' · ' + a.context));
+    readinessCommand(card, a.action); rows.append(card);
+  }
+  for (const id of ['readyagent', 'readysecond']) { const select = $(id); const previous = select.value; select.textContent = ''; const placeholder = el('option', '', 'Choose a ready agent'); placeholder.value = ''; select.append(placeholder); for (const name of selection.ready.filter(name => !(state.hiddenAgents || []).includes(name))) { const option = el('option', '', cap(name)); option.value = name; select.append(option); } select.value = selection.ready.includes(previous) ? previous : ''; }
+  const visibility = $('agentvisibilityrows'); visibility.textContent = '';
+  for (const a of readiness?.agents || []) { const label = el('label', 'check'); const box = document.createElement('input'); box.type = 'checkbox'; box.checked = !(state.hiddenAgents || []).includes(a.agent); box.onchange = () => { const hidden = new Set(state.hiddenAgents || []); if (box.checked) hidden.delete(a.agent); else hidden.add(a.agent); state.hiddenAgents = [...hidden]; saveSoon(); updateAgentOptions(); renderReadiness(); }; label.append(box, document.createTextNode(cap(a.agent))); visibility.append(label); }
+  $('readycontinue').disabled = !selection.ready.length;
+}
+async function openReadiness(conversation = null) {
+  pendingSelection = conversation; $('readyerror').hidden = true; $('readycontinue').disabled = true; $('readyreason').textContent = 'Checking environment…';
+  if (!$('readydialog').open) $('readydialog').showModal();
+  try { await refreshReadiness(); renderReadiness(); }
+  catch (error) { $('readyerror').textContent = error.message; $('readyerror').hidden = false; $('readycontinue').disabled = true; }
+}
+$('readybtn').onclick = () => openReadiness(cur()?.participants.length ? null : cur());
+$('readyclose').onclick = () => { $('readydialog').close(); $('readybtn').focus(); };
+$('readyrefresh').onclick = async () => { $('readyrefresh').disabled = true; try { await refreshReadiness(); renderReadiness(); } catch (e) { $('readyerror').textContent = e.message; $('readyerror').hidden = false; } finally { $('readyrefresh').disabled = false; } };
+$('readymode').onchange = () => { $('readysecondlabel').hidden = $('readymode').value === 'individual'; };
+$('newoptions').onclick = async () => { await newConv(); openReadiness(cur()); };
+$('readycontinue').onclick = async () => {
+  await refreshReadiness(); const name = $('readyagent').value, second = $('readysecond').value, mode = $('readymode').value;
+  if (!ChatOnboarding.ready(readiness, name) || (mode !== 'individual' && !ChatOnboarding.ready(readiness, second))) { $('readyerror').textContent = 'Confirm a ready agent for each participant.'; $('readyerror').hidden = false; return; }
+  const c = pendingSelection || cur(); if (!c) return;
+  if (!c.log.length && !busy(c)) c.participants = [];
+  const added = [addParticipant(c, { agent: name, role: mode === 'team' ? 'Lead developer' : '' })];
+  if (mode !== 'individual') added.push(addParticipant(c, { agent: second, role: mode === 'team' ? 'Reviewer' : '' }));
+  c.sendTo = added.length === active(c).length ? null : added.map(p => p.name);
+  saveSoon(); render(); $('readydialog').close(); $('input').focus();
+};
+function updateParticipantReadiness() {
+  const a = readiness?.agents?.find(a => a.agent === $('pagent').value);
+  $('preadiness').textContent = a ? a.agent + ' · ' + a.readiness + ' · ' + a.reason + (a.action ? ' · Next: ' + a.action : '') : 'Choose an agent. Readiness must be verified before sending.';
+}
+$('pagent').addEventListener('change', updateParticipantReadiness);
+async function prepareSend(c, targets) {
+  try {
+    const report = await refreshReadiness(c);
+    if (cur() !== c) return false;
+    const context = report.git;
+    const blocked = targets.filter(p => !ChatOnboarding.ready(report, p.agent));
+    if (blocked.length) { toast('Unavailable: ' + blocked.map(p => p.name).join(', ') + '. Your draft is preserved.'); await openReadiness(); return false; }
+    if (!context) { toast('Git context unavailable. Check the checkout in the terminal.'); return false; }
+    // Old conversations gain an origin without rewriting their sessions/history.
+    if (!c.gitOrigin) { c.gitOrigin = structuredClone(context); saveSoon(); }
+    if (ChatOnboarding.branchChanged(c.gitOrigin, context, c.gitAcknowledged)) {
+      $('branchtext').textContent = 'Branch changed from ' + c.gitOrigin.label + ' to ' + context.label + '.';
+      $('branchdetails').textContent = 'Origin: ' + c.gitOrigin.checkout + '\nCurrent: ' + context.checkout;
+      const approved = await new Promise(resolve => {
+        const dialog = $('branchdialog');
+        const end = value => { dialog.close(); resolve(value); };
+        $('branchcontinue').onclick = () => { c.gitAcknowledged = ChatOnboarding.gitKey(context); saveSoon(); end(true); };
+        $('branchnew').onclick = () => { end(false); newConv(); };
+        $('branchcancel').onclick = () => end(false);
+        dialog.oncancel = () => resolve(false); dialog.showModal();
+      });
+      if (!approved) return false;
+    }
+    if (cur() !== c) return false;
+    c.gitCurrent = structuredClone(context);
+    return true;
+  } catch (e) { toast(e.message + ' Your draft is preserved.'); return false; }
+}
+
+$('worktreebtn').onclick = async () => {
+  const c = cur(); if (!c || busy(c)) { toast('Wait for replies to finish before changing checkout.'); return; }
+  $('worktreeerror').hidden = true;
+  try {
+    const response = await fetch('/api/worktrees'); if (!response.ok) throw new Error('Worktree list unavailable');
+    const trees = await response.json(); const select = $('worktreeselect'); select.textContent = '';
+    for (const tree of trees) { const option = el('option', '', tree.label + ' · ' + tree.checkout); option.value = tree.checkout; select.append(option); }
+    select.value = c.checkout || meta.repo; $('worktreedialog').showModal();
+  } catch (e) { toast(e.message); }
+};
+$('worktreecancel').onclick = () => $('worktreedialog').close();
+$('worktreeconfirm').onclick = async () => {
+  const c = cur(); if (!c || busy(c)) return;
+  c.checkout = $('worktreeselect').value;
+  for (const p of c.participants) { p.session = ''; p.seen = 0; }
+  c.gitOrigin = null; c.gitAcknowledged = null; saveSoon(); $('worktreedialog').close();
+  await refreshReadiness(); c.gitOrigin = structuredClone(gitContext); saveSoon(); render();
+};
+
+function updateAgentOptions() {
+  const select = $('pagent'), selected = select.value; select.textContent = '';
+  for (const a of meta.agents.filter(a => !(state.hiddenAgents || []).includes(a) || a === selected)) { const option = el('option', '', cap(a)); option.value = a; select.append(option); }
+  select.value = selected;
+}

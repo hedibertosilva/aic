@@ -6,7 +6,7 @@ mod workflow;
 
 // Modules keep resolving as `crate::agent`, `crate::state`, ... from anywhere.
 use chat::{consumption, quotas};
-use common::{agent, config, git, sandbox, templates};
+use common::{agent, config, diagnostics, git, sandbox, templates};
 use workflow::{diff_filter, review, state};
 
 use std::path::{Path, PathBuf};
@@ -30,14 +30,16 @@ fn run() -> Result<()> {
     let cli = Cli::parse_args();
 
     match cli.command {
-        None => start_chat(DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT),
+        None => start_chat(DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT, !cli.no_open),
 
         Some(Commands::Init) => {
             let repo_root = resolve_repo_root()?;
             commands::init::run(&repo_root)
         }
 
-        Some(Commands::Chat { host, port }) => start_chat(&host, port),
+        Some(Commands::Chat { host, port, no_open }) => start_chat(&host, port, !no_open),
+        Some(Commands::Setup { agent, yes, no_open }) => commands::setup::run(&resolve_repo_root()?, agent, yes, no_open),
+        Some(Commands::Doctor { json }) => commands::setup::doctor(&std::env::current_dir()?, json),
 
         Some(Commands::Workflow { command }) => match command {
             WorkflowCommands::Plan { command } => plan(command),
@@ -178,6 +180,7 @@ fn agent_command(command: AgentCommands) -> Result<()> {
         .or_else(|_| std::env::current_dir().context("reading current directory"))?;
     let config = config::Config::load_merged(&repo_root)?;
     match command {
+        AgentCommands::Test { agent, yes, timeout } => commands::setup::agent_test(&repo_root, agent, yes, timeout),
         AgentCommands::List => commands::agent::list(&config),
         AgentCommands::Status { agent } => commands::agent::status(&config, &repo_root, agent),
         AgentCommands::Login { agent } => commands::agent::login(&config, &repo_root, &agent),
@@ -191,10 +194,10 @@ fn status(slug: Option<String>) -> Result<()> {
 
 /// Starts the chat from the repo it was launched in, setting up `.aic/` and
 /// the global config first (idempotent).
-fn start_chat(host: &str, port: u16) -> Result<()> {
+fn start_chat(host: &str, port: u16, open: bool) -> Result<()> {
     let repo_root = resolve_repo_root()?;
     commands::init::run(&repo_root)?;
-    chat::server::run(&repo_root, host, port)
+    chat::server::run(&repo_root, host, port, open)
 }
 
 fn resolve_repo_root() -> Result<PathBuf> {
