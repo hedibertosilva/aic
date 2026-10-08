@@ -18,6 +18,17 @@ function preference(f, name) {
   const file = path.join(f.root, 'config/config.toml');
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('default_agent="codex"', 'default_agent=' + JSON.stringify(name)));
 }
+async function emptyChat(page) {
+  await page.waitForSelector('#empty');
+  await page.waitForFunction(() => {
+    const state = JSON.parse(localStorage.getItem('aic-chat-v2'));
+    return state?.convs.find(c => c.id === state.current)?.participants.length === 0;
+  });
+  assert.equal(await page.locator('dialog[open]').count(), 0, 'new chat waits for an explicit card action');
+  assert.equal(await page.locator('#empty button').filter({ hasText: 'Add participant' }).count(), 1);
+  assert.equal(await page.locator('#empty button').filter({ hasText: 'Import conversation' }).count(), 1);
+  assert.equal((await savedConversation(page)).participants.length, 0);
+}
 async function paddedDialog(page, id) {
   await page.locator(id).waitFor({ state: 'visible' });
   const metrics = await page.locator(id).evaluate(d => {
@@ -44,7 +55,9 @@ test('explicit participant choice, targeted sends, keyboard recovery, draft and 
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
     const page = await context.newPage(), errors = [], requests = [];
     page.on('pageerror', e => errors.push(e.message)); page.on('request', r => requests.push(new URL(r.url()).pathname));
-    await page.goto(f.base); await page.waitForSelector('#pdialog[open]');
+    await page.goto(f.base); await emptyChat(page);
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
+    await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent').inputValue(), '', 'no implicit agent choice');
     assert.equal(await page.locator('#psave').isDisabled(), true);
     assert.equal(await page.locator('#readydialog').getAttribute('open'), null);
@@ -86,7 +99,8 @@ test('no ready agents: Environment is consultative, padded and scrollable on a s
   try {
     fs.rmSync(path.join(f.root, '.aic/diagnostics/tests.json'));
     browser = await chromium.launch({ headless: true }); const page = await browser.newPage({ viewport: { width: 390, height: 360 } });
-    await page.goto(f.base); await page.waitForSelector('#readydialog[open]');
+    await page.goto(f.base); await emptyChat(page);
+    await page.locator('#readybtn').click(); await page.waitForSelector('#readydialog[open]');
     await page.waitForFunction(() => document.querySelector('#readyreason').textContent.includes('unavailable'));
     assert.match(await page.locator('#readyreason').innerText(), /preferred agent \(codex\) is unavailable/);
     const before = await savedConversation(page);
@@ -112,10 +126,22 @@ test('opening and refreshing Environment never changes existing participants, ro
     await page.locator('#readyclose').click();
     assert.deepEqual(await savedConversation(page), empty, 'consulting an empty conversation preserves its participant');
     await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
-    await page.locator('#pagent').selectOption('codex'); await page.locator('#pname').fill('Reviewer'); await page.locator('#prole').fill('Review changes'); await page.locator('#psave').click();
+    const role = 'Review changes.\n\nFocus on correctness and safety.\nExplain the expected behavior and constraints.';
+    assert.equal(await page.locator('#prole').evaluate(e => e.tagName), 'TEXTAREA');
+    assert.equal(await page.locator('#prole').getAttribute('rows'), '5');
+    await page.locator('#pagent').selectOption('codex'); await page.locator('#pname').fill('Reviewer'); await page.locator('#prole').fill(role); await page.locator('#psave').click();
     assert.equal(await page.locator('#chips .chip').count(), 2, 'teams use the participant flow');
+    await page.locator('#chips .chip').filter({ hasText: 'Reviewer' }).click();
+    await page.waitForSelector('#pdialog[open]');
+    assert.equal(await page.locator('#prole').inputValue(), role, 'editing retains line breaks');
+    await page.locator('#pcancel').click();
+    const prompts = [];
+    page.on('request', request => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/chat') prompts.push(request.postDataJSON());
+    });
     await page.locator('#input').fill('with existing sessions'); await page.locator('#send').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].participants.every(p => p.session));
+    assert.ok(prompts.some(prompt => prompt.system.includes(role)), 'instructions are sent with their line breaks');
     await page.locator('#input').fill('Unsent draft');
     const before = await savedConversation(page);
     await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
@@ -124,7 +150,9 @@ test('opening and refreshing Environment never changes existing participants, ro
     assert.deepEqual(await savedConversation(page), before);
     assert.equal(await page.locator('#input').inputValue(), 'Unsent draft');
     await page.locator('#input').fill('/write'); // no automatic team role is assigned
-    assert.equal((await savedConversation(page)).participants[1].role, 'Review changes');
+    assert.equal((await savedConversation(page)).participants[1].role, role);
+    await page.reload(); await page.waitForSelector('#chips .chip');
+    assert.equal((await savedConversation(page)).participants[1].role, role, 'instructions survive reload');
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await f.close(); }
 });
@@ -136,15 +164,19 @@ test('sole ready agent still needs explicit confirmation; unavailable preference
     const cache = path.join(f.root, '.aic/diagnostics/tests.json'), records = JSON.parse(fs.readFileSync(cache, 'utf8'));
     delete records.tests.claude; delete records.tests.gemini; fs.writeFileSync(cache, JSON.stringify(records));
     browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
-    await page.goto(f.base); await page.waitForSelector('#pdialog[open]');
+    await page.goto(f.base); await emptyChat(page);
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
+    await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent').inputValue(), ''); assert.equal(await page.locator('#psave').isDisabled(), true);
     await page.locator('#pagent').selectOption('codex'); await page.locator('#psave').click();
     assert.equal((await savedConversation(page)).participants[0].agent, 'codex');
     const file = path.join(f.root, 'config/config.toml'); fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('default_agent=""', 'default_agent="claude"'));
-    await page.locator('#new').click(); await page.waitForSelector('#readydialog[open]');
-    await page.waitForFunction(() => document.querySelector('#readyreason').textContent.includes('preferred agent (claude)'));
+    await page.locator('#new').click(); await emptyChat(page);
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
+    await page.waitForSelector('#pdialog[open]');
+    assert.match(await page.locator('#ppreference').innerText(), /preferred agent \(claude\) is unavailable/);
+    assert.equal(await page.locator('#readydialog').getAttribute('open'), null, 'ready alternative goes directly to selection');
     assert.equal((await savedConversation(page)).participants.length, 0);
-    await page.locator('#readyclose').click(); await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent').inputValue(), '');
     await page.locator('#pagent').selectOption('codex'); await page.locator('#psave').click();
     assert.equal((await savedConversation(page)).participants[0].agent, 'codex');
@@ -152,7 +184,35 @@ test('sole ready agent still needs explicit confirmation; unavailable preference
   } finally { await browser?.close(); await f.close(); }
 });
 
-test('default visibility is protected and checkout switching is only in Advanced configuration', options, async () => {
+test('new chat cards allow importing before participant setup, including after the keyboard shortcut', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    preference(f, '');
+    browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+    await page.goto(f.base); await emptyChat(page);
+    const previous = (await savedConversation(page)).id;
+    await page.keyboard.press('Control+Shift+O');
+    await page.waitForFunction(id => JSON.parse(localStorage.getItem('aic-chat-v2')).current !== id, previous);
+    await emptyChat(page);
+    const fileChooser = page.waitForEvent('filechooser');
+    await page.locator('#empty button').filter({ hasText: 'Import conversation' }).click();
+    await (await fileChooser).setFiles({ name: 'conversation.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({
+      version: 1, title: 'Imported from card', participants: [{ name: 'Reviewer', agent: 'codex', role: 'Review changes\nExplain risks' }],
+      log: [{ from: 'you', text: 'Existing question' }, { from: 'Reviewer', text: 'Existing answer' }],
+    })) });
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs.some(c => c.title === 'Imported from card'));
+    const imported = await savedConversation(page);
+    assert.equal(imported.title, 'Imported from card');
+    assert.equal(imported.participants.length, 1);
+    assert.equal(imported.participants[0].role, 'Review changes\nExplain risks');
+    assert.equal(imported.participants[0].session, '');
+    assert.equal(imported.log.length, 2);
+    assert.equal(await page.locator('dialog[open]').count(), 0);
+    assert.ok(fs.readFileSync(path.join(f.root, 'config/config.toml'), 'utf8').includes('default_agent=""'));
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('default visibility is protected and checkout switching is scoped to this conversation', options, async () => {
   const f = await fixture(); let browser;
   try {
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'initial'], { cwd: f.root });
@@ -171,15 +231,18 @@ test('default visibility is protected and checkout switching is only in Advanced
     assert.equal(await def.isDisabled(), true); assert.equal(await def.isChecked(), true);
     await page.locator('#agentvisibilityrows label').filter({ hasText: 'Claude' }).locator('input').uncheck();
     assert.equal(await page.locator('#worktreebtn').isVisible(), false);
-    await page.locator('#cadvanced summary').click(); await page.locator('#worktreebtn').click();
+    assert.equal(await page.locator('#cform #worktreebtn').count(), 0);
+    await page.locator('#csave').click(); await page.waitForSelector('#cdialog', { state: 'hidden' });
+    await page.locator('#conversationadvanced summary').click();
+    assert.match(await page.locator('#conversationadvanced').innerText(), /This conversation only/);
+    await page.locator('#worktreebtn').click();
     await page.setViewportSize({ width: 390, height: 360 }); await paddedDialog(page, '#worktreedialog');
     await page.locator('#worktreeselect').selectOption(worktree); await page.locator('#worktreeconfirm').click();
     await page.waitForFunction(target => document.querySelector('#contextcheckout').textContent === target, worktree);
     await page.waitForFunction(target => { const s = JSON.parse(localStorage.getItem('aic-chat-v2')); return s.convs.find(c => c.id === s.current)?.checkout === target; }, worktree);
     const current = await savedConversation(page); assert.equal(current.checkout, worktree); assert.ok(current.log.length); assert.equal(current.participants[0].session, '');
     // Return through Advanced, preserving explicit session reset and local readiness.
-    await page.locator('#configbtn').click(); await page.waitForSelector('#cdialog[open]');
-    await page.locator('#cadvanced summary').click(); await page.locator('#worktreebtn').click(); await page.locator('#worktreeselect').selectOption(f.root); await page.locator('#worktreeconfirm').click();
+    await page.locator('#conversationadvanced summary').click(); await page.locator('#worktreebtn').click(); await page.locator('#worktreeselect').selectOption(f.root); await page.locator('#worktreeconfirm').click();
     await page.waitForFunction(target => document.querySelector('#contextcheckout').textContent === target, f.root);
     await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent option[value="claude"]').count(), 0);
@@ -187,5 +250,86 @@ test('default visibility is protected and checkout switching is only in Advanced
     await page.locator('#psave').click(); assert.equal(await page.locator('#chips .chip').count(), 2);
     await page.locator('#input').fill('/write'); await page.waitForSelector('#ac.open'); assert.match(await page.locator('#ac').innerText(), /exactly one participant/);
     assert.deepEqual(errors, []);
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('Configuration stages visibility: Cancel/Esc and failed Save discard or retain the draft without persistence', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+    const errors = []; page.on('pageerror', e => errors.push(e.message));
+    await page.goto(f.base); await page.waitForSelector('#chips .chip');
+    const configFile = path.join(f.root, 'config/config.toml'), original = fs.readFileSync(configFile, 'utf8');
+    const hidden = () => page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')).hiddenAgents || []);
+    const box = name => page.locator('#agentvisibilityrows label').filter({hasText:name}).locator('input');
+    const open = async () => { await page.locator('#configbtn').click(); await page.waitForSelector('#cdialog[open]'); };
+    await open(); await box('Claude').uncheck(); await page.locator('#cpermission').selectOption('plan');
+    await page.locator('#csandboximage').fill('unsaved-image');
+    assert.deepEqual(await hidden(), [], 'checkbox must not mutate stored preferences');
+    assert.equal(await page.locator('#cform #worktreebtn').count(), 0, 'conversation actions are outside global form');
+    assert.equal(await page.locator('#worktreebtn').isVisible(), false, 'disclosure is closed and inert behind Configuration');
+    await page.locator('#ccancel').click();
+    assert.equal(fs.readFileSync(configFile, 'utf8'), original);
+    assert.deepEqual(await hidden(), []);
+    await open(); assert.equal(await box('Claude').isChecked(), true);
+    assert.equal(await page.locator('#cpermission').inputValue(), 'acceptEdits');
+    assert.notEqual(await page.locator('#csandboximage').inputValue(), 'unsaved-image');
+    await box('Claude').uncheck(); await page.keyboard.press('Escape');
+    assert.deepEqual(await hidden(), []);
+    await open(); assert.equal(await box('Claude').isChecked(), true);
+    await box('Claude').uncheck(); await page.locator('#cdefault').selectOption('claude');
+    assert.equal(await box('Claude').isChecked(), true); assert.equal(await box('Claude').isDisabled(), true, 'pending new default stays visible');
+    await page.locator('#cdefault').selectOption('codex'); await box('Claude').uncheck();
+    await page.route('**/api/config', async route => {
+      if (route.request().method() === 'POST') await route.fulfill({status:409,body:'Fixture save rejected'});
+      else await route.continue();
+    });
+    await page.locator('#csave').click(); await page.waitForSelector('#cerror:not([hidden])');
+    assert.match(await page.locator('#cerror').innerText(), /Fixture save rejected/);
+    assert.deepEqual(await hidden(), []); assert.equal(await box('Claude').isChecked(), false, 'failed save retains only draft');
+    assert.equal(fs.readFileSync(configFile, 'utf8'), original);
+    await page.locator('#ccancel').click(); await page.unroute('**/api/config');
+    await open(); assert.equal(await box('Claude').isChecked(), true);
+    await box('Claude').uncheck(); await page.locator('#csave').click(); await page.waitForSelector('#cdialog', {state:'hidden'});
+    assert.deepEqual(await hidden(), ['claude']);
+    await page.reload(); await page.waitForSelector('#chips .chip');
+    assert.deepEqual(await hidden(), ['claude'], 'successful Save survives reload');
+    await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
+    assert.equal(await page.locator('#pagent option[value="claude"]').count(), 0);
+    assert.deepEqual(errors, []);
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('Environment indicator ignores unused agents, follows participants and keeps quota in its own panel', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    const cache = path.join(f.root, '.aic/diagnostics/tests.json');
+    const records = JSON.parse(fs.readFileSync(cache, 'utf8')); delete records.tests.claude; delete records.tests.gemini; fs.writeFileSync(cache, JSON.stringify(records));
+    browser = await chromium.launch({headless:true}); const page = await browser.newPage();
+    await page.goto(f.base); await page.waitForSelector('#chips .chip');
+    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
+    await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
+    assert.match(await page.locator('#readyrows').innerText(), /Claude · unknown/);
+    assert.match(await page.locator('#readyrows').innerText(), /Gemini · unknown/);
+    assert.deepEqual(await page.locator('#readyrows dt').allTextContents(), ['Installation','Authentication','Execution','Installation','Authentication','Execution','Installation','Authentication','Execution']);
+    await page.locator('#readyclose').click();
+    await page.locator('#input').fill('Team history'); await page.locator('#send').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.text === 'Fixture reply' && !e.pending));
+    testAgent(f, 'claude');
+    await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
+    await page.locator('#pagent').selectOption('claude'); await page.locator('#psave').click();
+    const withClaude = await savedConversation(page);
+    await page.locator('#new').click(); await page.waitForFunction(() => document.querySelectorAll('#chips .chip').length === 1);
+    await page.locator('#input').fill('Solo history'); await page.locator('#send').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.text === 'Fixture reply' && !e.pending));
+    const withoutClaude = await savedConversation(page);
+    const invalid = JSON.parse(fs.readFileSync(cache,'utf8')); delete invalid.tests.claude; fs.writeFileSync(cache,JSON.stringify(invalid));
+    await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled); await page.locator('#readyclose').click();
+    assert.equal(await page.locator('#readybtn').innerText(), 'Environment ready');
+    await page.locator('#list .conv .open').filter({hasText:withClaude.title}).click();
+    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment · 1 pending item');
+    await page.locator('#list .conv .open').filter({hasText:withoutClaude.title}).click();
+    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
+    await page.locator('#quotabtn').click(); assert.equal(await page.locator('#quotas').isVisible(), true);
   } finally { await browser?.close(); await f.close(); }
 });

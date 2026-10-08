@@ -43,7 +43,24 @@
       <p id="quotaunknown" class="note" hidden>Earlier replies in this conversation weren't attributed to an agent and are not included in these totals.</p>
     </section>
   </div>
-  <div id="contextbar" aria-label="Current repository context"><strong id="contextrepo"></strong><span id="contextbranch"></span><span id="contextcheckout"></span></div>
+  <div id="contextbar" aria-label="Current repository context"><strong id="contextrepo"></strong><span id="contextbranch"></span><span id="contextcheckout"></span><details id="conversationadvanced"><summary>Advanced</summary><div class="conversationoptions"><strong>This conversation only</strong><p class="note">Change its working checkout. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p><button id="worktreebtn" type="button">Change working checkout…</button></div></details></div>
+  <div id="planbar" aria-label="Conversation plan">
+    <span id="planlabel">Free conversation</span>
+    <button id="planlink" type="button">Link or create plan</button>
+    <button id="plantoggle" type="button" aria-label="Tasks and executions for this plan" aria-expanded="false" aria-controls="planpanel" hidden>Tasks</button>
+  </div>
+  <details id="planorigin" hidden><summary>Fork history</summary><p id="planorigintext"></p></details>
+  <dialog id="planpanel" aria-labelledby="plantitle" hidden>
+    <header><strong id="plantitle"></strong><span class="grow"></span><button id="planrefresh" type="button">Refresh</button><button id="planclose" type="button">Close</button></header>
+    <p class="note" id="planstatus" role="status"></p>
+    <p class="note err" id="planerror" role="alert" hidden></p>
+    <details><summary>Objective and scope</summary><pre id="plancontent"></pre><button id="planreload" type="button">Reload changes from plan files</button></details>
+    <h3>Tasks</h3>
+    <div id="plantasks"></div>
+    <form id="quicktaskform"><label for="quicktask">Quick task</label><div class="taskinput"><input id="quicktask" required maxlength="200" placeholder="Describe the work to do"><button id="quicktaskadd" type="submit">Add task</button></div></form>
+    <h3>Executions</h3>
+    <div id="planexecutions"></div>
+  </dialog>
   <div id="banner" role="alert" hidden></div>
   <div id="view">
     <div id="layout" role="group" aria-label="Reply layout"></div>
@@ -52,6 +69,11 @@
   <footer id="composer">
     <button id="jump" type="button"></button>
     <div id="ac" role="listbox"></div>
+    <div id="planexecution" hidden>
+      <label>Planned conversation <select id="planmode"><option value="discussion">Discuss — read only</option><option value="task">Execute tasks</option></select></label>
+      <p id="planmodenote" class="note">Discussion keeps the plan context and does not allow file edits.</p>
+      <div id="plantargets"></div>
+    </div>
     <form id="form">
       <textarea id="input" rows="2" aria-label="Message" placeholder="Write your message…" autofocus></textarea>
       <div class="toolbar">
@@ -78,13 +100,14 @@
     </div>
     <p class="note" id="pquota"></p>
     <p class="note" id="preadiness"></p>
+    <p class="note warn" id="ppreference" hidden></p>
     <p class="note">A participant is an agent instance in this conversation. Its role and file access do not change the global agent configuration.</p>
     <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
     <fieldset class="colours">
       <legend>Colour</legend>
       <span id="phues" role="radiogroup" aria-label="Colour"></span>
     </fieldset>
-    <label>Role / instructions <input type="text" id="prole" placeholder="E.g. strict code reviewer (optional)" autocomplete="off"></label>
+    <label>Role / instructions <textarea id="prole" rows="5" placeholder="Describe expected behavior, scope and constraints (optional)" autocomplete="off"></textarea></label>
     <fieldset>
       <legend>File access</legend>
       <div class="seg" role="radiogroup" aria-label="File access">
@@ -156,7 +179,6 @@
     <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
     <label class="check"><input type="checkbox" id="cconfirmdefault"> Confirm changing the default agent for new chats</label>
     <fieldset id="agentvisibility"><legend>Agents shown in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The effective default agent always stays visible. Hiding an agent keeps its configuration and existing participants.</p></fieldset>
-    <details id="cadvanced"><summary>Advanced</summary><p class="note">Changing the working checkout restarts participant sessions and keeps visible history.</p><button id="worktreebtn" type="button">Change working checkout…</button></details>
     <p class="note warn" id="cwarn" hidden></p>
     <p class="note err" id="cerror" hidden></p>
     <div class="buttons">
@@ -188,6 +210,35 @@
   <p>This conversation keeps its history and participant sessions. The next sends will use the files in the current branch.</p>
   <details><summary>Details</summary><pre id="branchdetails"></pre></details>
   <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create new chat</button><button id="branchcontinue" type="button" class="primary">Continue on this branch</button></div>
+</dialog>
+<dialog id="plandialog" aria-labelledby="plandialogtitle">
+  <form id="planform">
+    <h2 id="plandialogtitle">Plan for this conversation</h2>
+    <p class="note">A plan coordinates work across conversations. Participant roles and file permissions stay separate.</p>
+    <label>Conversation <select id="planchoice"><option value="free">Free conversation</option><option value="existing">Link an existing plan</option><option value="create">Create a plan</option><option id="planmigrateoption" value="migrate" hidden>Copy plan to this checkout</option></select></label>
+    <label id="existingplanfield" hidden>Plan <select id="existingplan"></select></label>
+    <fieldset id="createplanfields" hidden>
+      <label>Title <input id="newplantitle" maxlength="160"></label>
+      <label>Slug <input id="newplanslug" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="authentication"></label>
+      <label>Objective and scope <textarea id="newplanobjective" rows="4"></textarea></label>
+      <label>Acceptance criteria <textarea id="newplancriteria" rows="3"></textarea></label>
+    </fieldset>
+    <label id="migrateplanfield" hidden>Destination slug <input id="migrateplanslug" maxlength="100" pattern="[A-Za-z0-9_-]+"></label>
+    <p id="planchangeeffect" class="note warn"></p>
+    <p id="plancheckoutnote" class="note" hidden></p>
+    <p id="planlinkerror" class="note err" role="alert" hidden></p>
+    <div class="buttons"><button id="plancancel" type="button">Cancel</button><span class="grow"></span><button id="planapply" type="submit" class="primary">Apply</button></div>
+  </form>
+</dialog>
+<dialog id="taskcompletedialog" aria-labelledby="taskcompletetitle">
+  <form id="taskcompleteform">
+    <h2 id="taskcompletetitle">Validate task completion</h2>
+    <p id="taskcompletename"></p>
+    <label>Validation evidence <textarea id="taskvalidation" rows="4" required placeholder="Tests performed, results, or what you checked manually"></textarea></label>
+    <label class="check"><input id="taskconfirmed" type="checkbox" required> I confirm that the task meets its acceptance criteria.</label>
+    <p id="taskcompleteerror" class="note err" role="alert" hidden></p>
+    <div class="buttons"><button id="taskcompletecancel" type="button">Cancel</button><span class="grow"></span><button id="taskcompleteapply" type="submit" class="primary">Mark completed</button></div>
+  </form>
 </dialog>
 <div id="toast" role="status"><span id="toasttext"></span><button id="undo" type="button">Undo</button></div>
 <div id="announce" class="sr-only" aria-live="polite"></div>

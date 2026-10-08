@@ -29,7 +29,7 @@ a sandbox can see shared Git metadata, but only explicitly mounted working trees
 Selection of another worktree and copying conversations have separate controls;
 never change an active native session's directory silently.
 
-Configuration → Advanced → Change working checkout lists only registered worktrees
+Git context → Advanced → This conversation only → Change working checkout lists only registered worktrees
 of the same repository. This P2 control is not a primary action in the chat footer.
 Confirming a selection keeps visible history and starts fresh participant sessions;
 it is unavailable while replies run. Run `aic agent test` in the destination
@@ -43,6 +43,7 @@ move or overwrite is performed. See [selection design](worktree-selection-design
 
 Configuration also offers agent visibility controls. The effective default stays
 visible and cannot be hidden. Hiding another agent affects selectors
-only; it does not remove configuration, participants or earlier messages. The
-skill autocomplete shows supported agents, a single-recipient requirement and
+only; it does not remove configuration, participants or earlier messages. These
+checkboxes are applied only after Configuration Save succeeds; Cancel/Esc discards
+their draft. Skill autocomplete shows supported agents, a single-recipient requirement and
 required file access, together with arguments and the reason a skill is unavailable.

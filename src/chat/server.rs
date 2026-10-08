@@ -13,8 +13,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
-use crate::agent::{AgentProcess, CliAgent, RunOpts};
+use crate::agent::{AgentProcess, CliAgent, Killer, RunOpts};
 use crate::chat::store::{self as chat, ChatEvent};
+use crate::chat::plans;
 use crate::{consumption, quotas, diagnostics};
 use crate::config::{Config, SandboxKind};
 use crate::sandbox::Sandbox;
@@ -35,8 +36,9 @@ const MAX_BODY: u64 = 1 << 20;
 /// still leaving ample room for a long multi-agent conversation.
 const MAX_CHAT_STATE: u64 = 64 << 20;
 
-/// How often an idle turn writes a blank line, so a closed tab is noticed
-/// (and its agent killed) even while the agent is silent.
+/// How often an idle turn writes a blank line. For durable browser runs this
+/// only keeps proxies awake; losing the browser connection no longer owns or
+/// stops the agent process.
 const HEARTBEAT: Duration = Duration::from_secs(2);
 
 /// How long a CLI gets to list its models before the dialog falls back to its built-in suggestions.
@@ -54,6 +56,10 @@ struct App {
     /// Models each agent CLI reported, so the dialog does not spawn it every time.
     models: Mutex<HashMap<String, chat::ModelCatalog>>,
     quotas: Mutex<HashMap<String, QuotaCache>>,
+    /// Live process handles exist only to implement an explicit Stop action.
+    /// Durable status and output live in SQLite, so a browser refresh can
+    /// reconnect without keeping an HTTP request alive.
+    active_runs: Mutex<HashMap<String, Killer>>,
 }
 
 struct QuotaCache {
@@ -65,6 +71,8 @@ struct QuotaCache {
 struct ChatStateRequest {
     state: serde_json::Value,
     drafts: serde_json::Value,
+    #[serde(default)]
+    revision: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -74,7 +82,7 @@ struct PreflightRequest {
     checkout: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ChatRequest {
     agent: String,
     prompt: String,
@@ -99,6 +107,18 @@ struct ChatRequest {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    #[serde(default)]
+    participant: Option<String>,
+    #[serde(default)]
+    intent: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    binding_version: Option<u64>,
+    /// Browser-generated id for a reconnectable turn. Auxiliary and older
+    /// clients may omit it and retain the legacy connection-owned behavior.
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 /// The settings the chat dialog edits (`[chat]`, `[permissions]` and
@@ -118,14 +138,16 @@ struct SettingsRequest {
 
 pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
-    let chat_db = open_chat_db(repo_root)?;
+    let mut chat_db = open_chat_db(repo_root)?;
+    plans::recover(&mut chat_db, repo_root)?;
+    recover_chat_runs(&mut chat_db)?;
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
     let allowed_hosts = loopback.then(|| {
         vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
     });
     let app = Arc::new(App {
         repo_root: repo_root.to_path_buf(), config: RwLock::new(config), chat_db: Mutex::new(chat_db),
-        allowed_hosts, models: Mutex::default(), quotas: Mutex::default(),
+        allowed_hosts, models: Mutex::default(), quotas: Mutex::default(), active_runs: Mutex::default(),
     });
 
     let server = tiny_http::Server::http((host, port))
@@ -174,10 +196,130 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
          CREATE TABLE IF NOT EXISTS native_session_context (
              agent TEXT NOT NULL, session_id TEXT NOT NULL, checkout TEXT NOT NULL,
              PRIMARY KEY (agent, session_id)
-         );",
+         );
+         CREATE TABLE IF NOT EXISTS chat_runs (
+             id TEXT PRIMARY KEY,
+             conversation_id TEXT,
+             participant TEXT,
+             state TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             finished_at INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS chat_run_events (
+             run_id TEXT NOT NULL REFERENCES chat_runs(id) ON DELETE CASCADE,
+             seq INTEGER NOT NULL,
+             event_json TEXT NOT NULL,
+             created_at INTEGER NOT NULL,
+             PRIMARY KEY (run_id, seq)
+         );
+         CREATE INDEX IF NOT EXISTS chat_run_events_run ON chat_run_events(run_id, seq);",
     )?;
     consumption::init(&db)?;
+    plans::init(&db)?;
     Ok(db)
+}
+
+fn now_millis() -> i64 { chrono::Utc::now().timestamp_millis() }
+
+fn valid_run_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 100 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+}
+
+fn create_chat_run(app: &App, id: &str, conversation: Option<&str>, participant: Option<&str>) -> Result<()> {
+    if !valid_run_id(id) { bail!("invalid run id"); }
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    db.execute(
+        "INSERT INTO chat_runs(id,conversation_id,participant,state,created_at) VALUES (?1,?2,?3,'running',?4)",
+        params![id, conversation, participant, now_millis()],
+    ).context("creating durable chat run")?;
+    Ok(())
+}
+
+/// Persists first, then returns the exact event sent to the page. A sequence
+/// number makes replay idempotent when a live stream and a reconnect overlap.
+fn append_chat_run_event(app: &App, id: &str, mut event: serde_json::Value) -> Result<serde_json::Value> {
+    let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+    let tx = db.transaction()?;
+    let state: String = tx.query_row("SELECT state FROM chat_runs WHERE id=?1", [id], |r| r.get(0))?;
+    let is_done = event.get("type").and_then(|v| v.as_str()) == Some("done");
+    if is_done && state == "stopping" {
+        event = serde_json::json!({"type":"done","ok":false,"text":"","error":"Stopped.","stopped":true});
+    }
+    let seq: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(seq),0)+1 FROM chat_run_events WHERE run_id=?1", [id], |r| r.get(0),
+    )?;
+    if let Some(object) = event.as_object_mut() { object.insert("seq".into(), seq.into()); }
+    tx.execute(
+        "INSERT INTO chat_run_events(run_id,seq,event_json,created_at) VALUES (?1,?2,?3,?4)",
+        params![id, seq, event.to_string(), now_millis()],
+    )?;
+    if is_done {
+        let next = if state == "stopping" { "stopped" }
+            else if event.get("ok").and_then(|v| v.as_bool()) == Some(true) { "completed" }
+            else { "failed" };
+        tx.execute("UPDATE chat_runs SET state=?2,finished_at=?3 WHERE id=?1", params![id, next, now_millis()])?;
+    }
+    tx.commit()?;
+    Ok(event)
+}
+
+fn chat_run_snapshot(app: &App, id: &str, after: i64) -> Result<Option<serde_json::Value>> {
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let run: Option<(String, Option<String>, Option<String>)> = db.query_row(
+        "SELECT state,conversation_id,participant FROM chat_runs WHERE id=?1", [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional()?;
+    let Some((state, conversation_id, participant)) = run else { return Ok(None) };
+    let mut statement = db.prepare(
+        "SELECT event_json FROM chat_run_events WHERE run_id=?1 AND seq>?2 ORDER BY seq",
+    )?;
+    let events = statement.query_map(params![id, after.max(0)], |r| r.get::<_, String>(0))?
+        .filter_map(|row| row.ok().and_then(|json| serde_json::from_str(&json).ok()))
+        .collect::<Vec<serde_json::Value>>();
+    Ok(Some(serde_json::json!({
+        "id": id, "state": state, "conversation_id": conversation_id,
+        "participant": participant, "events": events,
+    })))
+}
+
+fn stop_chat_run(app: &App, id: &str) -> Result<Option<String>> {
+    let state = {
+        let db = app.chat_db.lock().expect("chat database lock poisoned");
+        let state: Option<String> = db.query_row("SELECT state FROM chat_runs WHERE id=?1", [id], |r| r.get(0)).optional()?;
+        let Some(state) = state else { return Ok(None) };
+        if state == "running" {
+            db.execute("UPDATE chat_runs SET state='stopping' WHERE id=?1", [id])?;
+            "stopping".to_string()
+        } else { state }
+    };
+    if state == "stopping" {
+        if let Some(killer) = app.active_runs.lock().expect("active runs lock poisoned").get(id).cloned() { killer.kill(); }
+    }
+    Ok(Some(state))
+}
+
+/// The process itself cannot survive a server restart, but its durable run
+/// must still become terminal so a refreshed page does not poll forever.
+fn recover_chat_runs(db: &mut Connection) -> Result<()> {
+    let ids = {
+        let mut statement = db.prepare("SELECT id,state FROM chat_runs WHERE state IN ('running','stopping')")?;
+        statement.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let tx = db.transaction()?;
+    for (id, previous) in ids {
+        let seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0)+1 FROM chat_run_events WHERE run_id=?1", [&id], |r| r.get(0))?;
+        let stopped = previous == "stopping";
+        let event = serde_json::json!({
+            "type":"done", "ok":false, "text":"",
+            "error": if stopped { "Stopped." } else { "The chat server restarted before this execution finished." },
+            "stopped": stopped, "seq": seq,
+        });
+        tx.execute("INSERT INTO chat_run_events(run_id,seq,event_json,created_at) VALUES (?1,?2,?3,?4)", params![id,seq,event.to_string(),now_millis()])?;
+        tx.execute("UPDATE chat_runs SET state=?2,finished_at=?3 WHERE id=?1", params![id,if stopped {"stopped"} else {"interrupted"},now_millis()])?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn load_chat_state(app: &App) -> Result<serde_json::Value> {
@@ -185,28 +327,20 @@ fn load_chat_state(app: &App) -> Result<serde_json::Value> {
     let row: Option<(String, String)> = db
         .query_row("SELECT state_json, drafts_json FROM chat_state WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?;
+    let (_, _, revision) = plans::snapshot(&db)?;
     match row {
-        Some((state, drafts)) => Ok(serde_json::json!({
-            "state": serde_json::from_str::<serde_json::Value>(&state)?,
-            "drafts": serde_json::from_str::<serde_json::Value>(&drafts)?,
-        })),
-        None => Ok(serde_json::json!({ "state": null, "drafts": null })),
+        Some((state, drafts)) => {
+            let mut state = serde_json::from_str::<serde_json::Value>(&state)?;
+            plans::embed(&db, &app.repo_root, &mut state)?;
+            Ok(serde_json::json!({"state":state,"drafts":serde_json::from_str::<serde_json::Value>(&drafts)?,"revision":revision}))
+        },
+        None => Ok(serde_json::json!({ "state": null, "drafts": null, "revision": revision })),
     }
 }
 
-fn save_chat_state(app: &App, req: ChatStateRequest) -> Result<()> {
-    if !req.state.is_object() || !req.drafts.is_object() {
-        bail!("chat state and drafts must be JSON objects");
-    }
-    let state = serde_json::to_string(&req.state)?;
-    let drafts = serde_json::to_string(&req.drafts)?;
-    let db = app.chat_db.lock().expect("chat database lock poisoned");
-    db.execute(
-        "INSERT INTO chat_state (id, state_json, drafts_json, updated_at) VALUES (1, ?1, ?2, unixepoch())
-         ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json, drafts_json = excluded.drafts_json, updated_at = excluded.updated_at",
-        params![state, drafts],
-    )?;
-    Ok(())
+fn save_chat_state(app: &App, req: ChatStateRequest) -> Result<u64> {
+    let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+    plans::save_snapshot(&mut db, &app.repo_root, req.state, req.drafts, req.revision)
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -255,6 +389,13 @@ fn respond_text(request: Request, status: u16, content_type: &str, body: impl In
     Ok(())
 }
 
+fn plan_error(request: Request, err: anyhow::Error) -> Result<()> {
+    let (status, message) = err.downcast_ref::<plans::ApiError>()
+        .map(|e| (e.0, e.1)).unwrap_or((500, "Plan operation failed; preserve your draft and retry"));
+    if status == 500 { eprintln!("plan API failed: {err:#}"); }
+    respond_text(request, status, "application/json", serde_json::json!({"error":message,"code":status}).to_string())
+}
+
 fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     if let Some(allowed) = &app.allowed_hosts {
         let ok = header_value(&request, "Host").is_some_and(|h| allowed.contains(&h));
@@ -264,6 +405,47 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     }
 
     let path = request.url().split('?').next().unwrap_or("/").to_string();
+    if path == "/api/plans" || path.starts_with("/api/plans/") || path.starts_with("/api/conversations/") {
+        if !same_origin(&request) || (request.method() != &Method::Get && !header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"))) {
+            return respond_text(request, 403, "text/plain", "forbidden");
+        }
+        let selected = query_value(request.url(), "checkout");
+        let mut body = String::new();
+        if request.method() != &Method::Get {
+            request.as_reader().take(MAX_BODY + 1).read_to_string(&mut body)?;
+            if body.len() as u64 > MAX_BODY { return respond_text(request, 413, "text/plain", "Plan request is too large"); }
+        }
+        let payload: serde_json::Value = if body.is_empty() { serde_json::json!({}) } else {
+            match serde_json::from_str(&body) { Ok(v) => v, Err(_) => return respond_text(request, 400, "text/plain", "Invalid plan request") }
+        };
+        let result = {
+            let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+            plans::route(&mut db, &app.repo_root, request.method().as_str(), &path, selected.as_deref(), &payload)
+        };
+        return match result { Ok(body) => respond_text(request, 200, "application/json", body.to_string()), Err(e) => plan_error(request, e) };
+    }
+    if let Some(rest) = path.strip_prefix("/api/chat/runs/") {
+        let (id, action) = rest.split_once('/').map_or((rest, ""), |(id, action)| (id, action));
+        if !valid_run_id(id) { return respond_text(request, 400, "text/plain", "invalid run id"); }
+        return match (request.method().clone(), action) {
+            (Method::Get, "") => {
+                let after = query_value(request.url(), "after").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                match chat_run_snapshot(app, id, after)? {
+                    Some(body) => respond_text(request, 200, "application/json", body.to_string()),
+                    None => respond_text(request, 404, "text/plain", "run not found"),
+                }
+            }
+            (Method::Post, "stop") => {
+                let json = header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"));
+                if !json || !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+                match stop_chat_run(app, id)? {
+                    Some(state) => respond_text(request, 202, "application/json", serde_json::json!({"id":id,"state":state}).to_string()),
+                    None => respond_text(request, 404, "text/plain", "run not found"),
+                }
+            }
+            _ => respond_text(request, 404, "text/plain", "not found"),
+        };
+    }
     match (request.method().clone(), path.as_str()) {
         (Method::Get, "/") => respond_text(request, 200, "text/html; charset=utf-8", INDEX_HTML),
         (Method::Get, "/chat.css") => respond_text(request, 200, "text/css; charset=utf-8", CHAT_CSS),
@@ -419,8 +601,8 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
                 Err(err) => return respond_text(request, 400, "text/plain", format!("bad chat state: {err}")),
             };
             match save_chat_state(app, req) {
-                Ok(()) => respond_text(request, 204, "text/plain", Vec::new()),
-                Err(err) => respond_text(request, 500, "text/plain", format!("saving chat state: {err:#}")),
+                Ok(revision) => respond_text(request, 200, "application/json", serde_json::json!({"revision":revision}).to_string()),
+                Err(err) => plan_error(request, err),
             }
         }
         (Method::Post, "/api/chat") => {
@@ -728,6 +910,31 @@ fn send(tx: &Sender<Vec<u8>>, event: &ChatEvent) -> bool {
     tx.send(line).is_ok()
 }
 
+fn send_json(tx: &Sender<Vec<u8>>, event: &serde_json::Value) -> bool {
+    let mut line = serde_json::to_vec(event).expect("chat run event serializes");
+    line.push(b'\n');
+    tx.send(line).is_ok()
+}
+
+/// A durable run succeeds when SQLite accepted the event, even when the
+/// browser-side stream has disappeared. Legacy callers without a run id keep
+/// the original connection-owned behavior.
+fn emit_json(app: &App, run_id: Option<&str>, tx: &Sender<Vec<u8>>, event: serde_json::Value) -> bool {
+    if let Some(id) = run_id {
+        match append_chat_run_event(app, id, event) {
+            Ok(event) => { let _ = send_json(tx, &event); true }
+            Err(err) => { eprintln!("saving chat run event failed: {err:#}"); false }
+        }
+    } else {
+        send_json(tx, &event)
+    }
+}
+
+fn emit_chat_event(app: &App, run_id: Option<&str>, tx: &Sender<Vec<u8>>, event: &ChatEvent) -> bool {
+    if run_id.is_none() { return send(tx, event) }
+    emit_json(app, run_id, tx, serde_json::to_value(event).expect("ChatEvent serializes"))
+}
+
 fn build_agent(app: &App, name: &str) -> Result<CliAgent> {
     let config = current_config(app);
     let cfg = config.agent(name)?;
@@ -746,9 +953,28 @@ fn failed(error: String) -> ChatEvent {
 
 /// Answers one chat turn as NDJSON: `session`, then `delta`s, then `done`.
 /// Blank lines in between are heartbeats.
-fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
+struct TurnGuard {
+    app: Arc<App>,
+    turn: plans::Turn,
+    success: bool,
+}
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        let mut db = self.app.chat_db.lock().expect("chat database lock poisoned");
+        if let Err(e) = plans::finish_turn(&mut db, &self.app.repo_root, &self.turn.token,
+            self.turn.execution_id.as_deref(), &self.turn.checkout, self.turn.plan_slug.as_deref(), self.success) {
+            eprintln!("recording task execution failed: {e:#}");
+        }
+    }
+}
+
+fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<()> {
     if req.prompt.trim().is_empty() {
         return respond_text(request, 400, "text/plain", "empty prompt");
+    }
+    let run_id = req.run_id.clone().filter(|id| !id.is_empty());
+    if run_id.as_deref().is_some_and(|id| !valid_run_id(id)) {
+        return respond_text(request, 400, "text/plain", "invalid run id");
     }
     let work_root = match crate::common::workspaces::resolve(&app.repo_root, req.checkout.as_deref()) {
         Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Selected checkout is not a registered worktree"),
@@ -775,6 +1001,21 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
         Ok(agent) => agent,
         Err(err) => return respond_text(request, 400, "text/plain", format!("{err:#}")),
     };
+    let turn = {
+        let mut db = app.chat_db.lock().expect("chat database lock poisoned");
+        plans::begin_turn(&mut db, &app.repo_root, &work_root, &serde_json::to_value(&req)?)
+    };
+    let mut guard = match turn {
+        Ok(turn) => TurnGuard { app: Arc::clone(app), turn, success: false },
+        Err(e) => return plan_error(request, e),
+    };
+    if let Some(id) = &run_id {
+        if let Err(err) = create_chat_run(app, id, req.conversation_id.as_deref(), req.participant.as_deref()) {
+            eprintln!("creating chat run failed: {err:#}");
+            return respond_text(request, 409, "text/plain", "This execution id is already in use; retry the message");
+        }
+    }
+    req.write = guard.turn.write;
     let sandboxed = config.sandbox.runtime != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
     let mut native_session = resume.clone();
@@ -793,7 +1034,8 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
     } else {
         "You are not allowed to edit files in this chat. If asked to change something, reply with the proposed change as text instead of making it."
     };
-    let system = [Some(access_note), req.system.as_deref().filter(|s| !s.trim().is_empty())]
+    let system = [Some(access_note), req.system.as_deref().filter(|s| !s.trim().is_empty()),
+        (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str())]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -806,6 +1048,10 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
         // session then remembers.
         if resume.is_none() {
             prompt = format!("{system}\n\n{prompt}");
+        } else if !guard.turn.system.is_empty() {
+            // A selected task may change between turns of a native session.
+            // Re-send server-owned plan and access framing on every such turn.
+            prompt = format!("{access_note}\n\n{}\n\n{prompt}", guard.turn.system);
         }
         system_prompt = None;
     }
@@ -846,20 +1092,35 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
         None,
     );
     let responder = thread::spawn(move || request.respond(response));
+    if let Some(execution_id) = &guard.turn.execution_id {
+        emit_json(app, run_id.as_deref(), &tx, serde_json::json!({"type":"execution","id":execution_id}));
+    }
 
     match agent.spawn_stream(&opts) {
         Err(err) => {
             let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
-                send(&tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
+            emit_chat_event(app, run_id.as_deref(), &tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
         }
         Ok(process) => {
+            if let Err(err) = plans::attach_process(&app.chat_db.lock().expect("chat database lock poisoned"), &guard.turn.token, &process.killer) {
+                process.killer.kill();
+                let mut child = process.child;
+                let _ = child.wait();
+                emit_chat_event(app, run_id.as_deref(), &tx, &failed("Execution could not be recorded. Preserve your draft and retry.".into()));
+                drop(tx);
+                return Err(err);
+            }
             started = true;
-            // Stop in the page closes the connection. Writes are what notice
-            // that, so keep writing while the agent is quiet, and kill it
-            // (with everything it started) as soon as one fails.
+            if let Some(id) = &run_id {
+                app.active_runs.lock().expect("active runs lock poisoned").insert(id.clone(), process.killer.clone());
+            }
+            // Heartbeats keep the live response moving through proxies. A
+            // durable run ignores a disconnected response and continues; an
+            // older client without a run id keeps the prior stop-on-disconnect
+            // behavior.
             let finished = Arc::new(AtomicBool::new(false));
             let watcher = {
-                let (tx, killer, finished) = (tx.clone(), process.killer.clone(), Arc::clone(&finished));
+                let (tx, killer, finished, durable) = (tx.clone(), process.killer.clone(), Arc::clone(&finished), run_id.is_some());
                 thread::spawn(move || {
                     while !finished.load(Ordering::Relaxed) {
                         thread::park_timeout(HEARTBEAT);
@@ -867,22 +1128,26 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
                             break;
                         }
                         if tx.send(b"\n".to_vec()).is_err() {
-                            killer.kill();
+                            if !durable { killer.kill(); }
                             break;
                         }
                     }
                 })
             };
-            let result = pump_agent(agent.is_agy(), agent.is_codex(), process, &tx, |event| {
+            let result = pump_agent(agent.is_agy(), agent.is_codex(), process, |event| {
                 if let ChatEvent::Session { id } = event {
                     native_session = Some(id.clone());
                     let db = app.chat_db.lock().expect("chat database lock poisoned");
                     let _ = db.execute("INSERT OR IGNORE INTO native_session_context (agent, session_id, checkout) VALUES (?1,?2,?3)", params![agent_name, id.as_str(), work_root.to_string_lossy()]);
+                    if let Some(conversation) = &conversation {
+                        let _ = db.execute("INSERT OR IGNORE INTO native_session_plan(agent,session_id,conversation_id,plan_slug) VALUES (?1,?2,?3,?4)",params![agent_name,id.as_str(),conversation,guard.turn.plan_slug]);
+                    }
                 }
                 if let ChatEvent::Done { ok: false, error, .. } = event {
                     let _ = diagnostics::record_failure(&work_root, &config, &agent_name, error.as_deref().unwrap_or("execution failed"));
                     *error = Some(diagnostics::classify_error(error.as_deref().unwrap_or("execution failed")).1.into());
                 }
+                if let ChatEvent::Done { ok, .. } = event { guard.success = *ok; }
                 if let ChatEvent::Done { usage, .. } = event {
                     if !accounted {
                         if let Some(conversation) = &conversation {
@@ -900,13 +1165,16 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
                         accounted = true;
                     }
                 }
+                emit_chat_event(app, run_id.as_deref(), &tx, event)
             });
+            if let Some(id) = &run_id { app.active_runs.lock().expect("active runs lock poisoned").remove(id); }
             finished.store(true, Ordering::Relaxed);
             watcher.thread().unpark();
             let _ = watcher.join();
             if let Err(err) = result {
+                guard.success = false;
                 let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
-                send(&tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
+                emit_chat_event(app, run_id.as_deref(), &tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
             }
         }
     }
@@ -926,12 +1194,13 @@ fn chat_turn(app: &Arc<App>, request: Request, req: ChatRequest) -> Result<()> {
     // Auxiliary calls such as title generation omit conversation_id and
     // should not trigger an account quota read.
     if started && conversation.is_some() { refresh_quota(app, &agent_name); }
+    drop(guard);
     drop(tx);
     responder.join().map_err(|_| anyhow!("response thread panicked"))??;
     Ok(())
 }
 
-fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<Vec<u8>>, mut observe: impl FnMut(&mut ChatEvent)) -> Result<()> {
+fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, mut emit: impl FnMut(&mut ChatEvent) -> bool) -> Result<()> {
     let AgentProcess { mut child, killer } = process;
     let stdout = child.stdout.take().context("agent stdout was not piped")?;
     let mut stderr = child.stderr.take().context("agent stderr was not piped")?;
@@ -945,13 +1214,13 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
     let mut finished = false;
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
-        let Some(mut event) = chat::parse_line_for(is_agy, is_codex, &line) else { continue };
-        observe(&mut event);
+        let Some(event) = chat::parse_line_for(is_agy, is_codex, &line) else { continue };
         let event = match event {
             // The agent only reports the reply at the end (no deltas seen):
             // surface it as one chunk so the page has something to render.
             ChatEvent::Done { ok: true, ref text, .. } if !streamed && !text.is_empty() => {
-                if !send(tx, &ChatEvent::Delta { text: text.clone() }) {
+                let mut delta = ChatEvent::Delta { text: text.clone() };
+                if !emit(&mut delta) {
                     killer.kill();
                     break;
                 }
@@ -964,8 +1233,10 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
             other => other,
         };
         finished |= matches!(event, ChatEvent::Done { .. });
-        if !send(tx, &event) {
-            // The browser went away; don't leave the agent running.
+        let mut event = event;
+        if !emit(&mut event) {
+            // A durable run only reaches this branch when its event could not
+            // be saved. A legacy run reaches it when its browser went away.
             killer.kill();
             break;
         }
@@ -980,12 +1251,53 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, tx: &Sender<V
             if detail.is_empty() { String::new() } else { format!(": {detail}") }
         );
     }
+    if !status.success() { bail!("agent exited unsuccessfully: {status}"); }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_app(root: &Path) -> App {
+        App {
+            repo_root: root.to_path_buf(), config: RwLock::new(Config::default()),
+            chat_db: Mutex::new(open_chat_db(root).unwrap()), allowed_hosts: None,
+            models: Mutex::default(), quotas: Mutex::default(), active_runs: Mutex::default(),
+        }
+    }
+
+    #[test]
+    fn durable_chat_runs_replay_by_sequence_and_stop_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        create_chat_run(&app, "run-1", Some("conversation"), Some("Dev")).unwrap();
+        let first = append_chat_run_event(&app, "run-1", serde_json::json!({"type":"delta","text":"one"})).unwrap();
+        let second = append_chat_run_event(&app, "run-1", serde_json::json!({"type":"delta","text":"two"})).unwrap();
+        assert_eq!(first["seq"], 1); assert_eq!(second["seq"], 2);
+        let replay = chat_run_snapshot(&app, "run-1", 1).unwrap().unwrap();
+        assert_eq!(replay["state"], "running");
+        assert_eq!(replay["events"].as_array().unwrap().len(), 1);
+        assert_eq!(replay["events"][0]["text"], "two");
+
+        assert_eq!(stop_chat_run(&app, "run-1").unwrap().as_deref(), Some("stopping"));
+        let done = append_chat_run_event(&app, "run-1", serde_json::json!({"type":"done","ok":false,"error":"process exited"})).unwrap();
+        assert_eq!(done["stopped"], true);
+        assert_eq!(chat_run_snapshot(&app, "run-1", 0).unwrap().unwrap()["state"], "stopped");
+    }
+
+    #[test]
+    fn server_restart_makes_orphaned_durable_runs_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        create_chat_run(&app, "run-2", Some("conversation"), Some("Dev")).unwrap();
+        append_chat_run_event(&app, "run-2", serde_json::json!({"type":"delta","text":"partial"})).unwrap();
+        recover_chat_runs(&mut *app.chat_db.lock().unwrap()).unwrap();
+        let replay = chat_run_snapshot(&app, "run-2", 1).unwrap().unwrap();
+        assert_eq!(replay["state"], "interrupted");
+        assert_eq!(replay["events"][0]["type"], "done");
+        assert!(replay["events"][0]["error"].as_str().unwrap().contains("restarted"));
+    }
 
     #[test]
     fn quota_cache_deduplicates_reads_and_keeps_last_success_on_failure() {
@@ -1013,7 +1325,7 @@ done
         for other in ["claude", "agy"] { if let Some(agent) = config.agents.get_mut(other) { agent.binary = "/missing-test/".to_string() + other; } }
         let app = Arc::new(App { repo_root:dir.path().to_path_buf(), config:RwLock::new(config),
             chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None,
-            models:Mutex::default(),quotas:Mutex::default() });
+            models:Mutex::default(),quotas:Mutex::default(),active_runs:Mutex::default() });
         quota_snapshot(&app);
         refresh_quota(&app,"codex"); // In-flight read must not spawn another process.
         let wait = || {

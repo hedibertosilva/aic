@@ -290,13 +290,54 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 #ac .opt.off { opacity: .55; cursor: not-allowed; }
 
 /* ---------- participant dialog ---------- */
+/* Plan controls belong to the conversation, rather than global configuration. */
+#planbar { padding: 5px 16px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--line); font-size: 12px; }
+#planlabel { overflow-wrap: anywhere; color: var(--muted); }
+#planbar button { font-size: 12px; }
+#planorigin { margin: 0; padding: 5px 16px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+#planorigin summary { cursor: pointer; }
+#planorigin p { margin: 6px 0; }
+#planpanel { padding: 20px 24px; width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); background: var(--card); overflow-y: auto; }
+#planpanel header { display: flex; align-items: center; gap: 8px; }
+#planpanel h3 { margin: 14px 0 8px; font-size: 14px; }
+#planpanel pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: 13px; }
+.plantask { padding: 8px 0; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.plantask .tasktitle { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.plantask button { flex: none; font-size: 12px; }
+.executionrecord { padding: 7px 0; font-size: 13px; overflow-wrap: anywhere; }
+.executionrecord p { margin: 4px 0; color: var(--muted); white-space: pre-wrap; }
+#quicktaskform { margin-top: 10px; }
+#quicktaskform label { font-size: 13px; color: var(--muted); }
+.taskinput { display: flex; gap: 8px; }
+.taskinput input { flex: 1; min-width: 0; }
+#planexecution { margin-bottom: 8px; font-size: 12px; }
+#planexecution label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+#planexecution select { font-size: 12px; max-width: 100%; }
+#planmodenote { font-size: 12px; }
+#plantargets { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 6px; }
+#plantargets label { min-width: 0; }
+#plantargets select { max-width: min(280px, 70vw); }
+#planform, #taskcompleteform { padding: 20px 24px; display: flex; flex-direction: column; gap: 12px; }
+#planform h2, #taskcompleteform h2 { font-size: 17px; margin: 0; }
+#planform label, #taskcompleteform label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+#planform fieldset { display: flex; flex-direction: column; gap: 10px; }
+#planform input, #planform select, #planform textarea, #taskcompleteform textarea { width: 100%; color: var(--fg); }
+#planform textarea, #taskcompleteform textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; resize: vertical; }
+@media (max-width: 600px) {
+  #planpanel { padding: 12px 16px; }
+  #planpanel header { flex-wrap: wrap; }
+  .plantask { flex-wrap: wrap; }
+  .plantask .tasktitle { flex-basis: 65%; }
+  #planform, #taskcompleteform { padding: 20px; }
+}
 dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--fg); padding: 0; width: min(520px, calc(100vw - 24px)); box-shadow: var(--shadow); }
 dialog { box-sizing: border-box; max-height: calc(100dvh - 32px); overflow-y: auto; }
 dialog::backdrop { background: rgba(0, 0, 0, .4); }
 #pform, #cform { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
 #pform h2, #cform h2 { margin: 0; font-size: 17px; }
 #pform label, #cform label { display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--muted); }
-#pform label input, #pform label select, #cform label input, #cform label select { color: var(--fg); width: 100%; }
+#pform label input, #pform label select, #pform label textarea, #cform label input, #cform label select { color: var(--fg); width: 100%; }
+#prole { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-height: 110px; line-height: 1.5; resize: vertical; }
 .check { flex-direction: row !important; align-items: center; gap: 8px !important; color: var(--fg) !important; font-size: 14px !important; }
 .check input { width: auto !important; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
@@ -394,7 +435,10 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 #readyrows .note { flex-wrap: wrap; }
 #worktreedialog label { display: flex; flex-direction: column; gap: 6px; }
 #worktreeselect { max-width: 100%; min-width: 0; }
-#cadvanced > * + * { margin-top: 10px; }
+#conversationadvanced { margin-left: auto; position: relative; }
+#conversationadvanced summary { cursor: pointer; }
+#conversationadvanced .conversationoptions { position: absolute; right: 0; top: calc(100% + 8px); width: min(360px, calc(100vw - 32px)); padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); z-index: 10; }
+#conversationadvanced .conversationoptions > * + * { margin-top: 10px; }
 #readybtn { font-size: 12px; color: var(--muted); }
 #readybtn[data-state="blocked"] { color: var(--warn); }
 #readyrows article { padding: 12px 0; border-bottom: 1px solid var(--border, #8884); }

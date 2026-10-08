@@ -67,6 +67,12 @@ impl Killer {
     /// For a subprocess placed in its own process group by the caller.
     pub(crate) fn process_group(pgid: u32) -> Self { Self { pgid, container: None } }
 
+    /// Persist only the process/container identity for crash recovery, never
+    /// credentials or prompts. The caller also records the PID start tick.
+    pub(crate) fn recovery_target(&self) -> (u32, Option<(String, String)>) {
+        (self.pgid, self.container.as_ref().map(|(s, name)| (s.kind.label().to_owned(), name.clone())))
+    }
+
     pub fn kill(&self) {
         if let Some((sandbox, name)) = &self.container {
             let _ = sandbox.kill_command(name).status();

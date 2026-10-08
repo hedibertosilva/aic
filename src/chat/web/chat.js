@@ -78,9 +78,10 @@ async function copyText(text, btn) {
   if (btn) { setIcon(btn, "check"); setTimeout(() => setIcon(btn, "copy"), 1400); }
 }
 
-function toast(text, undo) {
+function toast(text, undo, actionLabel = 'Undo') {
   $("toasttext").textContent = text;
   $("undo").hidden = !undo;
+  $("undo").textContent = actionLabel;
   $("undo").onclick = () => { $("toast").classList.remove("show"); undo && undo(); };
   $("toast").classList.add("show");
   clearTimeout(toast.t); toast.t = setTimeout(() => $("toast").classList.remove("show"), 8000);
@@ -93,23 +94,26 @@ const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : 
 // localStorage is retained only as an offline/startup cache. The local aic
 // server owns the durable copy in .aic/chat/chat.sqlite3.
 let remoteReady = false, remoteSaving = false, remoteDirty = false;
+let remoteRevision = null, remoteConflict = false;
 function loadLocal() {
   try { state = Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}); } catch {}
   try { drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {}; } catch {}
   normalizeState();
 }
-// Run this after loading either cache or SQLite. In particular, an agent may
-// have been streaming when the browser closed, so no stored entry may remain
-// permanently pending after a restart.
+// Run this after loading either cache or SQLite. Reconnectable runs stay
+// pending across a reload; legacy pending entries have no server-side event
+// log and are migrated to the old interrupted state.
 function normalizeState() {
   if (!Array.isArray(state.convs)) state.convs = [];
   if (state.stack) state.layout = "stack";
   delete state.stack;
   state.convs.forEach((c) => {
+    if (c.plan_binding) hydratePlanBinding(c, c.plan_binding);
     if (c.draft && !drafts[c.id]) drafts[c.id] = c.draft;
     delete c.draft;
     c.log.forEach((e) => {
-      if (e.pending) { e.pending = false; if (!e.text) { e.error = true; e.soft = true; e.text = "interrupted"; } }
+      if (e.pending && !e.run_id) { e.pending = false; if (!e.text) { e.error = true; e.soft = true; e.text = "interrupted"; } }
+      if (e.pending && e.run_id) e.reconnecting = true;
     });
   });
   // Older sessions may already contain placeholder conversations created by
@@ -148,24 +152,29 @@ function remoteError(err) {
 // Only one request may be in flight. A later edit marks the state dirty and
 // is sent after it, preventing an older request from winning a write race.
 async function saveRemote() {
-  if (!remoteReady || remoteSaving || !remoteDirty) return;
+  if (!remoteReady || remoteSaving || !remoteDirty || remoteConflict) return;
   remoteSaving = true; remoteDirty = false;
+  let succeeded = false;
   try {
     const res = await fetch("/api/chat/state", {
       method: "POST", headers: { "Content-Type": "application/json" },
       // `keepalive` limits request bodies to roughly 64 KiB in browsers. A
       // conversation snapshot can be much larger, so normal saves must use a
       // regular fetch; localStorage remains the abrupt-close fallback.
-      body: JSON.stringify({ state, drafts }),
+      body: JSON.stringify({ state, drafts, ...(Number.isSafeInteger(remoteRevision) ? {revision: remoteRevision} : {}) }),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) { if (res.status === 409) remoteConflict = true; throw new Error(await res.text()); }
+    const result = await res.json();
+    if (Number.isSafeInteger(result.revision)) remoteRevision = result.revision;
     $("banner").hidden = true;
+    succeeded = true;
   } catch (err) {
     remoteError(err);
   } finally {
     remoteSaving = false;
     if (remoteDirty) saveRemote();
   }
+  return succeeded;
 }
 function saveRemoteSoon() {
   if (!remoteReady) return;
@@ -180,7 +189,7 @@ window.addEventListener("pagehide", () => {
 });
 
 const cur = () => state.convs.find((c) => c.id === state.current);
-const hasInteraction = (c) => !!c.keepEmpty || (Array.isArray(c.log) && c.log.length > 0);
+const hasInteraction = (c) => !!c.keepEmpty || !!c.planBinding?.plan_id || (Array.isArray(c.log) && c.log.length > 0);
 function pruneEmptyConversations() {
   const empty = new Set(state.convs.filter((c) => !hasInteraction(c)).map((c) => c.id));
   if (!empty.size) return false;
@@ -413,11 +422,6 @@ async function newConv() {
   state.convs.unshift(c);
   $("search").value = "";
   switchTo(c.id);
-  if (!agent) {
-    const selection = ChatOnboarding.selection(readiness, meta.default);
-    if (selection.reason === 'none_ready' || selection.reason === 'preferred_unavailable') openReadiness();
-    else openDialog(null);
-  }
 }
 function copyParticipants(source, seen) {
   // Native CLI sessions cannot be forked. Start fresh sessions in the new
@@ -425,6 +429,7 @@ function copyParticipants(source, seen) {
   return source.participants.map((p) => ({
     name: p.name, agent: p.agent, role: p.role || "", write: !!p.write,
     model: p.model || "", effort: p.effort || "", hue: hueOf(p), session: "", seen,
+    ...(p.inactive ? {inactive: true} : {}),
   }));
 }
 function copyLog(log) {
@@ -435,10 +440,14 @@ function copyLog(log) {
     ...(e.usage ? { usage: { ...e.usage } } : {}),
   }));
 }
-function copyConversation(source, withHistory) {
+async function copyConversation(source, withHistory) {
   if (withHistory && busy(source)) {
     toast("Wait for replies to finish before forking this conversation.");
     return;
+  }
+  if (withHistory) {
+    try { await refreshPlanBinding(source); }
+    catch (error) { toast(error.message + ' The original conversation is preserved.'); return; }
   }
   const log = withHistory ? copyLog(source.log) : [];
   const agentNames = source.participants.map((p) => p.name).join(", ") || "Agents";
@@ -456,6 +465,20 @@ function copyConversation(source, withHistory) {
     // without messages: it keeps a reusable group of agents.
     ...(withHistory ? {} : { keepEmpty: true }),
   };
+  if (withHistory) c.planOrigin = { conversation_id: source.id, previous_plan_id: source.planBinding?.plan_id || null, message_count: log.length };
+  // Planned forks must preserve the server-owned link, never just copy a
+  // browser preference. A reusable agent group starts as a free conversation.
+  if (withHistory && source.planBinding?.plan_id) {
+    try {
+      await flushChatForPlanMutation();
+      const result = await planRequest(conversationPlanRoute(source, 'fork'), {
+        checkout: source.checkout || null, state_revision: remoteRevision, with_history: true,
+      });
+      const fork = verifiedPlanFork(result);
+      adoptPlanMutation(result, fork, source);
+      return;
+    } catch (error) { toast(error.message); return; }
+  }
   state.convs.unshift(c);
   $("search").value = "";
   switchTo(c.id);
@@ -488,6 +511,7 @@ function switchTo(id) {
   document.body.classList.remove("drawer");
   save(); render(true); $("input").focus();
   refreshReadiness(cur()).catch(() => {});
+  refreshPlanBinding(cur()).catch(error => { if (cur()?.id === id) showPlanError(error.message); });
 }
 /* ---------- rename dialog ---------- */
 const TITLE_HINT = 35; // roughly what fits in the sidebar next to the "more" button; guidance, not a limit
@@ -969,7 +993,8 @@ function renderBar() {
 /* ---------- rendering: messages ---------- */
 function stamp(e) {
   const t = new Date(e.t0 || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return e.dur != null ? `${t} · ${(e.dur / 1000).toFixed(1)}s` : t;
+  const time = e.dur != null ? `${t} · ${(e.dur / 1000).toFixed(1)}s` : t;
+  return time + (e.task_id ? ' · ' + e.task_id : '');
 }
 function usageText(u) {
   if (!u) return ["", ""];
@@ -1043,7 +1068,7 @@ function paintCard(c, e) {
     if (p?.write) k.head.appendChild(writeBadge());
     if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
     k.head.appendChild(el("span", "grow"));
-    if (e.pending) k.head.appendChild(iconBtn("stop", "Stop " + e.from, () => running.get(runKey(c, { name: e.from }))?.abort()));
+    if (e.pending) k.head.appendChild(iconBtn("stop", "Stop " + e.from, () => stopEntry(c, e)));
     const on = isExpanded(c, e), ex = iconBtn(on ? "collapse" : "expand", on ? "Collapse reply" : "Expand reply", () => toggleExpand(c, e));
     ex.classList.add("expandbtn"); ex.setAttribute("aria-expanded", String(on));
     k.head.appendChild(ex);
@@ -1336,8 +1361,9 @@ function renderComposer() {
   send.classList.toggle("stop", stop);
   send.setAttribute("aria-label", stop ? "Stop replies (Esc)" : "Send");
   send.title = stop ? "Stop replies (Esc)" : "Send (Enter)";
-  send.disabled = !c || !c.participants.length;
+  send.disabled = !c || !c.participants.length || (!!c.planBinding?.plan_id && pendingTaskSelections > 0);
   renderHint();
+  renderPlanComposer();
 }
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
@@ -1381,7 +1407,7 @@ function syncPillsFromText(c) {
 function setTitle() { const c = cur(); document.title = c ? `${c.title} · aic chat` : "aic chat"; }
 function render(scrollEnd) {
   renderSidebar(); renderBar(); renderLog(); renderComposer(); setTitle();
-  renderQuotas();
+  renderQuotas(); renderEnvironmentStatus(); renderPlanContext();
   if (scrollEnd) toEnd();
 }
 
@@ -1466,6 +1492,15 @@ function systemFor(c, p) {
     ? `You are "${p.name}" in a group chat with the user and: ${others.join(", ")}. Messages from others arrive prefixed with [name]. Reply only as yourself, without prefixing your own name.`
     : `You are "${p.name}".`;
   if (p.role) s += ` Your role: ${p.role}`;
+  if (c.planBinding?.plan_id) {
+    const plan = planFor(c);
+    s += `\nCurrent shared plan: ${plan?.title || c.planBinding.plan_id}.`;
+    if (c.planOrigin) s += '\nMessages inherited before this fork belong to the previous plan. Use them as historical context; the current plan governs new work.';
+    const taskId = plannedTask(c, p), task = plan?.tasks?.find(t => t.id === taskId);
+    s += planMode(c) === 'task' && p.write
+      ? `\nExecute task ${taskId}: ${task?.title || ''}. Report files changed and validation results. Do not mark the checklist completed yourself; the server records execution and completion separately.`
+      : '\nThis is a discussion turn. Discuss or review without editing files or updating plan/task/execution files.';
+  }
   if (kindOf(p) !== "agy" && skills.length) {
     s += " A user message that starts with /name (for example /aic-plan my-plan) asks you to run the skill `name` with the rest of that line as its arguments."
       + " If a skill asks you to interview the user, ask your questions as plain replies in this chat; there is no question tool here.";
@@ -1489,19 +1524,34 @@ async function launch(c, targets, userText, to, opts = {}) {
     if (first && !c.renamed) c.title = userText.slice(0, 48);
   }
   const jobs = targets
-    .map((p) => ({ p, ...promptFor(c, p, opts), oldSeen: p.seen }))
+    .map((p) => ({ p, ...promptFor(c, p, opts), oldSeen: p.seen, planRun: planRunFor(c, p) }))
     .filter((j) => j.text.trim() && unseen(c, j.p, opts.until).length);
   jobs.forEach((j) => {
     if (!j.p.session) j.text = bootstrapPrompt(c, j);
   });
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
-    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}) };
+    const runId = globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
+    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id, task_id: j.planRun.task_id} : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
   if (!jobs.length && !userText) toast("Nothing new for them to answer yet.");
   save(); render(true);
+  if (jobs.length) {
+    try {
+      // Commit the run id and placeholder before starting the provider. An
+      // immediate reload can therefore discover and replay the durable run.
+      await flushChatForPlanMutation();
+    } catch (error) {
+      jobs.forEach(({p, entry, oldSeen}) => {
+        entry.pending = false; entry.error = true; entry.text = error.message || String(error);
+        p.seen = oldSeen; running.delete(runKey(c, p));
+      });
+      if (userText) { drafts[c.id] = userText; if (cur() === c && !$('input').value) { $('input').value = userText; autosize(); } }
+      save(); render(true); return;
+    }
+  }
   jobs.forEach((j) => turn(c, j));
 }
 
@@ -1517,9 +1567,123 @@ function regenerate(c, e, p) {
   launch(c, [p], null, null, { regen: !e.error, until: idx, round: e.round });
 }
 
-function stopAll(c) { running.forEach((ctl, k) => { if (k.startsWith(c.id + "\n")) ctl.abort(); }); }
+async function stopEntry(c, entry) {
+  const p = c.participants.find(participant => participant.name === entry.from);
+  const ctl = p && running.get(runKey(c, p));
+  if (!entry.run_id) { ctl?.abort(); return; }
+  try {
+    const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '/stop', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
+    });
+    if (!response.ok && response.status !== 404) throw new Error(await response.text());
+    ctl?.abort();
+  } catch (error) { toast('Could not stop the execution: ' + (error.message || error)); }
+}
+function stopAll(c) {
+  c.log.filter(entry => entry.pending).forEach(entry => { stopEntry(c, entry); });
+}
 
-async function turn(c, { p, text: prompt, entry }) {
+function applyRunEvent(c, p, entry, ev, paint) {
+  if (Number.isSafeInteger(ev.seq)) {
+    if (ev.seq <= (entry.event_seq || 0)) return;
+    entry.event_seq = ev.seq;
+  }
+  if (ev.type === "session") p.session = ev.id;
+  else if (ev.type === "execution") { entry.execution_id = ev.id; if (ev.task_id) entry.task_id = ev.task_id; }
+  else if (ev.type === "activity") {
+    entry.activity = ev.text.split(meta.repo + "/").join("");
+    entry.stream_gap = true;
+    if (entry.actions.length < 500) entry.actions.push(entry.activity);
+    paint();
+  } else if (ev.type === "delta") {
+    if (entry.stream_gap && entry.text && !/\s$/.test(entry.text)) entry.text += "\n\n";
+    entry.stream_gap = false; entry.text += ev.text; paint();
+  } else if (ev.type === "done") {
+    if (ev.usage) entry.usage = ev.usage;
+    if (!ev.ok) {
+      entry.error = true; entry.soft = !!ev.stopped; entry.text = ev.error || "agent failed";
+      p.seen = entry.seen0;
+      if (ev.stopped) entry.stopped = true;
+    } else if (!entry.text) entry.text = ev.text;
+    entry.run_done = true;
+  }
+  saveSoon();
+}
+
+const waitFor = (ms, signal) => new Promise((resolve, reject) => {
+  const timer = setTimeout(resolve, ms);
+  signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); }, {once:true});
+});
+
+async function reconnectRun(c, p, entry, paint, signal) {
+  let delay = 250;
+  entry.reconnecting = true; paint();
+  while (!entry.run_done) {
+    try {
+      const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '?after=' + (entry.event_seq || 0), {signal});
+      if (response.status === 404) throw Object.assign(new Error('The execution record is no longer available.'), {terminal:true});
+      if (!response.ok) throw new Error(await response.text());
+      const snapshot = await response.json();
+      for (const event of snapshot.events || []) applyRunEvent(c, p, entry, event, paint);
+      if (['completed','failed','stopped','interrupted'].includes(snapshot.state)) {
+        if (!entry.run_done) {
+          entry.error = snapshot.state !== 'completed'; entry.soft = snapshot.state === 'stopped' || snapshot.state === 'interrupted';
+          entry.text ||= snapshot.state === 'stopped' ? 'Stopped.' : 'The execution ended before a final response was saved.';
+          p.seen = entry.seen0; entry.run_done = true;
+        }
+        break;
+      }
+      delay = 250;
+    } catch (error) {
+      if (error.name === 'AbortError' || error.terminal) throw error;
+      entry.activity = 'Reconnecting'; paint();
+      delay = Math.min(delay * 2, 2000);
+    }
+    await waitFor(delay, signal);
+  }
+  entry.reconnecting = false;
+}
+
+function finishRunUI(c, p, entry, key) {
+  entry.pending = false; entry.activity = ""; entry.reconnecting = false; entry.dur = Date.now() - entry.t0;
+  delete entry.stream_gap; delete entry.run_done;
+  running.delete(key);
+  c.updated = Date.now(); save();
+  if (cur() === c) {
+    paintCard(c, entry);
+    if (!busy(c)) c.log.forEach((e) => paintCard(c, e));
+    if (view.lastUser && !busy(c)) view.lastUser._fill();
+  }
+  render();
+  fetchQuotaState();
+  if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
+  if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
+  else announce(`${p.name} finished.`);
+}
+
+function resumePendingRuns() {
+  for (const c of state.convs) for (const entry of c.log.filter(e => e.pending && e.run_id)) {
+    const p = c.participants.find(participant => participant.name === entry.from);
+    if (!p) { entry.pending = false; entry.error = true; entry.soft = true; entry.text ||= 'The participant for this execution no longer exists.'; continue; }
+    const key = runKey(c, p);
+    if (running.has(key)) continue;
+    const ctl = new AbortController(); running.set(key, ctl);
+    let queued = false;
+    const paint = () => {
+      if (queued) return; queued = true;
+      requestAnimationFrame(() => { queued = false; if (cur() === c) paintCard(c, entry); });
+    };
+    reconnectRun(c, p, entry, paint, ctl.signal)
+      .catch(error => {
+        if (error.name === 'AbortError') { if (!entry.text) { entry.text = 'Stopped.'; entry.error = true; entry.soft = true; } else entry.stopped = true; }
+        else { entry.error = true; entry.soft = true; entry.text = error.message || String(error); p.seen = entry.seen0; }
+      })
+      .finally(() => finishRunUI(c, p, entry, key));
+  }
+  render(true);
+}
+
+async function turn(c, { p, text: prompt, entry, planRun }) {
   const key = runKey(c, p);
   let queued = false;
   const paint = () => {
@@ -1533,23 +1697,25 @@ async function turn(c, { p, text: prompt, entry }) {
     });
   };
   const fail = (msg, soft) => { entry.error = true; entry.soft = !!soft; entry.text = msg; p.seen = entry.seen0; };
+  const ctl = running.get(key);
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        checkout: c.checkout || null, git_context: c.gitCurrent || c.gitOrigin || null, agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: !!p.write,
+        checkout: c.checkout || null, git_context: c.gitCurrent || c.gitOrigin || null, agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: planRun ? planRun.intent === 'execute' && !!p.write : !!p.write,
+        ...(planRun || {}), participant: p.name, run_id: entry.run_id,
         model: p.model || null, effort: p.effort || null,
       }),
-      signal: running.get(key).signal,
+      signal: ctl.signal,
     });
     if (!res.ok) {
       if (res.status === 409) { const last = [...c.log].reverse().find(e => e.from === "you"); if (last && !drafts[c.id]) { drafts[c.id] = last.text; if (cur() === c && !$("input").value) { $("input").value = last.text; autosize(); } saveDraftsSoon(); } }
-      throw new Error(await res.text());
+      throw Object.assign(new Error(await res.text()), {noReconnect:true});
     }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
-    let buf = "", gap = false;
+    let buf = "";
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -1558,40 +1724,18 @@ async function turn(c, { p, text: prompt, entry }) {
       while ((i = buf.indexOf("\n")) >= 0) {
         const line = buf.slice(0, i); buf = buf.slice(i + 1);
         if (!line.trim()) continue; // heartbeat
-        const ev = JSON.parse(line);
-        if (ev.type === "session") p.session = ev.id;
-        else if (ev.type === "activity") {
-          entry.activity = ev.text.split(meta.repo + "/").join("");
-          gap = true;
-          if (entry.actions.length < 500) entry.actions.push(entry.activity);
-          paint();
-        } else if (ev.type === "delta") {
-          // text said before and after a tool call arrives as separate blocks; keep them apart
-          if (gap && entry.text && !/\s$/.test(entry.text)) entry.text += "\n\n";
-          gap = false; entry.text += ev.text; paint();
-        } else if (ev.type === "done") {
-          if (ev.usage) entry.usage = ev.usage;
-          if (!ev.ok) fail(ev.error || "agent failed");
-          else if (!entry.text) entry.text = ev.text;
-        }
+        applyRunEvent(c, p, entry, JSON.parse(line), paint);
       }
     }
+    if (!entry.run_done && entry.run_id) await reconnectRun(c, p, entry, paint, ctl.signal);
   } catch (err) {
     if (err.name === "AbortError") { if (!entry.text) fail("Stopped.", true); else entry.stopped = true; }
-    else fail(String(err.message || err));
+    else if (entry.run_id && !err.noReconnect && !err.terminal) {
+      try { await reconnectRun(c, p, entry, paint, ctl.signal); }
+      catch (reconnectError) { if (reconnectError.name === 'AbortError') { if (!entry.text) fail('Stopped.', true); else entry.stopped = true; } else fail(reconnectError.message || String(reconnectError), true); }
+    } else fail(String(err.message || err), !!err.terminal);
   } finally {
-    entry.pending = false; entry.activity = ""; entry.dur = Date.now() - entry.t0;
-    running.delete(key);
-    c.updated = Date.now(); save();
-    if (cur() === c) {
-      paintCard(c, entry);
-      if (!busy(c)) c.log.forEach((e) => paintCard(c, e)); // regenerate/delete come back
-      if (view.lastUser && !busy(c)) view.lastUser._fill();
-    }
-    render();
-    fetchQuotaState(); // Server already refreshes only this turn's agent.
-    if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
-    else announce(`${p.name} finished.`);
+    finishRunUI(c, p, entry, key);
   }
 }
 
@@ -1811,6 +1955,8 @@ async function openDialog(p) {
   $("ptitle").textContent = p ? "Edit " + p.name : "Add participant";
   $("psave").textContent = p ? "Save" : "Add";
   $("pname").value = p ? p.name : "";
+  $('ppreference').hidden = !!p || !meta.default || ChatOnboarding.ready(readiness, meta.default);
+  $('ppreference').textContent = 'Your preferred agent (' + meta.default + ') is unavailable. Choose a ready agent for this conversation. The global preference stays unchanged.';
   updateAgentOptions(p ? p.agent : defaultAgent());
   updateParticipantReadiness();
   dlgModel = p?.model || ""; dlgEffort = p?.effort || "";
@@ -1963,6 +2109,7 @@ $("pform").onsubmit = (e) => {
 };
 
 /* ---------- configuration dialog ---------- */
+let settingsDraft = null, configSaving = false;
 function setOptions(id, names, selected) {
   const select = $(id); select.textContent = "";
   names.forEach((name) => {
@@ -1984,26 +2131,32 @@ async function openConfig() {
     $("cdefault").options[0].textContent = "No preference — ask for each new chat";
     for (const option of $("cdefault").options) option.disabled = !!option.value && option.value !== config.default_agent && !ChatOnboarding.ready(readiness, option.value);
     $("cconfirmdefault").checked = false;
+    settingsDraft = { hiddenAgents: new Set(state.hiddenAgents || []) };
     renderAgentVisibility();
-    $('cadvanced').open = false;
     $("cpermission").value = config.permission_mode;
     $("cskippermissions").checked = !!config.skip_permissions;
     $("csandbox").value = config.sandbox;
     $("csandboximage").value = config.sandbox_image;
     $("cdialog").showModal();
   } catch (err) {
+    settingsDraft = null;
     error.textContent = "Couldn't load configuration: " + (err.message || err);
     error.hidden = false;
     $("cdialog").showModal();
   } finally {
-    saveBtn.disabled = false;
+    saveBtn.disabled = !settingsDraft;
   }
 }
 $("ccancel").onclick = () => $("cdialog").close();
+$('cdialog').addEventListener('close', () => { settingsDraft = null; });
+$('cdialog').addEventListener('cancel', e => { if (configSaving) e.preventDefault(); });
+$('cdefault').addEventListener('change', renderAgentVisibility);
 $("cform").onsubmit = async (e) => {
   e.preventDefault();
+  if (!settingsDraft || configSaving) return;
   const error = $("cerror"), saveBtn = $("csave");
-  error.hidden = true; saveBtn.disabled = true;
+  const hiddenAgents = [...settingsDraft.hiddenAgents];
+  error.hidden = true; saveBtn.disabled = true; configSaving = true; $('ccancel').disabled = true;
   const payload = {
     default_agent: $("cdefault").value,
     confirm_default: $("cconfirmdefault").checked,
@@ -2021,15 +2174,18 @@ $("cform").onsubmit = async (e) => {
     meta.default = config.default_agent;
     meta.agents = config.agents;
     meta.sandboxed = config.sandbox !== "none";
+    state.hiddenAgents = hiddenAgents.filter(name => name !== config.default_agent);
+    save(); updateAgentOptions();
     $("cdialog").close();
-    await refreshReadiness(cur(), { full: true, catalog: true });
+    try { await refreshReadiness(cur(), { full: true, catalog: true }); }
+    catch { toast('Configuration saved. Refresh Environment to update its status.'); render(); return; }
     render();
     toast("Configuration saved. New agent turns use it.");
   } catch (err) {
     error.textContent = "Couldn't save configuration: " + (err.message || err);
     error.hidden = false;
   } finally {
-    saveBtn.disabled = false;
+    configSaving = false; $('ccancel').disabled = false; saveBtn.disabled = !settingsDraft;
   }
 };
 
@@ -2066,8 +2222,8 @@ $("search").oninput = renderSidebar;
 $("search").onkeydown = (e) => { if (e.key === "Escape" && $("search").value) { e.stopPropagation(); $("search").value = ""; renderSidebar(); } };
 
 document.addEventListener("keydown", (e) => {
-  if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { e.preventDefault(); newConv(); return; }
-  if (e.key !== "Escape" || e.defaultPrevented || $("pdialog").open || $("cdialog").open || $("ddialog").open || $("rdialog").open) return;
+  if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { if (document.querySelector('dialog[open]')) return; e.preventDefault(); newConv(); return; }
+  if (e.key !== "Escape" || e.defaultPrevented || document.querySelector('dialog[open]')) return;
   if (!$("quotas").hidden) { e.preventDefault(); closeQuotas(); $("quotabtn").focus(); return; }
   if (openMenu) { closeMenu(); return; }
   if (document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
@@ -2088,9 +2244,13 @@ document.addEventListener("keydown", (e) => {
     const res = await fetch("/api/chat/state");
     if (!res.ok) throw new Error(await res.text());
     const saved = await res.json();
+    if (Number.isSafeInteger(saved.revision)) remoteRevision = saved.revision;
     if (saved.state && typeof saved.state === "object" && Array.isArray(saved.state.convs)) {
       state = Object.assign({ convs: [], current: null, layout: "auto" }, saved.state);
+      const localDrafts = drafts;
       drafts = saved.drafts && typeof saved.drafts === "object" ? saved.drafts : {};
+      // Keep unsent local work after a version conflict or interrupted save.
+      for (const c of state.convs) if (typeof localDrafts[c.id] === 'string' && localDrafts[c.id]) drafts[c.id] = localDrafts[c.id];
       // Apply compatibility cleanups to records saved by older UI versions.
       normalizeState();
     } else {
@@ -2110,6 +2270,8 @@ document.addEventListener("keydown", (e) => {
   updateAgentOptions('');
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) await newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
+  resumePendingRuns();
+  refreshPlanBinding(cur()).catch(error => showPlanError(error.message));
   fetchQuotaState();
 })();
 
@@ -2127,6 +2289,413 @@ setInterval(() => {
   });
 }, 1000);
 setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);
+
+/* ---------- shared plans and tasks ---------- */
+const planRecords = new Map();
+const planErrors = new Map();
+let planEdit = null, completingTask = null;
+let pendingTaskSelections = 0, taskSelectionQueue = Promise.resolve();
+let planPanelConversation = null;
+const planCheckout = c => c.checkout || serverCheckout || meta.repo;
+const planRecordKey = (checkout, id) => JSON.stringify([checkout, id]);
+const conversationPlanRoute = (c, action = 'plan') => '/api/conversations/' + encodeURIComponent(c.id) + '/' + action;
+const planRoute = (id, action = '') => '/api/plans/' + encodeURIComponent(id) + (action ? '/' + action : '');
+const planFor = c => c?.planBinding?.plan_id ? planRecords.get(planRecordKey(planCheckout(c), c.planBinding.plan_id)) : null;
+const planMode = c => c?.planMode === 'task' ? 'task' : 'discussion';
+const plannedTask = (c, p) => c.planTasks?.[p.name] || '';
+const taskLabel = status => ({pending: 'Pending', running: 'In progress', validation_pending: 'Awaiting validation', partial: 'Partial', failed: 'Failed', completed: 'Completed', cancelled: 'Cancelled'}[status] || status || 'Pending');
+const planQuery = (c, extra = {}) => '?' + new URLSearchParams({checkout: planCheckout(c), ...extra});
+function planRunFor(c, p) {
+  if (!c.planBinding?.plan_id) return null;
+  return {binding_version: c.planBinding.revision, intent: planMode(c) === 'task' ? 'execute' : 'discussion',
+    task_id: planMode(c) === 'task' && p.write ? plannedTask(c, p) : null};
+}
+function hydratePlanBinding(c, binding) {
+  c.plan_binding = binding;
+  c.planBinding = {plan_id: binding.plan_slug, revision: binding.version};
+  c.planTasks = {...binding.selections};
+  if (binding.origin) c.planOrigin = {...binding.origin, previous_plan_id: binding.origin.previous_plan};
+}
+async function planRequest(route, body) {
+  const response = await fetch(route, body === undefined ? {} : {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    const error = new Error(response.status === 409
+      ? 'The plan or task changed. Refresh before trying again. ' + message
+      : response.status === 404 ? (message || 'Plan or conversation not found.') + ' Refresh plan data. Restart aic if this server predates plan support.'
+      : message || 'Could not reach the plan service.');
+    error.status = response.status; throw error;
+  }
+  return response.json();
+}
+function cachePlan(plan) {
+  if (!plan || typeof plan.slug !== 'string' || !Array.isArray(plan.tasks) || !Number.isSafeInteger(plan.version)) {
+    throw new Error('The server returned an invalid plan. Your changes were not applied.');
+  }
+  const record = {...plan, id: plan.slug, revision: plan.version, executions: (plan.executions || []).map(e => ({...e, status: e.state}))};
+  const cached = planRecords.get(planRecordKey(record.checkout, record.id));
+  if (cached && cached.revision > record.revision) return cached;
+  planRecords.set(planRecordKey(record.checkout, record.id), record);
+  return record;
+}
+async function refreshPlanBinding(c, {verify = true} = {}) {
+  if (!c) return null;
+  let result, bindingFound = false;
+  try {
+    const binding = await planRequest(conversationPlanRoute(c) + planQuery(c));
+    bindingFound = true;
+    const plan = binding.plan_slug ? await planRequest(planRoute(binding.plan_slug) + planQuery({...c, checkout: binding.checkout})) : null;
+    result = {binding, plan};
+  }
+  catch (error) {
+    if (error.status === 404 && !bindingFound && !c.planBinding?.plan_id) return null; // Older server, free chat.
+    planErrors.set(c.id, error.message);
+    if (cur() === c) renderPlanContext();
+    throw error;
+  }
+  if (!result.binding || !Number.isSafeInteger(result.binding.version)) throw new Error('Invalid conversation plan binding.');
+  if (c.planBinding?.revision > result.binding.version) {
+    if (verify) throw new Error('Task selection changed while refreshing. Try again; your draft is preserved.');
+    return null;
+  }
+  if (verify && c.planBinding && (c.planBinding.plan_id !== result.binding.plan_slug || result.binding.checkout !== planCheckout(c))) {
+    throw new Error('The linked plan changed in another window. Reload this conversation before sending. Your draft is preserved.');
+  }
+  if (result.plan) cachePlan(result.plan);
+  const changed = JSON.stringify(c.plan_binding) !== JSON.stringify(result.binding);
+  hydratePlanBinding(c, result.binding);
+  planErrors.delete(c.id);
+  if (changed) saveSoon();
+  if (cur() === c) { renderPlanContext(); renderPlanComposer(); if (!$('planpanel').hidden) renderPlanPanel(); }
+  return result;
+}
+function showPlanError(message) {
+  const c = cur(); if (c) planErrors.set(c.id, message);
+  $('planerror').textContent = message; $('planerror').hidden = false;
+  renderPlanContext();
+}
+function renderPlanContext() {
+  const c = cur(), linked = !!c?.planBinding?.plan_id, plan = planFor(c);
+  $('planbar').hidden = !c;
+  $('planlabel').textContent = linked ? 'Plan: ' + (plan?.title || c.planBinding.plan_id) : 'Free conversation';
+  $('planlink').textContent = linked ? 'Change plan' : 'Link or create plan';
+  $('planlink').disabled = !c || busy(c);
+  $('plantoggle').hidden = !linked;
+  const origin = c?.planOrigin;
+  $('planorigin').hidden = !origin;
+  $('planorigintext').textContent = origin ? 'Fork of conversation ' + origin.conversation_id
+    + ' · previous plan: ' + (origin.previous_plan_id || 'free conversation')
+    + ' · history preserved through message ' + origin.message_count + '. New work uses the current conversation context.' : '';
+  if (planPanelConversation !== c?.id || !linked) {
+    if ($('planpanel').open) $('planpanel').close();
+    $('planpanel').hidden = true; $('plantoggle').setAttribute('aria-expanded', 'false');
+    planPanelConversation = c?.id;
+  }
+  if (c && planErrors.has(c.id)) {
+    $('planlabel').textContent += ' · unable to verify';
+    $('planlabel').title = planErrors.get(c.id);
+  } else $('planlabel').title = '';
+}
+function renderPlanComposer() {
+  const c = cur(), linked = !!c?.planBinding?.plan_id;
+  $('planexecution').hidden = !linked;
+  if (!linked) return;
+  const mode = planMode(c), tasks = planFor(c)?.tasks || [], stop = busy(c);
+  $('planmode').value = mode; $('planmode').disabled = stop;
+  $('planmodenote').textContent = mode === 'discussion'
+    ? 'Discussion keeps the plan context and does not allow file edits.'
+    : 'Select a task for each writing recipient. Completion requires validation.';
+  const rows = $('plantargets'); rows.replaceChildren(); rows.hidden = mode !== 'task';
+  if (mode !== 'task') return;
+  for (const p of recipients(c).filter(p => p.write)) {
+    const label = el('label', '', p.name + ' task');
+    const select = el('select'); select.setAttribute('aria-label', 'Task for ' + p.name); select.dataset.participant = p.name;
+    const placeholder = el('option', '', 'Choose a task'); placeholder.value = ''; select.append(placeholder);
+    for (const task of tasks.filter(task => !['completed', 'running', 'cancelled'].includes(task.status))) {
+      const option = el('option', '', task.id + ' · ' + task.title); option.value = task.id; select.append(option);
+    }
+    select.value = plannedTask(c, p); select.disabled = stop || pendingTaskSelections > 0;
+    select.onchange = () => selectPlannedTask(c, p, select);
+    label.append(select); rows.append(label);
+  }
+  if (!rows.children.length) rows.append(el('span', 'note', 'No writing recipients selected. These replies remain read only.'));
+}
+function renderPlanPanel() {
+  const c = cur(), plan = planFor(c); if (!c) return;
+  $('plantitle').textContent = plan?.title || c.planBinding?.plan_id || 'Plan';
+  $('plancontent').textContent = plan?.content || 'Plan details have not loaded.';
+  $('planstatus').textContent = 'Shared across linked conversations. TASKS.md is the checklist; EXECUTION.md contains execution history.';
+  if (plan?.projection_pending) $('planstatus').textContent += ' Changes are recorded; synchronization to the plan files is pending.';
+  $('planerror').hidden = !planErrors.has(c.id); $('planerror').textContent = planErrors.get(c.id) || '';
+  $('quicktaskadd').disabled = !plan || busy(c);
+  $('planreload').disabled = !plan || busy(c) || plan.executions?.some(e => e.status === 'running');
+  const tasks = $('plantasks'); tasks.replaceChildren();
+  for (const task of plan?.tasks || []) {
+    const row = el('div', 'plantask');
+    row.append(el('span', 'tasktitle', task.id + ' · ' + task.title), el('span', 'badge', taskLabel(task.status)));
+    if (!['completed', 'cancelled'].includes(task.status)) {
+      const validate = el('button', '', 'Validate'); validate.type = 'button'; validate.disabled = busy(c) || task.status === 'running';
+      validate.onclick = () => openTaskCompletion(c, plan, task); row.append(validate);
+    }
+    tasks.append(row);
+  }
+  if (!tasks.children.length) tasks.append(el('p', 'note', 'No tasks yet. Add a quick task to start tracked work.'));
+  const executions = $('planexecutions'); executions.replaceChildren();
+  for (const execution of [...(plan?.executions || [])].reverse()) {
+    const detail = el('details', 'executionrecord');
+    detail.append(el('summary', '', (execution.task_id || 'Task') + ' · ' + execution.participant + ' · ' + taskLabel(execution.status)));
+    for (const [label, value] of [['Execution', execution.id], ['Conversation', execution.conversation_id], ['Branch', execution.branch], ['Checkout', execution.checkout], ['Started', execution.started_at], ['Validation', execution.validation], ['Files', execution.files?.join('\n')]]) {
+      if (value) detail.append(el('p', '', label + ': ' + value));
+    }
+    executions.append(detail);
+  }
+  if (!executions.children.length) executions.append(el('p', 'note', 'No tracked executions yet. An agent reply does not automatically complete a task.'));
+}
+async function flushChatForPlanMutation() {
+  if (!remoteReady) throw new Error('Chat storage is unavailable. Reconnect before changing plans.');
+  if (remoteConflict) throw new Error('This conversation changed in another window. Reload before continuing. Your draft is preserved.');
+  const c = cur(); if (c) drafts[c.id] = $('input').value;
+  clearTimeout(save.t); save.t = 0; clearTimeout(saveRemoteSoon.t); clearTimeout(saveDrafts.t); saveDrafts.t = 0;
+  const until = Date.now() + 10000;
+  while (remoteSaving) {
+    if (Date.now() > until) throw new Error('Chat is still saving. Try again shortly.');
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  storeItem(KEY, JSON.stringify(state)); storeItem(DRAFTS_KEY, JSON.stringify(drafts));
+  remoteDirty = true;
+  if (!(await saveRemote())) throw new Error('Could not save the source conversation. Your draft is preserved; try again.');
+}
+function verifiedPlanFork(result) {
+  const fork = result.conversation;
+  if (!result.forked || !fork || fork.id !== result.binding?.conversation_id || !Array.isArray(fork.log) || !Array.isArray(fork.participants)
+    || !Number.isSafeInteger(result.binding.version)) throw new Error('The server did not confirm the fork. Reload before trying again.');
+  hydratePlanBinding(fork, result.binding); fork.planTasks = {}; fork.planMode = 'discussion';
+  for (const participant of fork.participants) { participant.session = ''; participant.seen = fork.log.length; }
+  return fork;
+}
+async function undoPlanFork(fork, source) {
+  if (busy(fork)) { toast('Replies have started. The fork is preserved. Returning to the original conversation.'); switchTo(source.id); return; }
+  try {
+    await flushChatForPlanMutation();
+    const result = await planRequest(conversationPlanRoute(fork, 'plan/undo'), {checkout: planCheckout(fork), version: fork.planBinding.revision, state_revision: remoteRevision});
+    if (!Number.isSafeInteger(result.revision)) throw new Error('The server did not confirm undo. Refresh before trying again.');
+    remoteRevision = result.revision;
+    if (result.undone) { state.convs = state.convs.filter(c => c !== fork); delete drafts[fork.id]; }
+    switchTo(result.conversation_id);
+    toast(result.undone ? 'Plan change undone. Original conversation restored.' : 'The fork has been used and is preserved. Returned to the original conversation.');
+  } catch (error) { toast(error.message + ' The fork is preserved.'); }
+}
+function selectPlannedTask(c, p, select) {
+  const taskId = select.value;
+  pendingTaskSelections++; renderComposer();
+  taskSelectionQueue = taskSelectionQueue.then(async () => {
+    if (busy(c)) throw new Error('Wait for replies to finish before selecting another task.');
+    await flushChatForPlanMutation();
+    const binding = await planRequest(conversationPlanRoute(c, 'tasks'), {checkout: planCheckout(c),
+      version: c.planBinding.revision, participant: p.name, task_id: taskId || null});
+    if (!Number.isSafeInteger(binding.version)) throw new Error('Task selection was not confirmed by the server.');
+    hydratePlanBinding(c, binding); planErrors.delete(c.id); saveSoon();
+  }).catch(error => { if (cur() === c) { showPlanError(error.message); toast(error.message); } })
+    .finally(() => { pendingTaskSelections--; if (cur() === c) renderComposer(); });
+}
+function adoptPlanMutation(result, c, source = null) {
+  if (Number.isSafeInteger(result.revision)) remoteRevision = result.revision;
+  hydratePlanBinding(c, result.binding); c.planTasks = {}; c.planMode = 'discussion';
+  if (c.planBinding.plan_id) c.keepEmpty = true;
+  if (source) {
+    state.convs.unshift(c); switchTo(c.id);
+    // Once any new turn has started, this offers navigation only. Tracked
+    // executions and their fork are never deleted by a toast action.
+    toast('Fork created. Sessions restarted; no task selected.', () => undoPlanFork(c, source));
+  } else if (!state.convs.includes(c)) {
+    state.convs.unshift(c); switchTo(c.id); toast('Fork created. Sessions restarted; no task selected.');
+  } else {
+    for (const p of c.participants) { p.session = ''; p.seen = 0; }
+    save(); render(); toast(c.planBinding.plan_id ? 'Plan linked to this conversation.' : 'This is now a free conversation.');
+  }
+  refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
+}
+async function openPlanDialog(c = cur(), {targetCheckout = null} = {}) {
+  if (!c || busy(c)) { toast('Wait for replies to finish before changing plans.'); return; }
+  const editor = {c, targetCheckout, plans: [], loading: true, saving: false}; planEdit = editor;
+  $('planlinkerror').hidden = true;
+  for (const id of ['newplantitle', 'newplanslug', 'newplanobjective', 'newplancriteria']) $(id).value = '';
+  $('plancheckoutnote').hidden = !targetCheckout;
+  $('plancheckoutnote').textContent = targetCheckout ? 'Checkout will change to ' + targetCheckout + '. Detach the current plan or select a plan in that checkout. Sessions restart; files are not migrated.' : '';
+  $('planmigrateoption').hidden = !targetCheckout || !c.planBinding?.plan_id;
+  $('planmigrateoption').disabled = !targetCheckout || !c.planBinding?.plan_id;
+  $('migrateplanslug').value = c.planBinding?.plan_id || '';
+  $('planchoice').value = c.planBinding?.plan_id && !targetCheckout ? 'existing' : 'free';
+  updatePlanChoice(); $('plandialog').showModal();
+  try {
+    await flushChatForPlanMutation();
+    const [binding, listing] = await Promise.all([
+      refreshPlanBinding(c, {verify: true}),
+      planRequest('/api/plans' + planQuery(targetCheckout ? {...c, checkout: targetCheckout} : c)),
+    ]);
+    if (planEdit !== editor || !$('plandialog').open) return;
+    if (!binding) throw new Error('Plan features require the updated aic server.');
+    editor.binding = binding.binding;
+    if (!Array.isArray(listing.plans)) throw new Error('Invalid plan list received from the server.');
+    editor.plans = listing.plans;
+    const select = $('existingplan'); select.replaceChildren();
+    const placeholder = el('option', '', listing.plans.length ? 'Choose a plan' : 'No plans in this checkout'); placeholder.value = ''; select.append(placeholder);
+    for (const plan of listing.plans) { const option = el('option', '', plan.title + ' · ' + plan.slug); option.value = plan.slug; select.append(option); }
+    select.value = targetCheckout ? '' : c.planBinding?.plan_id || '';
+    editor.loading = false; updatePlanChoice();
+  } catch (error) {
+    if (planEdit === editor) { $('planlinkerror').textContent = error.message; $('planlinkerror').hidden = false; }
+  }
+}
+function updatePlanChoice() {
+  const editor = planEdit, choice = $('planchoice').value;
+  $('existingplanfield').hidden = choice !== 'existing'; $('createplanfields').hidden = choice !== 'create';
+  $('migrateplanfield').hidden = choice !== 'migrate';
+  $('migrateplanslug').required = choice === 'migrate'; $('migrateplanslug').disabled = choice !== 'migrate' || !!editor?.saving;
+  if (editor?.targetCheckout) $('plancheckoutnote').textContent = choice === 'migrate'
+    ? 'Copy the plan and checklist to ' + editor.targetCheckout + '. The original plan stays in its checkout. New executions are tracked in the copied plan.'
+    : 'Checkout will change to ' + editor.targetCheckout + '. Detach the current plan or select a plan in that checkout. Sessions restart; files are not migrated.';
+  for (const id of ['newplantitle', 'newplanslug', 'newplanobjective']) { $(id).required = choice === 'create'; $(id).disabled = choice !== 'create' || !!editor?.saving; }
+  $('newplancriteria').disabled = choice !== 'create' || !!editor?.saving;
+  const history = !!editor?.c.log.length;
+  $('planchangeeffect').textContent = history
+    ? 'Changing the plan creates a fork. History and participants are preserved; agent sessions restart and no task is selected. The original conversation keeps its plan.'
+    : 'This changes the plan of this empty conversation. No plan files are copied.';
+  $('planapply').textContent = history ? 'Create fork and change plan' : 'Apply to this conversation';
+  const same = editor && !editor.targetCheckout && ((choice === 'free' && !editor.c.planBinding?.plan_id)
+    || (choice === 'existing' && $('existingplan').value === editor.c.planBinding?.plan_id));
+  $('planapply').disabled = !editor || editor.loading || editor.saving || same || (choice === 'existing' && !$('existingplan').value);
+  $('planchoice').disabled = !!editor?.saving; $('existingplan').disabled = !!editor?.saving; $('plancancel').disabled = !!editor?.saving;
+}
+async function preparePlanSend(c, targets) {
+  try {
+    if (remoteConflict) throw new Error('This conversation changed in another window. Reload before continuing.');
+    await taskSelectionQueue;
+    const result = await refreshPlanBinding(c, {verify: true});
+    if (cur() !== c) return false;
+    if (!result || !c.planBinding?.plan_id) return true;
+    const plan = planFor(c); if (!plan) throw new Error('Plan details are unavailable. Refresh before sending.');
+    if (planMode(c) === 'task') {
+      const writing = targets.filter(p => p.write);
+      const chosen = new Set();
+      for (const p of writing) {
+        const task = plan.tasks.find(t => t.id === plannedTask(c, p));
+        if (!task || ['completed', 'running', 'cancelled'].includes(task.status)) throw new Error('Select an available task for ' + p.name + ' before executing.');
+        if (chosen.has(task.id)) throw new Error('Choose separate tasks for concurrent writing participants.');
+        chosen.add(task.id);
+      }
+    } else {
+      const body = $('input').value.trim().replace(/^((?:@[\w-]+\s+)+)/, '');
+      const skill = skills.find(s => s.name === skillOf(body));
+      if (skill?.requires_write) throw new Error('This skill needs file edits. Select Execute tasks and a task first.');
+    }
+    await flushChatForPlanMutation();
+    return true;
+  } catch (error) {
+    if (cur() === c) { showPlanError(error.message); toast(error.message + ' Your draft is preserved.'); }
+    return false;
+  }
+}
+function openTaskCompletion(c, plan, task) {
+  completingTask = {c, plan, task, saving: false};
+  $('taskcompletename').textContent = task.id + ' · ' + task.title;
+  $('taskvalidation').value = ''; $('taskconfirmed').checked = false; $('taskcompleteerror').hidden = true;
+  $('taskcompleteapply').disabled = false; $('taskcompletecancel').disabled = false;
+  $('taskcompletedialog').showModal();
+}
+$('planlink').onclick = () => openPlanDialog();
+$('plantoggle').onclick = async () => {
+  $('planpanel').hidden = !$('planpanel').hidden;
+  $('plantoggle').setAttribute('aria-expanded', String(!$('planpanel').hidden));
+  if (!$('planpanel').hidden) { renderPlanPanel(); $('planpanel').showModal(); try { await refreshPlanBinding(cur()); } catch (error) { showPlanError(error.message); } }
+  else $('planpanel').close();
+};
+$('planclose').onclick = () => { $('planpanel').close(); $('plantoggle').focus(); };
+$('planpanel').addEventListener('close', () => { $('planpanel').hidden = true; $('plantoggle').setAttribute('aria-expanded', 'false'); });
+$('planrefresh').onclick = async () => {
+  $('planrefresh').disabled = true;
+  try { await refreshPlanBinding(cur(), {verify: true}); } catch (error) { showPlanError(error.message); }
+  finally { $('planrefresh').disabled = false; }
+};
+$('planreload').onclick = async () => {
+  const c = cur(), plan = planFor(c); if (!c || !plan || busy(c)) return;
+  $('planreload').disabled = true;
+  try { cachePlan(await planRequest(planRoute(plan.id, 'reload'), {checkout: planCheckout(c), version: plan.revision})); planErrors.delete(c.id); if (cur() === c) { renderPlanPanel(); renderPlanComposer(); } }
+  catch (error) { if (cur() === c) showPlanError(error.message); }
+  finally { if (cur() === c) $('planreload').disabled = false; }
+};
+$('planmode').onchange = () => { const c = cur(); if (!c || busy(c)) return; c.planMode = $('planmode').value; saveSoon(); renderPlanComposer(); };
+$('planchoice').onchange = updatePlanChoice; $('existingplan').onchange = updatePlanChoice;
+$('newplantitle').oninput = () => { if (!$('newplanslug').dataset.edited) $('newplanslug').value = $('newplantitle').value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80); };
+$('newplanslug').oninput = () => { $('newplanslug').dataset.edited = 'true'; };
+$('plancancel').onclick = () => $('plandialog').close();
+$('plandialog').addEventListener('close', () => { planEdit = null; delete $('newplanslug').dataset.edited; });
+$('plandialog').addEventListener('cancel', event => { if (planEdit?.saving) event.preventDefault(); });
+$('planform').onsubmit = async event => {
+  event.preventDefault(); const editor = planEdit;
+  if (!editor || editor.loading || editor.saving || busy(editor.c)) return;
+  editor.saving = true; updatePlanChoice(); $('planlinkerror').hidden = true;
+  try {
+    if (cur() !== editor.c) throw new Error('The current conversation changed. Reopen the plan selector.');
+    await flushChatForPlanMutation();
+    let id = $('planchoice').value === 'existing' ? $('existingplan').value : $('planchoice').value === 'migrate' ? $('migrateplanslug').value.trim() : null;
+    if ($('planchoice').value === 'create') {
+      const created = cachePlan(await planRequest('/api/plans', {
+        checkout: editor.targetCheckout || planCheckout(editor.c), slug: $('newplanslug').value.trim(),
+        title: $('newplantitle').value.trim(),
+        content: '# ' + $('newplantitle').value.trim() + '\n\n## Objective and scope\n\n' + $('newplanobjective').value.trim() + '\n\n## Acceptance criteria\n\n' + $('newplancriteria').value.trim() + '\n',
+      }));
+      id = created.id;
+      // A failed subsequent link can be retried without creating a duplicate.
+      const option = el('option', '', created.title + ' · ' + created.slug); option.value = id; $('existingplan').append(option);
+      $('planchoice').value = 'existing'; $('existingplan').value = id;
+    }
+    const result = await planRequest(conversationPlanRoute(editor.c, editor.targetCheckout ? 'checkout' : 'plan'), {
+      checkout: editor.targetCheckout || planCheckout(editor.c), plan_slug: id,
+      version: editor.binding.version, state_revision: remoteRevision, confirm_fork: !!editor.c.log.length,
+      ...(editor.targetCheckout ? {plan_action: $('planchoice').value === 'migrate' ? 'migrate' : id ? 'select' : 'unlink'} : {}),
+    });
+    if (!result.binding || !Number.isSafeInteger(result.binding.version)) throw new Error('The server did not confirm the plan link. Reload before trying again.');
+    const next = result.forked ? verifiedPlanFork(result) : editor.c;
+    if (editor.targetCheckout) { next.checkout = editor.targetCheckout; next.gitOrigin = null; next.gitAcknowledged = null; next.gitCurrent = null; }
+    $('plandialog').close();
+    adoptPlanMutation(result, next, result.forked ? editor.c : null);
+    if (editor.targetCheckout) {
+      await refreshReadiness(next, {full: true, catalog: true});
+      if (gitContext) next.gitOrigin = structuredClone(gitContext); saveSoon(); render();
+    }
+  } catch (error) { $('planlinkerror').textContent = error.message; $('planlinkerror').hidden = false; }
+  finally { editor.saving = false; if (planEdit === editor) updatePlanChoice(); }
+};
+$('quicktaskform').onsubmit = async event => {
+  event.preventDefault(); const c = cur(), plan = planFor(c), title = $('quicktask').value.trim();
+  if (!c || !plan || !title || $('quicktaskadd').disabled) return;
+  $('quicktaskadd').disabled = true;
+  try {
+    cachePlan(await planRequest(planRoute(plan.id, 'tasks'), {checkout: planCheckout(c), title, version: plan.revision}));
+    if (cur() === c) { $('quicktask').value = ''; planErrors.delete(c.id); renderPlanPanel(); renderPlanComposer(); }
+  } catch (error) { if (cur() === c) showPlanError(error.message); }
+  finally { if (cur() === c) $('quicktaskadd').disabled = busy(c); }
+};
+$('taskcompletecancel').onclick = () => $('taskcompletedialog').close();
+$('taskcompletedialog').addEventListener('close', () => { completingTask = null; });
+$('taskcompletedialog').addEventListener('cancel', event => { if (completingTask?.saving) event.preventDefault(); });
+$('taskcompleteform').onsubmit = async event => {
+  event.preventDefault(); const edit = completingTask;
+  if (!edit || edit.saving || !$('taskconfirmed').checked || !$('taskvalidation').value.trim()) return;
+  edit.saving = true; $('taskcompleteapply').disabled = true; $('taskcompletecancel').disabled = true; $('taskcompleteerror').hidden = true;
+  try {
+    cachePlan(await planRequest(planRoute(edit.plan.id, 'tasks/' + encodeURIComponent(edit.task.id) + '/complete'), {checkout: planCheckout(edit.c),
+      version: edit.plan.revision, validation: $('taskvalidation').value.trim(), human_confirmed: true,
+      ...(edit.task.latest_execution ? {execution_id: edit.task.latest_execution} : {})}));
+    $('taskcompletedialog').close();
+    if (cur() === edit.c) { renderPlanPanel(); renderPlanComposer(); }
+    toast('Task completed with recorded validation.');
+  } catch (error) { $('taskcompleteerror').textContent = error.message; $('taskcompleteerror').hidden = false; }
+  finally { edit.saving = false; $('taskcompleteapply').disabled = false; $('taskcompletecancel').disabled = false; }
+};
 
 /* ---------- onboarding and contextual preflight ---------- */
 async function refreshReadiness(conversation = cur(), { full = false, catalog = false, targets = null } = {}) {
@@ -2165,13 +2734,9 @@ function readinessCommand(parent, text) {
 }
 function renderEnvironmentStatus() {
   const button = $('readybtn');
-  const agents = readiness?.agents || [];
-  const ready = agents.some(a => a.readiness === 'ready');
-  const infrastructure = [readiness?.repository, readiness?.runtime, readiness?.image];
-  const blocked = infrastructure.some(c => c && !['ready', 'not_required'].includes(c.state));
-  const pending = agents.filter(a => a.readiness !== 'ready').length + infrastructure.filter(c => c && !['ready', 'not_required'].includes(c.state)).length;
-  button.dataset.state = blocked || (readiness && !ready) ? 'blocked' : pending ? 'pending' : 'ready';
-  button.textContent = !readiness ? 'Environment' : button.dataset.state === 'blocked' ? 'Environment blocked' : pending ? 'Environment · ' + pending + (pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
+  const status = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
+  button.dataset.state = status.state;
+  button.textContent = status.state === 'unknown' ? 'Environment' : status.state === 'blocked' ? 'Environment blocked' : status.pending ? 'Environment · ' + status.pending + (status.pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
 }
 function renderReadiness() {
   const rows = $('readyrows'); rows.textContent = '';
@@ -2183,7 +2748,7 @@ function renderReadiness() {
   $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Recover it in the terminal, or choose another ready agent with Add participant. The global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Environment status for this checkout. Add or edit participants using Add participant; usage limits are in their own panel.';
   for (const a of readiness?.agents || []) {
     const card = el('article'); card.appendChild(el('strong', '', cap(a.agent) + ' · ' + a.readiness));
-    const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution', 'quota']) { const field = el('div'); field.append(el('dt', '', cap(key)), el('dd', '', a[key])); fields.append(field); } card.append(fields);
+    const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution']) { const field = el('div'); field.append(el('dt', '', cap(key)), el('dd', '', a[key])); fields.append(field); } card.append(fields);
     card.append(el('p', 'note', a.reason), el('p', 'note', 'Last test: ' + (a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : 'never') + ' · ' + a.context));
     readinessCommand(card, a.action); rows.append(card);
   }
@@ -2210,17 +2775,18 @@ function updateParticipantReadiness() {
 $('pagent').addEventListener('change', updateParticipantReadiness);
 function renderAgentVisibility() {
   const rows = $('agentvisibilityrows'); rows.textContent = '';
+  if (!settingsDraft) return;
+  const defaults = new Set([meta.default, $('cdefault').value].filter(Boolean));
   for (const name of meta.agents) {
     const label = el('label', 'check'), box = document.createElement('input'); box.type = 'checkbox';
-    box.checked = name === meta.default || !(state.hiddenAgents || []).includes(name);
-    box.disabled = name === meta.default;
+    if (defaults.has(name)) settingsDraft.hiddenAgents.delete(name);
+    box.checked = !settingsDraft.hiddenAgents.has(name);
+    box.disabled = defaults.has(name);
     box.onchange = () => {
-      if (name === meta.default) return;
-      const hidden = new Set(state.hiddenAgents || []);
-      if (box.checked) hidden.delete(name); else hidden.add(name);
-      state.hiddenAgents = [...hidden]; saveSoon(); updateAgentOptions();
+      if (defaults.has(name)) return;
+      if (box.checked) settingsDraft.hiddenAgents.delete(name); else settingsDraft.hiddenAgents.add(name);
     };
-    label.append(box, document.createTextNode(cap(name) + (name === meta.default ? ' — default' : ''))); rows.append(label);
+    label.append(box, document.createTextNode(cap(name) + (defaults.has(name) ? ' — default' : ''))); rows.append(label);
   }
 }
 async function prepareSend(c, targets) {
@@ -2248,7 +2814,7 @@ async function prepareSend(c, targets) {
     }
     if (cur() !== c) return false;
     c.gitCurrent = structuredClone(context);
-    return true;
+    return await preparePlanSend(c, targets);
   } catch (e) { toast(e.message + ' Your draft is preserved.'); return false; }
 }
 
@@ -2259,12 +2825,18 @@ $('worktreebtn').onclick = async () => {
     const response = await fetch('/api/worktrees'); if (!response.ok) throw new Error('Worktree list unavailable');
     const trees = await response.json(); const select = $('worktreeselect'); select.textContent = '';
     for (const tree of trees) { const option = el('option', '', tree.label + ' · ' + tree.checkout); option.value = tree.checkout; select.append(option); }
-    select.value = c.checkout || meta.repo; $('cdialog').close(); $('worktreedialog').showModal();
+    select.value = c.checkout || meta.repo; $('conversationadvanced').open = false; $('worktreedialog').showModal();
   } catch (e) { toast(e.message); }
 };
 $('worktreecancel').onclick = () => $('worktreedialog').close();
 $('worktreeconfirm').onclick = async () => {
   const c = cur(); if (!c || busy(c)) return;
+  if ((c.planBinding?.plan_id || c.planBinding?.revision > 0) && $('worktreeselect').value !== (c.checkout || meta.repo)) {
+    const targetCheckout = $('worktreeselect').value;
+    $('worktreedialog').close();
+    await openPlanDialog(c, { targetCheckout });
+    return;
+  }
   c.checkout = $('worktreeselect').value;
   for (const p of c.participants) { p.session = ''; p.seen = 0; }
   c.gitOrigin = null; c.gitAcknowledged = null; saveSoon(); $('worktreedialog').close();

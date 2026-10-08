@@ -37,10 +37,15 @@ aic chat --no-open
 ```
 
 The Environment panel shows repository, runtime, sandbox and independent agent
-states, with last-test time and commands to copy. It opens automatically when no
-agent is ready or the preferred/selected agent is unavailable. Otherwise it is a
+states, with last-test time and commands to copy. New chats open it automatically
+when no agent is ready; a failed selected recipient can also open it for recovery.
+Otherwise it is a
 secondary status control. Opening, refreshing or closing it never changes the
-conversation, participants, roles or sessions. Usage limits retain their own panel.
+conversation, participants, roles or sessions. Quota is displayed only in Usage
+limits, while installation, authentication and execution stay in Environment.
+Its indicator considers infrastructure, the default and agents used by the current
+conversation; optional unused agents stay visible inside the panel without adding
+global pending items.
 Use the terminal for build, login and paid tests, then Refresh environment.
 The web does not execute those commands.
 The configuration dialog can change the global chat default only with explicit
@@ -52,10 +57,18 @@ chats use a ready explicit default. Without one, confirm/select a ready agent;
 an unavailable default is explained and never silently replaced. Existing chats
 keep participants and sessions after upgrading. Blocked sends preserve drafts.
 The sidebar `+` is the only entry for creating a new chat. Without a ready default,
-the participant form asks for an explicit choice, even with only one ready agent.
+the new chat shows the existing Add participant and Import conversation cards,
+without opening a dialog automatically. The first page load and keyboard shortcut
+use the same flow. Choose Add participant to select a ready agent explicitly,
+even with only one ready agent, or Import conversation to bring in existing history.
+If the preferred agent is unavailable, the participant form explains the problem
+when opened. Environment remains available for diagnosis and recovery.
 Add is disabled until a ready agent is selected. To compare replies or form a
 team, add participants with the existing Add participant control and set their
 roles there; Environment never creates participants or assigns roles.
+Role / instructions accepts multiple lines, starts with five visible rows and
+can be resized vertically. Line breaks are retained when saving, editing and
+sending the participant's instructions.
 
 Before each send, a targeted preflight reads Git context and validates only the
 recipient agents' cached tests. The backend repeats this validation before
@@ -65,9 +78,12 @@ auth CLI calls or diagnostic containers. Catalogs are refreshed when the checkou
 or configuration changes. Full diagnosis runs in Environment, setup and doctor.
 
 Agent visibility lives in Configuration. Hiding an agent does not invalidate the
-default or change existing participants; the effective default cannot be hidden.
-Working checkout selection lives under Configuration → Advanced, with an explicit
-confirmation that restarts native sessions while preserving visible history.
+default or change existing participants; the effective and newly selected defaults
+cannot be hidden. Visibility changes stay in the Configuration draft until Save
+succeeds. Cancel and Esc discard them; a failed Save keeps only the editable draft.
+Working checkout selection lives under the Git context → Advanced → This
+conversation only, outside global Configuration. It cannot discard that form's
+unsaved preferences. Confirmation restarts native sessions while preserving history.
 
 By default `aic` opens the browser with `xdg-open`. In SSH/headless environments,
 open the printed URL manually; `aic chat --no-open` suppresses launching a browser.
