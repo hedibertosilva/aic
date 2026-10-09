@@ -75,10 +75,10 @@ test('explicit participant choice, targeted sends, keyboard recovery, draft and 
     await page.locator('#send').click(); await page.waitForSelector('#readydialog[open]');
     assert.equal(await page.locator('#input').inputValue(), draft);
     await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Last test: never'));
-    await page.locator('#readyrows button').filter({ hasText: 'Copy command' }).first().click();
+    await page.locator('#readyrows button').filter({ hasText: 'Copy' }).first().click();
     assert.match(await page.evaluate(() => navigator.clipboard.readText()), /aic/);
     testAgent(f); await page.locator('#readyrefresh').click();
-    await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('ready_host'));
+    await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Ready_host'));
     await page.locator('#readyclose').focus(); await page.keyboard.press('Enter');
     assert.equal(await page.locator('#input').inputValue(), draft);
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'initial'], { cwd: f.root });
@@ -89,7 +89,7 @@ test('explicit participant choice, targeted sends, keyboard recovery, draft and 
     await paddedDialog(page, '#branchdialog');
     await page.locator('#branchcontinue').click();
     await page.waitForFunction(text => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.from === 'you' && e.text === text), draft);
-    assert.match(await page.locator('#repobranch').innerText(), /changed-branch/);
+    assert.match(await page.locator('#contextbranch').innerText(), /changed-branch/);
     assert.deepEqual(errors, []);
   } finally { await browser?.close(); await f.close(); }
 });
@@ -238,12 +238,12 @@ test('default visibility is protected and checkout switching is scoped to this c
     await page.locator('#worktreebtn').click();
     await page.setViewportSize({ width: 390, height: 360 }); await paddedDialog(page, '#worktreedialog');
     await page.locator('#worktreeselect').selectOption(worktree); await page.locator('#worktreeconfirm').click();
-    await page.waitForFunction(target => document.querySelector('#contextcheckout').textContent === target, worktree);
+    await page.waitForFunction(target => document.querySelector('#contextbar').dataset.checkout === target, worktree);
     await page.waitForFunction(target => { const s = JSON.parse(localStorage.getItem('aic-chat-v2')); return s.convs.find(c => c.id === s.current)?.checkout === target; }, worktree);
     const current = await savedConversation(page); assert.equal(current.checkout, worktree); assert.ok(current.log.length); assert.equal(current.participants[0].session, '');
     // Return through Advanced, preserving explicit session reset and local readiness.
     await page.locator('#conversationadvanced summary').click(); await page.locator('#worktreebtn').click(); await page.locator('#worktreeselect').selectOption(f.root); await page.locator('#worktreeconfirm').click();
-    await page.waitForFunction(target => document.querySelector('#contextcheckout').textContent === target, f.root);
+    await page.waitForFunction(target => document.querySelector('#contextbar').dataset.checkout === target, f.root);
     await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent option[value="claude"]').count(), 0);
     assert.equal(await page.locator('#pagent').inputValue(), 'codex', 'effective ready preference is shown');
@@ -309,8 +309,10 @@ test('Environment indicator ignores unused agents, follows participants and keep
     await page.goto(f.base); await page.waitForSelector('#chips .chip');
     await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
     await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
-    assert.match(await page.locator('#readyrows').innerText(), /Claude · unknown/);
-    assert.match(await page.locator('#readyrows').innerText(), /Gemini · unknown/);
+    assert.deepEqual(await page.locator('#readyrows .readysection > h3').allTextContents(), ['Workspace','Agents']);
+    assert.equal(await page.locator('#readyrows .readycard').count(), 6);
+    assert.match(await page.locator('#readyrows').innerText(), /Claude/);
+    assert.match(await page.locator('#readyrows').innerText(), /Gemini/);
     assert.deepEqual(await page.locator('#readyrows dt').allTextContents(), ['Installation','Authentication','Execution','Installation','Authentication','Execution','Installation','Authentication','Execution']);
     await page.locator('#readyclose').click();
     await page.locator('#input').fill('Team history'); await page.locator('#send').click();

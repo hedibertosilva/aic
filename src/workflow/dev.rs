@@ -142,6 +142,8 @@ pub fn exec_interactive(
             interactive: true,
             agent: binary_stem(binary).to_string(),
             args: cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+            env: Vec::new(),
+            host_network: false,
             name: None,
         };
         let mut sandboxed = sandbox.command(&spec)?;

@@ -33,7 +33,7 @@ const ICONS = {
   check: I('<path d="M5 12.5l4.5 4.5L19 7"/>'),
   retry: I('<path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/>'),
   stop: I('<rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/>'),
-  edit: I('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>'),
+  edit: I('<path d="M13 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-7"/><path d="M10 16l1-4 6.8-6.8a2.1 2.1 0 0 1 3 3L14 15z"/>'),
   close: I('<path d="M6 6l12 12M18 6L6 18"/>'),
   menu: I('<path d="M4 7h16M4 12h16M4 17h16"/>'),
   plus: I('<path d="M12 5v14M5 12h14"/>'),
@@ -54,6 +54,9 @@ const ICONS = {
   rename: I('<path d="M4 20h16"/><path d="M6 16l9.5-9.5 3 3L9 19H6z"/>'),
   settings: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.08A1.7 1.7 0 0 0 10.66 18.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 14.7 1.7 1.7 0 0 0 5.44 13.66H5v-3h.08A1.7 1.7 0 0 0 6.64 9.62 1.7 1.7 0 0 0 6.3 7.74l-.06-.06 2.12-2.12.06.06A1.7 1.7 0 0 0 10.3 6 1.7 1.7 0 0 0 11.34 4.44V4h3v.08A1.7 1.7 0 0 0 15.38 5.64a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06A1.7 1.7 0 0 0 19 9.3a1.7 1.7 0 0 0 1.56 1.04H21v3h-.08A1.7 1.7 0 0 0 19.4 15z"/>'),
   meter: I('<path d="M4 18a9 9 0 1 1 16 0"/><path d="M12 13l5-5"/><circle cx="12" cy="13" r="1.5"/>'),
+  branch: I('<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M8 15h2a8 8 0 0 0 8-5"/>'),
+  plan: I('<rect x="5" y="4" width="14" height="16" rx="1.5"/><path d="M9 9h6M9 13h6M9 17h4"/>'),
+  history: I('<path d="M4 7v5h5"/><path d="M5.2 16.5A8 8 0 1 0 4.7 8"/><path d="M12 8v5l3 2"/>'),
 };
 function icon(kind) {
   const t = document.createElement("template");
@@ -245,6 +248,29 @@ function writeBadge() {
 // With a model, only the windows that govern it (agy groups quota by model).
 const quotaOf = (agent, model) => { const q = quotaData.agents.find(q => q.agent === agent); return q && model ? ChatQuotas.scoped(q, model) : q; };
 const quotaModel = (agent, model) => model || meta.details?.[agent]?.model || "";
+function quotaVisualStatus(agent, model, inactive = false) {
+  if (inactive) return {kind: "inactive", label: "Participant inactive"};
+  const q = quotaOf(agent, quotaModel(agent, model)), level = ChatQuotas.level(q);
+  if (!q) return {kind: "unknown", label: "Quota status unavailable"};
+  if (level === "out") return {kind: "out", label: "Quota exhausted"};
+  if (level === "warn") return {kind: "warn", label: "Near usage limit"};
+  if (ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error") return {kind: "stale", label: "Quota status is outdated"};
+  const primary = ChatQuotas.primary(q);
+  if (!primary || !ChatQuotas.numeric(primary.used_pct)) {
+    return q.reading ? {kind: "unknown", label: "Checking quota"} : {kind: "unavailable", label: "Quota unavailable"};
+  }
+  if (!q.fetched_at) return {kind: "unknown", label: "Quota status unavailable"};
+  return {kind: "normal", label: "Quota normal"};
+}
+const quotaUsagePercent = (agent, model) => ChatQuotas.percent(ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)))?.used_pct);
+function quotaStatusDot(status, className) {
+  const dot = el("span", className + " status-" + status.kind);
+  dot.title = status.label; dot.setAttribute("aria-label", status.label); return dot;
+}
+function repaintQuotaIndicators() {
+  renderBar(); renderComposer();
+  const c = cur(); if (c) c.log.forEach(entry => { if (entry.from !== "you") paintCard(c, entry); });
+}
 function quotaAlert(agent, model) {
   const q = quotaOf(agent, model), level = ChatQuotas.level(q);
   if (level === "normal") return "";
@@ -288,13 +314,14 @@ async function fetchQuotaState() {
         quotaLevels.set(q.agent, level);
       });
       if (notices.length) announce(notices.join(". "));
-      if (changed) { renderBar(); renderComposer(); }
+      if (changed) repaintQuotaIndicators();
       renderQuotas();
     } catch {
       quotaManualReads.clear();
       // A transport failure keeps old readings visible without claiming freshness.
       quotaData.agents = meta.agents.map(agent => ({ ...(quotaOf(agent) || { agent, windows: [] }),
         refreshable: meta.details?.[agent]?.kind === "codex", state: "read_error", reading: false, error: "Couldn't reach the quota reader", attempted_at: new Date().toISOString() }));
+      repaintQuotaIndicators();
       renderQuotas();
     } finally {
       quotaRequest = null;
@@ -341,14 +368,22 @@ function renderQuotas() {
   const reading = quotaRefreshPending || quotaData.agents.some(q => q.reading);
   $("quotarefresh").disabled = reading; $("quotarefresh").classList.toggle("spinning", quotaManualReads.size > 0);
   $("quotas").setAttribute("aria-busy", String(reading));
+  $("quotasubtitle").textContent = reading ? "Updating provider usage…"
+    : level === "out" ? "An agent has exhausted its quota"
+    : level === "warn" ? "An agent is nearing its limit"
+    : "Provider limits and conversation usage";
   meta.agents.forEach(agent => {
     const q = quotaOf(agent) || { agent, windows: [], reason: "No quota reading yet" };
-    const w = ChatQuotas.critical(q), stale = ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error";
-    const row = el("div", "quota " + ChatQuotas.level(q) + (stale ? " stale" : ""));
+    const quotaLevel = ChatQuotas.level(q), visualStatus = quotaVisualStatus(agent, ""), w = ChatQuotas.primary(q), stale = ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error";
+    const row = el("div", "quota " + quotaLevel + (stale ? " stale" : "") + (visualStatus.kind === "unavailable" ? " unavailable" : ""));
     const head = el("div", "head"), details = el("div", "quota-details");
-    head.appendChild(el("strong", "", cap(agent)));
+    const agentName = el("span", "quota-agent"), stateDot = el("span", "quota-state");
+    stateDot.setAttribute("aria-hidden", "true"); agentName.append(stateDot, el("strong", "", cap(agent))); head.appendChild(agentName);
     if (q.reading && (!q.fetched_at || quotaManualReads.has(agent))) { const dots = el("span", "dots"); dots.setAttribute("aria-label", "Reading quota"); head.appendChild(dots); }
-    head.appendChild(el("span", "val", ChatQuotas.summary(q)));
+    const summaryText = ChatQuotas.summary(q), summary = el("span", "val");
+    if (summaryText.startsWith("⚠")) summary.append(icon("alert"), document.createTextNode(summaryText.replace(/^⚠\s*/, "")));
+    else summary.textContent = summaryText;
+    head.appendChild(summary);
     const toggle = iconBtn("down", `Details for ${cap(agent)}`, () => {
       if (quotaExpanded.has(agent)) quotaExpanded.delete(agent); else quotaExpanded.add(agent);
       details.hidden = !quotaExpanded.has(agent); toggle.setAttribute("aria-expanded", String(!details.hidden));
@@ -372,7 +407,8 @@ function renderQuotas() {
       }
     }
     row.appendChild(quota);
-    const consumption = el("div", "sub quota-consumption", "This conversation: " + (sameConversation ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…"));
+    const consumption = el("div", "sub quota-consumption");
+    consumption.append(el("span", "", "This conversation"), el("strong", "", sameConversation ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…"));
     consumption.title = "Spent by aic in this conversation, including regenerated and deleted replies"; row.appendChild(consumption);
     details.hidden = !quotaExpanded.has(agent);
     (q.windows || []).forEach(window => {
@@ -500,6 +536,29 @@ function clearConversation(c) {
     Object.assign(c, { log: saved.log, round: saved.round, title: saved.title, updated: saved.updated });
     saved.people.forEach(([p, session, seen]) => { p.session = session; p.seen = seen; });
     save(); render(true);
+  });
+}
+
+// Start new native sessions without deleting the visible conversation or
+// replaying it into the new sessions. The next user message becomes their
+// entire conversational context; repository instructions still apply.
+function freshContext(c, targets) {
+  if (busy(c)) { toast("Wait for the replies to finish before resetting context."); return; }
+  if (!targets.length) { toast("Pick whose context to reset in “To:”."); return; }
+  const saved = targets.map((p) => [p, p.session, p.seen, p.freshContext]);
+  targets.forEach((p) => {
+    p.session = "";
+    p.seen = c.log.length;
+    p.freshContext = true;
+  });
+  c.updated = Date.now(); save(); render();
+  const names = targets.map((p) => p.name).join(", ");
+  toast(`Fresh context prepared for ${names}. Past messages stay visible but won't be sent to the new session.`, () => {
+    saved.forEach(([p, session, seen, fresh]) => {
+      p.session = session; p.seen = seen;
+      if (fresh) p.freshContext = true; else delete p.freshContext;
+    });
+    c.updated = Date.now(); save(); render();
   });
 }
 function switchTo(id) {
@@ -835,10 +894,8 @@ function renderSidebar() {
   const name = (meta.repo || "").split(/[\\/]/).filter(Boolean).pop() || meta.repo;
   $("reponame").textContent = name; $("reponame").title = name;
   $("repo").textContent = gitContext?.checkout || meta.repo; $("repo").title = gitContext?.checkout || meta.repo;
-  $("contextrepo").textContent = gitContext?.repository || name;
   $("contextbranch").textContent = gitContext?.label || "Git context unavailable";
-  $("contextcheckout").textContent = gitContext?.checkout || meta.repo; $("contextcheckout").title = gitContext?.checkout || meta.repo;
-  $("repobranch").textContent = gitContext?.label || "Git context unavailable"; $("repobranch").title = gitContext?.label || "";
+  $("contextbar").dataset.checkout = gitContext?.checkout || meta.repo;
 }
 function convRow(c) {
   const row = el("div", "conv" + (c.id === state.current ? " active" : ""));
@@ -955,12 +1012,18 @@ function renderBar() {
   const c = cur(), chips = $("chips"); chips.textContent = "";
   if (c) c.participants.forEach((p) => {
     const chip = el("button", "chip" + (p.inactive ? " off" : "")); chip.type = "button";
+    const chipUsage = ChatQuotas.critical(quotaOf(p.agent, quotaModel(p.agent, p.model)))?.used_pct;
+    if (ChatQuotas.numeric(chipUsage) && chipUsage > 80) chip.classList.add("high-usage");
+    chip.style.setProperty("--h", hueFor(c, p.name));
     chip.title = (p.role ? p.role + "\n\n" : "") + (p.inactive ? p.name + " — inactive. " : "") + "Edit " + p.name;
     if (p.inactive) chip.setAttribute("aria-label", p.name + ", inactive");
-    chip.appendChild(avatar(c, p.name));
+    const identity = el("span", "chipidentity");
+    const nameLine = el("span", "chipnameline");
+    nameLine.append(quotaStatusDot(quotaVisualStatus(p.agent, p.model, p.inactive), "agentstatus"), el("span", "chipname", p.name));
+    identity.appendChild(nameLine);
+    identity.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
+    chip.appendChild(identity);
     if (p.inactive) { const ps = icon("pause"); ps.classList.add("pause"); chip.appendChild(ps); }
-    chip.appendChild(el("span", "", p.name));
-    chip.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) chip.appendChild(writeBadge());
     const qb = quotaBadge(p.agent, quotaModel(p.agent, p.model));
     if (qb) { chip.appendChild(qb); chip.title += "\n" + quotaAlert(p.agent, quotaModel(p.agent, p.model)); }
@@ -1003,11 +1066,13 @@ function usageText(u) {
   if (inTok || u.output_tokens) parts.push(`${fmtK(inTok)} in · ${fmtK(u.output_tokens || 0)} out`);
   if (u.cost_usd != null) parts.push("$" + u.cost_usd.toFixed(u.cost_usd < 1 ? 4 : 2));
   const detail = [
-    u.input_tokens != null && `input: ${u.input_tokens}`,
+    inTok > 0 && `processed input: ${inTok}`,
+    u.input_tokens != null && `uncached input: ${u.input_tokens}`,
     u.cache_read_tokens != null && `cache read: ${u.cache_read_tokens}`,
     u.cache_write_tokens != null && `cache write: ${u.cache_write_tokens}`,
     u.output_tokens != null && `output: ${u.output_tokens}`,
     u.num_turns != null && `agent turns: ${u.num_turns}`,
+    inTok > 0 && "Input accumulates across internal model and tool calls.",
   ].filter(Boolean).join("\n");
   return [parts.join(" · "), detail];
 }
@@ -1056,22 +1121,28 @@ function paintCard(c, e) {
   const k = cardParts.get(e); if (!k) return;
   const p = c.participants.find((x) => x.name === e.from);
   const turnAgent = e.agent || p?.agent, turnModel = e.agent ? e.model : p?.model;
+  const quotaStatus = quotaVisualStatus(turnAgent, turnModel, p?.inactive), quotaPercent = quotaUsagePercent(turnAgent, turnModel);
   const changed = (part, key) => { const s = JSON.stringify(key); if (k.keys[part] === s) return false; k.keys[part] = s; return true; };
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e)])) {
+  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
     k.card.style.setProperty("--h", hueFor(c, e.from));
     k.head.textContent = "";
-    k.head.append(avatar(c, e.from), el("span", "name", e.from));
-    if (turnAgent) k.head.appendChild(el("span", "badge", cap(turnAgent) + (turnModel ? " · " + cap(turnModel) : "")));
-    if (p?.write) k.head.appendChild(writeBadge());
-    if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; k.head.appendChild(s); }
-    k.head.appendChild(el("span", "grow"));
-    if (e.pending) k.head.appendChild(iconBtn("stop", "Stop " + e.from, () => stopEntry(c, e)));
+    const identity = el("span", "cardidentity");
+    identity.appendChild(quotaStatusDot(quotaStatus, "carddot"));
+    identity.appendChild(el("span", "name", e.from));
+    if (turnAgent) identity.appendChild(el("small", "cardmeta", cap(turnAgent) + (quotaPercent ? " · " + quotaPercent : "")));
+    k.head.appendChild(identity);
+    const context = el("span", "cardcontext");
+    if (p?.write) context.appendChild(writeBadge());
+    if (e.skill) { const s = el("span", "badge skill", "/" + e.skill); s.title = "ran the skill /" + e.skill; context.appendChild(s); }
+    if (context.childElementCount) k.head.appendChild(context);
+    const tools = el("span", "cardtools");
+    if (e.pending) tools.appendChild(iconBtn("stop", "Stop " + e.from, () => stopEntry(c, e)));
     const on = isExpanded(c, e), ex = iconBtn(on ? "collapse" : "expand", on ? "Collapse reply" : "Expand reply", () => toggleExpand(c, e));
     ex.classList.add("expandbtn"); ex.setAttribute("aria-expanded", String(on));
-    k.head.appendChild(ex);
+    tools.appendChild(ex); k.head.appendChild(tools);
   }
 
   if (changed("status", [e.pending, e.activity || "", !!e.text])) {
@@ -1145,7 +1216,7 @@ function userBubble(c, e) {
   const u = el("div", "user");
   const fill = () => {
     u.textContent = "";
-    if (e.to) u.appendChild(el("span", "to", "→ " + e.to.join(", ")));
+    if (e.to) u.appendChild(el("span", "to", "TO · " + e.to.join(", ")));
     const text = el("div", "text");
     const sk = skillOf(e.text);
     if (sk) {
@@ -1352,6 +1423,7 @@ function renderComposer() {
       if (n && c.log.length) { const cnt = el("span", "count", String(n)); b.appendChild(cnt); }
       b.title = (on ? "Receives your message" : "Doesn't receive your message") + (n ? ` · ${n} new message${n > 1 ? "s" : ""} to read` : "");
       if (alert) b.title += "\n" + alert;
+      if (p.freshContext) b.title += "\nFresh context starts with the next message.";
       b.onclick = () => togglePill(c, p);
       to.appendChild(b);
     });
@@ -1361,13 +1433,12 @@ function renderComposer() {
   send.classList.toggle("stop", stop);
   send.setAttribute("aria-label", stop ? "Stop replies (Esc)" : "Send");
   send.title = stop ? "Stop replies (Esc)" : "Send (Enter)";
-  send.disabled = !c || !c.participants.length || (!!c.planBinding?.plan_id && pendingTaskSelections > 0);
+  send.disabled = !c || !c.participants.length;
   renderHint();
-  renderPlanComposer();
 }
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
-  let msg = "Enter sends · Shift+Enter new line · @ mentions · /fork · /clear" + (skills.length ? " · / skills" : ""), warn = false;
+  let msg = "Enter sends · Shift+Enter new line · @ mentions · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
   if (c && busy(c)) msg = "Replies are coming in. Esc or ■ stops them; you can keep typing.";
   else if (c) {
     const body = text.replace(/^((?:@[\w-]+\s+)+)/, "");
@@ -1496,14 +1567,15 @@ function systemFor(c, p) {
     const plan = planFor(c);
     s += `\nCurrent shared plan: ${plan?.title || c.planBinding.plan_id}.`;
     if (c.planOrigin) s += '\nMessages inherited before this fork belong to the previous plan. Use them as historical context; the current plan governs new work.';
-    const taskId = plannedTask(c, p), task = plan?.tasks?.find(t => t.id === taskId);
-    s += planMode(c) === 'task' && p.write
-      ? `\nExecute task ${taskId}: ${task?.title || ''}. Report files changed and validation results. Do not mark the checklist completed yourself; the server records execution and completion separately.`
-      : '\nThis is a discussion turn. Discuss or review without editing files or updating plan/task/execution files.';
+    s += '\nThis is a discussion turn. Discuss or review without editing files or updating plan records.';
   }
   if (kindOf(p) !== "agy" && skills.length) {
     s += " A user message that starts with /name (for example /aic-plan my-plan) asks you to run the skill `name` with the rest of that line as its arguments."
       + " If a skill asks you to interview the user, ask your questions as plain replies in this chat; there is no question tool here.";
+  }
+  if (kindOf(p) === "codex") {
+    s += " Keep tool context compact: return names and selected fields instead of complete tool definitions, cap broad search output, and summarize large findings before continuing."
+      + " Read each file or line range once unless it changed; after truncated output, continue at the first unread line without overlap.";
   }
   return s;
 }
@@ -1524,15 +1596,15 @@ async function launch(c, targets, userText, to, opts = {}) {
     if (first && !c.renamed) c.title = userText.slice(0, 48);
   }
   const jobs = targets
-    .map((p) => ({ p, ...promptFor(c, p, opts), oldSeen: p.seen, planRun: planRunFor(c, p) }))
+    .map((p) => ({ p, ...promptFor(c, p, opts), oldSeen: p.seen, freshContext: !!p.freshContext, planRun: planRunFor(c, p) }))
     .filter((j) => j.text.trim() && unseen(c, j.p, opts.until).length);
   jobs.forEach((j) => {
-    if (!j.p.session) j.text = bootstrapPrompt(c, j);
+    if (!j.p.session && !j.freshContext) j.text = bootstrapPrompt(c, j);
   });
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
     const runId = globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
-    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id, task_id: j.planRun.task_id} : {}) };
+    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -1588,7 +1660,7 @@ function applyRunEvent(c, p, entry, ev, paint) {
     if (ev.seq <= (entry.event_seq || 0)) return;
     entry.event_seq = ev.seq;
   }
-  if (ev.type === "session") p.session = ev.id;
+  if (ev.type === "session") { p.session = ev.id; delete p.freshContext; }
   else if (ev.type === "execution") { entry.execution_id = ev.id; if (ev.task_id) entry.task_id = ev.task_id; }
   else if (ev.type === "activity") {
     entry.activity = ev.text.split(meta.repo + "/").join("");
@@ -1775,6 +1847,11 @@ $("form").onsubmit = async (e) => {
   }
   const targets = recipients(c, text);
   if (!targets.length) { toast("Pick who receives the message in “To:”."); return; }
+  if (body === "/fresh") {
+    clearInput(c);
+    freshContext(c, targets);
+    return;
+  }
   const to = targets.length === active(c).length ? null : targets.map((p) => p.name);
   if (!body) { // nothing to add: let them answer what's new to them
     const ready = targets.filter((p) => unseen(c, p).length);
@@ -1810,8 +1887,9 @@ function acUpdate() {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
     const fork = { type: "/", value: "fork", label: "/fork", sub: "Create a conversation branch", off: busy(c) ? "wait for replies to finish" : "" };
+    const fresh = { type: "/", value: "fresh", label: "/fresh", sub: "Restart selected agents without replaying visible history", off: busy(c) ? "wait for replies to finish" : "" };
     const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
-    acItems = [fork, clear, ...skills.filter((s) => s.name.toLowerCase().includes(q))
+    acItems = [fork, fresh, clear, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint, sub: s.description,
         off: skillProblem(s.name, recipients(c)),
@@ -2202,6 +2280,12 @@ $("menu").onclick = () => document.body.classList.add("drawer");
 $("scrim").onclick = () => document.body.classList.remove("drawer");
 $("addbtn").appendChild(icon("plus"));
 setIcon($("copyrepo"), "copy");
+setIcon($("branchicon"), "branch");
+setIcon($("planicon"), "plan");
+setIcon($("advancedicon"), "settings");
+setIcon($("historyicon"), "history");
+setIcon($("advancedclose"), "close");
+setIcon($("historyclose"), "close");
 $("copyrepo").onclick = () => copyText(meta.repo, $("copyrepo"));
 $("addbtn").onclick = () => openDialog(null);
 $("configbtn").appendChild(icon("settings"));
@@ -2224,6 +2308,8 @@ $("search").onkeydown = (e) => { if (e.key === "Escape" && $("search").value) { 
 document.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) { if (document.querySelector('dialog[open]')) return; e.preventDefault(); newConv(); return; }
   if (e.key !== "Escape" || e.defaultPrevented || document.querySelector('dialog[open]')) return;
+  const contextPopover = $('conversationadvanced').open ? $('conversationadvanced') : $('planorigin').open ? $('planorigin') : null;
+  if (contextPopover) { e.preventDefault(); contextPopover.open = false; contextPopover.querySelector('summary').focus(); return; }
   if (!$("quotas").hidden) { e.preventDefault(); closeQuotas(); $("quotabtn").focus(); return; }
   if (openMenu) { closeMenu(); return; }
   if (document.body.classList.contains("drawer")) { document.body.classList.remove("drawer"); return; }
@@ -2290,30 +2376,23 @@ setInterval(() => {
 }, 1000);
 setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);
 
-/* ---------- shared plans and tasks ---------- */
+/* ---------- shared plans ---------- */
 const planRecords = new Map();
 const planErrors = new Map();
-let planEdit = null, completingTask = null;
-let pendingTaskSelections = 0, taskSelectionQueue = Promise.resolve();
-let planPanelConversation = null;
+let planEdit = null;
 const planCheckout = c => c.checkout || serverCheckout || meta.repo;
 const planRecordKey = (checkout, id) => JSON.stringify([checkout, id]);
 const conversationPlanRoute = (c, action = 'plan') => '/api/conversations/' + encodeURIComponent(c.id) + '/' + action;
 const planRoute = (id, action = '') => '/api/plans/' + encodeURIComponent(id) + (action ? '/' + action : '');
 const planFor = c => c?.planBinding?.plan_id ? planRecords.get(planRecordKey(planCheckout(c), c.planBinding.plan_id)) : null;
-const planMode = c => c?.planMode === 'task' ? 'task' : 'discussion';
-const plannedTask = (c, p) => c.planTasks?.[p.name] || '';
-const taskLabel = status => ({pending: 'Pending', running: 'In progress', validation_pending: 'Awaiting validation', partial: 'Partial', failed: 'Failed', completed: 'Completed', cancelled: 'Cancelled'}[status] || status || 'Pending');
 const planQuery = (c, extra = {}) => '?' + new URLSearchParams({checkout: planCheckout(c), ...extra});
-function planRunFor(c, p) {
+function planRunFor(c) {
   if (!c.planBinding?.plan_id) return null;
-  return {binding_version: c.planBinding.revision, intent: planMode(c) === 'task' ? 'execute' : 'discussion',
-    task_id: planMode(c) === 'task' && p.write ? plannedTask(c, p) : null};
+  return {binding_version: c.planBinding.revision, intent: 'discussion'};
 }
 function hydratePlanBinding(c, binding) {
   c.plan_binding = binding;
   c.planBinding = {plan_id: binding.plan_slug, revision: binding.version};
-  c.planTasks = {...binding.selections};
   if (binding.origin) c.planOrigin = {...binding.origin, previous_plan_id: binding.origin.previous_plan};
 }
 async function planRequest(route, body) {
@@ -2323,7 +2402,7 @@ async function planRequest(route, body) {
   if (!response.ok) {
     const message = await response.text();
     const error = new Error(response.status === 409
-      ? 'The plan or task changed. Refresh before trying again. ' + message
+      ? 'The plan changed. Refresh before trying again. ' + message
       : response.status === 404 ? (message || 'Plan or conversation not found.') + ' Refresh plan data. Restart aic if this server predates plan support.'
       : message || 'Could not reach the plan service.');
     error.status = response.status; throw error;
@@ -2331,10 +2410,10 @@ async function planRequest(route, body) {
   return response.json();
 }
 function cachePlan(plan) {
-  if (!plan || typeof plan.slug !== 'string' || !Array.isArray(plan.tasks) || !Number.isSafeInteger(plan.version)) {
+  if (!plan || typeof plan.slug !== 'string' || !Number.isSafeInteger(plan.version)) {
     throw new Error('The server returned an invalid plan. Your changes were not applied.');
   }
-  const record = {...plan, id: plan.slug, revision: plan.version, executions: (plan.executions || []).map(e => ({...e, status: e.state}))};
+  const record = {...plan, id: plan.slug, revision: plan.version};
   const cached = planRecords.get(planRecordKey(record.checkout, record.id));
   if (cached && cached.revision > record.revision) return cached;
   planRecords.set(planRecordKey(record.checkout, record.id), record);
@@ -2357,7 +2436,7 @@ async function refreshPlanBinding(c, {verify = true} = {}) {
   }
   if (!result.binding || !Number.isSafeInteger(result.binding.version)) throw new Error('Invalid conversation plan binding.');
   if (c.planBinding?.revision > result.binding.version) {
-    if (verify) throw new Error('Task selection changed while refreshing. Try again; your draft is preserved.');
+    if (verify) throw new Error('The plan changed while refreshing. Try again; your draft is preserved.');
     return null;
   }
   if (verify && c.planBinding && (c.planBinding.plan_id !== result.binding.plan_slug || result.binding.checkout !== planCheckout(c))) {
@@ -2368,90 +2447,37 @@ async function refreshPlanBinding(c, {verify = true} = {}) {
   hydratePlanBinding(c, result.binding);
   planErrors.delete(c.id);
   if (changed) saveSoon();
-  if (cur() === c) { renderPlanContext(); renderPlanComposer(); if (!$('planpanel').hidden) renderPlanPanel(); }
+  if (cur() === c) renderPlanContext();
   return result;
 }
 function showPlanError(message) {
   const c = cur(); if (c) planErrors.set(c.id, message);
-  $('planerror').textContent = message; $('planerror').hidden = false;
   renderPlanContext();
 }
 function renderPlanContext() {
   const c = cur(), linked = !!c?.planBinding?.plan_id, plan = planFor(c);
-  $('planbar').hidden = !c;
-  $('planlabel').textContent = linked ? 'Plan: ' + (plan?.title || c.planBinding.plan_id) : 'Free conversation';
-  $('planlink').textContent = linked ? 'Change plan' : 'Link or create plan';
+  $('planlink').hidden = !c;
+  $('planlabel').textContent = linked ? (plan?.title || c.planBinding.plan_id) : 'Free conversation';
+  $('planlink').title = linked ? 'Change plan' : 'Link or create plan';
+  $('planlink').setAttribute('aria-label', $('planlink').title + ': ' + $('planlabel').textContent);
   $('planlink').disabled = !c || busy(c);
-  $('plantoggle').hidden = !linked;
   const origin = c?.planOrigin;
   $('planorigin').hidden = !origin;
-  $('planorigintext').textContent = origin ? 'Fork of conversation ' + origin.conversation_id
-    + ' · previous plan: ' + (origin.previous_plan_id || 'free conversation')
-    + ' · history preserved through message ' + origin.message_count + '. New work uses the current conversation context.' : '';
-  if (planPanelConversation !== c?.id || !linked) {
-    if ($('planpanel').open) $('planpanel').close();
-    $('planpanel').hidden = true; $('plantoggle').setAttribute('aria-expanded', 'false');
-    planPanelConversation = c?.id;
+  if (origin) {
+    const source = state.convs.find(conversation => conversation.id === origin.conversation_id);
+    $('forkconversation').textContent = source?.title || 'Original conversation';
+    $('forkconversation').title = origin.conversation_id || '';
+    $('forkplan').textContent = origin.previous_plan_id || 'Free conversation';
+    $('forkmessages').textContent = origin.message_count + (origin.message_count === 1 ? ' message' : ' messages');
+  } else {
+    $('planorigin').open = false;
+    $('forkconversation').textContent = $('forkplan').textContent = $('forkmessages').textContent = '';
+    $('forkconversation').removeAttribute('title');
   }
   if (c && planErrors.has(c.id)) {
     $('planlabel').textContent += ' · unable to verify';
     $('planlabel').title = planErrors.get(c.id);
   } else $('planlabel').title = '';
-}
-function renderPlanComposer() {
-  const c = cur(), linked = !!c?.planBinding?.plan_id;
-  $('planexecution').hidden = !linked;
-  if (!linked) return;
-  const mode = planMode(c), tasks = planFor(c)?.tasks || [], stop = busy(c);
-  $('planmode').value = mode; $('planmode').disabled = stop;
-  $('planmodenote').textContent = mode === 'discussion'
-    ? 'Discussion keeps the plan context and does not allow file edits.'
-    : 'Select a task for each writing recipient. Completion requires validation.';
-  const rows = $('plantargets'); rows.replaceChildren(); rows.hidden = mode !== 'task';
-  if (mode !== 'task') return;
-  for (const p of recipients(c).filter(p => p.write)) {
-    const label = el('label', '', p.name + ' task');
-    const select = el('select'); select.setAttribute('aria-label', 'Task for ' + p.name); select.dataset.participant = p.name;
-    const placeholder = el('option', '', 'Choose a task'); placeholder.value = ''; select.append(placeholder);
-    for (const task of tasks.filter(task => !['completed', 'running', 'cancelled'].includes(task.status))) {
-      const option = el('option', '', task.id + ' · ' + task.title); option.value = task.id; select.append(option);
-    }
-    select.value = plannedTask(c, p); select.disabled = stop || pendingTaskSelections > 0;
-    select.onchange = () => selectPlannedTask(c, p, select);
-    label.append(select); rows.append(label);
-  }
-  if (!rows.children.length) rows.append(el('span', 'note', 'No writing recipients selected. These replies remain read only.'));
-}
-function renderPlanPanel() {
-  const c = cur(), plan = planFor(c); if (!c) return;
-  $('plantitle').textContent = plan?.title || c.planBinding?.plan_id || 'Plan';
-  $('plancontent').textContent = plan?.content || 'Plan details have not loaded.';
-  $('planstatus').textContent = 'Shared across linked conversations. TASKS.md is the checklist; EXECUTION.md contains execution history.';
-  if (plan?.projection_pending) $('planstatus').textContent += ' Changes are recorded; synchronization to the plan files is pending.';
-  $('planerror').hidden = !planErrors.has(c.id); $('planerror').textContent = planErrors.get(c.id) || '';
-  $('quicktaskadd').disabled = !plan || busy(c);
-  $('planreload').disabled = !plan || busy(c) || plan.executions?.some(e => e.status === 'running');
-  const tasks = $('plantasks'); tasks.replaceChildren();
-  for (const task of plan?.tasks || []) {
-    const row = el('div', 'plantask');
-    row.append(el('span', 'tasktitle', task.id + ' · ' + task.title), el('span', 'badge', taskLabel(task.status)));
-    if (!['completed', 'cancelled'].includes(task.status)) {
-      const validate = el('button', '', 'Validate'); validate.type = 'button'; validate.disabled = busy(c) || task.status === 'running';
-      validate.onclick = () => openTaskCompletion(c, plan, task); row.append(validate);
-    }
-    tasks.append(row);
-  }
-  if (!tasks.children.length) tasks.append(el('p', 'note', 'No tasks yet. Add a quick task to start tracked work.'));
-  const executions = $('planexecutions'); executions.replaceChildren();
-  for (const execution of [...(plan?.executions || [])].reverse()) {
-    const detail = el('details', 'executionrecord');
-    detail.append(el('summary', '', (execution.task_id || 'Task') + ' · ' + execution.participant + ' · ' + taskLabel(execution.status)));
-    for (const [label, value] of [['Execution', execution.id], ['Conversation', execution.conversation_id], ['Branch', execution.branch], ['Checkout', execution.checkout], ['Started', execution.started_at], ['Validation', execution.validation], ['Files', execution.files?.join('\n')]]) {
-      if (value) detail.append(el('p', '', label + ': ' + value));
-    }
-    executions.append(detail);
-  }
-  if (!executions.children.length) executions.append(el('p', 'note', 'No tracked executions yet. An agent reply does not automatically complete a task.'));
 }
 async function flushChatForPlanMutation() {
   if (!remoteReady) throw new Error('Chat storage is unavailable. Reconnect before changing plans.');
@@ -2471,7 +2497,7 @@ function verifiedPlanFork(result) {
   const fork = result.conversation;
   if (!result.forked || !fork || fork.id !== result.binding?.conversation_id || !Array.isArray(fork.log) || !Array.isArray(fork.participants)
     || !Number.isSafeInteger(result.binding.version)) throw new Error('The server did not confirm the fork. Reload before trying again.');
-  hydratePlanBinding(fork, result.binding); fork.planTasks = {}; fork.planMode = 'discussion';
+  hydratePlanBinding(fork, result.binding);
   for (const participant of fork.participants) { participant.session = ''; participant.seen = fork.log.length; }
   return fork;
 }
@@ -2487,30 +2513,17 @@ async function undoPlanFork(fork, source) {
     toast(result.undone ? 'Plan change undone. Original conversation restored.' : 'The fork has been used and is preserved. Returned to the original conversation.');
   } catch (error) { toast(error.message + ' The fork is preserved.'); }
 }
-function selectPlannedTask(c, p, select) {
-  const taskId = select.value;
-  pendingTaskSelections++; renderComposer();
-  taskSelectionQueue = taskSelectionQueue.then(async () => {
-    if (busy(c)) throw new Error('Wait for replies to finish before selecting another task.');
-    await flushChatForPlanMutation();
-    const binding = await planRequest(conversationPlanRoute(c, 'tasks'), {checkout: planCheckout(c),
-      version: c.planBinding.revision, participant: p.name, task_id: taskId || null});
-    if (!Number.isSafeInteger(binding.version)) throw new Error('Task selection was not confirmed by the server.');
-    hydratePlanBinding(c, binding); planErrors.delete(c.id); saveSoon();
-  }).catch(error => { if (cur() === c) { showPlanError(error.message); toast(error.message); } })
-    .finally(() => { pendingTaskSelections--; if (cur() === c) renderComposer(); });
-}
 function adoptPlanMutation(result, c, source = null) {
   if (Number.isSafeInteger(result.revision)) remoteRevision = result.revision;
-  hydratePlanBinding(c, result.binding); c.planTasks = {}; c.planMode = 'discussion';
+  hydratePlanBinding(c, result.binding);
   if (c.planBinding.plan_id) c.keepEmpty = true;
   if (source) {
     state.convs.unshift(c); switchTo(c.id);
-    // Once any new turn has started, this offers navigation only. Tracked
-    // executions and their fork are never deleted by a toast action.
-    toast('Fork created. Sessions restarted; no task selected.', () => undoPlanFork(c, source));
+    // Once any new turn has started, this offers navigation only; the fork is
+    // preserved instead of being deleted by a toast action.
+    toast('Fork created. Sessions restarted.', () => undoPlanFork(c, source));
   } else if (!state.convs.includes(c)) {
-    state.convs.unshift(c); switchTo(c.id); toast('Fork created. Sessions restarted; no task selected.');
+    state.convs.unshift(c); switchTo(c.id); toast('Fork created. Sessions restarted.');
   } else {
     for (const p of c.participants) { p.session = ''; p.seen = 0; }
     save(); render(); toast(c.planBinding.plan_id ? 'Plan linked to this conversation.' : 'This is now a free conversation.');
@@ -2555,13 +2568,13 @@ function updatePlanChoice() {
   $('migrateplanfield').hidden = choice !== 'migrate';
   $('migrateplanslug').required = choice === 'migrate'; $('migrateplanslug').disabled = choice !== 'migrate' || !!editor?.saving;
   if (editor?.targetCheckout) $('plancheckoutnote').textContent = choice === 'migrate'
-    ? 'Copy the plan and checklist to ' + editor.targetCheckout + '. The original plan stays in its checkout. New executions are tracked in the copied plan.'
+    ? 'Copy the plan to ' + editor.targetCheckout + '. The original plan stays in its checkout.'
     : 'Checkout will change to ' + editor.targetCheckout + '. Detach the current plan or select a plan in that checkout. Sessions restart; files are not migrated.';
   for (const id of ['newplantitle', 'newplanslug', 'newplanobjective']) { $(id).required = choice === 'create'; $(id).disabled = choice !== 'create' || !!editor?.saving; }
   $('newplancriteria').disabled = choice !== 'create' || !!editor?.saving;
   const history = !!editor?.c.log.length;
   $('planchangeeffect').textContent = history
-    ? 'Changing the plan creates a fork. History and participants are preserved; agent sessions restart and no task is selected. The original conversation keeps its plan.'
+    ? 'Changing the plan creates a fork. History and participants are preserved; agent sessions restart. The original conversation keeps its plan.'
     : 'This changes the plan of this empty conversation. No plan files are copied.';
   $('planapply').textContent = history ? 'Create fork and change plan' : 'Apply to this conversation';
   const same = editor && !editor.targetCheckout && ((choice === 'free' && !editor.c.planBinding?.plan_id)
@@ -2569,28 +2582,13 @@ function updatePlanChoice() {
   $('planapply').disabled = !editor || editor.loading || editor.saving || same || (choice === 'existing' && !$('existingplan').value);
   $('planchoice').disabled = !!editor?.saving; $('existingplan').disabled = !!editor?.saving; $('plancancel').disabled = !!editor?.saving;
 }
-async function preparePlanSend(c, targets) {
+async function preparePlanSend(c) {
   try {
     if (remoteConflict) throw new Error('This conversation changed in another window. Reload before continuing.');
-    await taskSelectionQueue;
     const result = await refreshPlanBinding(c, {verify: true});
     if (cur() !== c) return false;
     if (!result || !c.planBinding?.plan_id) return true;
-    const plan = planFor(c); if (!plan) throw new Error('Plan details are unavailable. Refresh before sending.');
-    if (planMode(c) === 'task') {
-      const writing = targets.filter(p => p.write);
-      const chosen = new Set();
-      for (const p of writing) {
-        const task = plan.tasks.find(t => t.id === plannedTask(c, p));
-        if (!task || ['completed', 'running', 'cancelled'].includes(task.status)) throw new Error('Select an available task for ' + p.name + ' before executing.');
-        if (chosen.has(task.id)) throw new Error('Choose separate tasks for concurrent writing participants.');
-        chosen.add(task.id);
-      }
-    } else {
-      const body = $('input').value.trim().replace(/^((?:@[\w-]+\s+)+)/, '');
-      const skill = skills.find(s => s.name === skillOf(body));
-      if (skill?.requires_write) throw new Error('This skill needs file edits. Select Execute tasks and a task first.');
-    }
+    if (!planFor(c)) throw new Error('Plan details are unavailable. Refresh before sending.');
     await flushChatForPlanMutation();
     return true;
   } catch (error) {
@@ -2598,35 +2596,16 @@ async function preparePlanSend(c, targets) {
     return false;
   }
 }
-function openTaskCompletion(c, plan, task) {
-  completingTask = {c, plan, task, saving: false};
-  $('taskcompletename').textContent = task.id + ' · ' + task.title;
-  $('taskvalidation').value = ''; $('taskconfirmed').checked = false; $('taskcompleteerror').hidden = true;
-  $('taskcompleteapply').disabled = false; $('taskcompletecancel').disabled = false;
-  $('taskcompletedialog').showModal();
-}
 $('planlink').onclick = () => openPlanDialog();
-$('plantoggle').onclick = async () => {
-  $('planpanel').hidden = !$('planpanel').hidden;
-  $('plantoggle').setAttribute('aria-expanded', String(!$('planpanel').hidden));
-  if (!$('planpanel').hidden) { renderPlanPanel(); $('planpanel').showModal(); try { await refreshPlanBinding(cur()); } catch (error) { showPlanError(error.message); } }
-  else $('planpanel').close();
-};
-$('planclose').onclick = () => { $('planpanel').close(); $('plantoggle').focus(); };
-$('planpanel').addEventListener('close', () => { $('planpanel').hidden = true; $('plantoggle').setAttribute('aria-expanded', 'false'); });
-$('planrefresh').onclick = async () => {
-  $('planrefresh').disabled = true;
-  try { await refreshPlanBinding(cur(), {verify: true}); } catch (error) { showPlanError(error.message); }
-  finally { $('planrefresh').disabled = false; }
-};
-$('planreload').onclick = async () => {
-  const c = cur(), plan = planFor(c); if (!c || !plan || busy(c)) return;
-  $('planreload').disabled = true;
-  try { cachePlan(await planRequest(planRoute(plan.id, 'reload'), {checkout: planCheckout(c), version: plan.revision})); planErrors.delete(c.id); if (cur() === c) { renderPlanPanel(); renderPlanComposer(); } }
-  catch (error) { if (cur() === c) showPlanError(error.message); }
-  finally { if (cur() === c) $('planreload').disabled = false; }
-};
-$('planmode').onchange = () => { const c = cur(); if (!c || busy(c)) return; c.planMode = $('planmode').value; saveSoon(); renderPlanComposer(); };
+$('conversationadvanced').ontoggle = () => { if ($('conversationadvanced').open) $('planorigin').open = false; };
+$('planorigin').ontoggle = () => { if ($('planorigin').open) $('conversationadvanced').open = false; };
+$('advancedclose').onclick = () => { $('conversationadvanced').open = false; $('conversationadvanced').querySelector('summary').focus(); };
+$('historyclose').onclick = () => { $('planorigin').open = false; $('planorigin').querySelector('summary').focus(); };
+document.addEventListener('click', event => {
+  for (const details of [$('conversationadvanced'), $('planorigin')]) {
+    if (details.open && !details.contains(event.target)) details.open = false;
+  }
+});
 $('planchoice').onchange = updatePlanChoice; $('existingplan').onchange = updatePlanChoice;
 $('newplantitle').oninput = () => { if (!$('newplanslug').dataset.edited) $('newplanslug').value = $('newplantitle').value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80); };
 $('newplanslug').oninput = () => { $('newplanslug').dataset.edited = 'true'; };
@@ -2669,34 +2648,6 @@ $('planform').onsubmit = async event => {
   } catch (error) { $('planlinkerror').textContent = error.message; $('planlinkerror').hidden = false; }
   finally { editor.saving = false; if (planEdit === editor) updatePlanChoice(); }
 };
-$('quicktaskform').onsubmit = async event => {
-  event.preventDefault(); const c = cur(), plan = planFor(c), title = $('quicktask').value.trim();
-  if (!c || !plan || !title || $('quicktaskadd').disabled) return;
-  $('quicktaskadd').disabled = true;
-  try {
-    cachePlan(await planRequest(planRoute(plan.id, 'tasks'), {checkout: planCheckout(c), title, version: plan.revision}));
-    if (cur() === c) { $('quicktask').value = ''; planErrors.delete(c.id); renderPlanPanel(); renderPlanComposer(); }
-  } catch (error) { if (cur() === c) showPlanError(error.message); }
-  finally { if (cur() === c) $('quicktaskadd').disabled = busy(c); }
-};
-$('taskcompletecancel').onclick = () => $('taskcompletedialog').close();
-$('taskcompletedialog').addEventListener('close', () => { completingTask = null; });
-$('taskcompletedialog').addEventListener('cancel', event => { if (completingTask?.saving) event.preventDefault(); });
-$('taskcompleteform').onsubmit = async event => {
-  event.preventDefault(); const edit = completingTask;
-  if (!edit || edit.saving || !$('taskconfirmed').checked || !$('taskvalidation').value.trim()) return;
-  edit.saving = true; $('taskcompleteapply').disabled = true; $('taskcompletecancel').disabled = true; $('taskcompleteerror').hidden = true;
-  try {
-    cachePlan(await planRequest(planRoute(edit.plan.id, 'tasks/' + encodeURIComponent(edit.task.id) + '/complete'), {checkout: planCheckout(edit.c),
-      version: edit.plan.revision, validation: $('taskvalidation').value.trim(), human_confirmed: true,
-      ...(edit.task.latest_execution ? {execution_id: edit.task.latest_execution} : {})}));
-    $('taskcompletedialog').close();
-    if (cur() === edit.c) { renderPlanPanel(); renderPlanComposer(); }
-    toast('Task completed with recorded validation.');
-  } catch (error) { $('taskcompleteerror').textContent = error.message; $('taskcompleteerror').hidden = false; }
-  finally { edit.saving = false; $('taskcompleteapply').disabled = false; $('taskcompletecancel').disabled = false; }
-};
-
 /* ---------- onboarding and contextual preflight ---------- */
 async function refreshReadiness(conversation = cur(), { full = false, catalog = false, targets = null } = {}) {
   const query = conversation?.checkout ? '?checkout=' + encodeURIComponent(conversation.checkout) : '';
@@ -2728,29 +2679,47 @@ async function refreshReadiness(conversation = cur(), { full = false, catalog = 
 }
 function readinessCommand(parent, text) {
   if (!text) return;
-  const row = el('p', 'note'); const code = el('code', '', text);
-  const copy = el('button', '', 'Copy command'); copy.type = 'button';
-  copy.onclick = () => copyText(text, copy); row.append(code, document.createTextNode(' '), copy); parent.appendChild(row);
+  const row = el('div', 'readycommand'); const code = el('code', '', text);
+  const copy = el('button', '', 'Copy'); copy.type = 'button';
+  copy.onclick = () => copyText(text, copy); row.append(code, copy); parent.appendChild(row);
 }
+function readinessDot(state) {
+  const dot = el('span', 'readinessdot'), label = cap(state || 'unknown');
+  dot.title = label; dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', 'Status: ' + label); return dot;
+}
+const readinessValue = value => value === 'ready_sandbox' ? 'ready' : value;
 function renderEnvironmentStatus() {
   const button = $('readybtn');
   const status = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
   button.dataset.state = status.state;
-  button.textContent = status.state === 'unknown' ? 'Environment' : status.state === 'blocked' ? 'Environment blocked' : status.pending ? 'Environment · ' + status.pending + (status.pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
+  const description = status.state === 'unknown' ? 'Environment status unknown' : status.state === 'blocked' ? 'Environment blocked' : status.pending ? 'Environment: ' + status.pending + (status.pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
+  button.textContent = 'Environment';
+  button.setAttribute('aria-label', description);
+  button.title = description;
 }
 function renderReadiness() {
   const rows = $('readyrows'); rows.textContent = '';
+  const overall = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
+  $('readystate').className = 'ready-' + overall.state;
+  $('readystate').textContent = overall.state === 'ready' ? 'Ready' : overall.state === 'blocked' ? 'Blocked'
+    : overall.pending ? overall.pending + (overall.pending === 1 ? ' pending item' : ' pending items') : 'Unknown';
+  const workspace = el('section', 'readysection'); workspace.appendChild(el('h3', '', 'Workspace'));
+  const workspaceGrid = el('div', 'readygrid'); workspace.appendChild(workspaceGrid); rows.appendChild(workspace);
   for (const [label, check] of [['Repository', readiness?.repository], ['Runtime', readiness?.runtime], ['Sandbox', readiness?.image]]) {
-    const item = el('article'); item.append(el('strong', '', label + ' · ' + (check?.state || 'unknown')), el('p', 'note', check?.reason || 'Not checked'));
-    readinessCommand(item, check?.action); rows.append(item);
+    const state = check?.state || 'unknown', item = el('article', 'readycard ready-' + state);
+    const head = el('div', 'readycardhead'); head.append(readinessDot(state), el('strong', '', label)); item.append(head, el('p', 'note', check?.reason || 'Not checked'));
+    readinessCommand(item, check?.action); workspaceGrid.append(item);
   }
   const selection = ChatOnboarding.selection(readiness, meta.default);
-  $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Recover it in the terminal, or choose another ready agent with Add participant. The global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Environment status for this checkout. Add or edit participants using Add participant; usage limits are in their own panel.';
+  $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Recover it in the terminal, or choose another ready agent with Add participant. The global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Environment status for this checkout.';
+  const agents = el('section', 'readysection'); agents.appendChild(el('h3', '', 'Agents'));
+  const agentGrid = el('div', 'readygrid readyagents'); agents.appendChild(agentGrid); rows.appendChild(agents);
   for (const a of readiness?.agents || []) {
-    const card = el('article'); card.appendChild(el('strong', '', cap(a.agent) + ' · ' + a.readiness));
-    const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution']) { const field = el('div'); field.append(el('dt', '', cap(key)), el('dd', '', a[key])); fields.append(field); } card.append(fields);
+    const card = el('article', 'readycard ready-' + a.readiness), head = el('div', 'readycardhead');
+    head.append(readinessDot(a.readiness), el('strong', '', cap(a.agent))); card.appendChild(head);
+    const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution']) { const field = el('div'), value = readinessValue(String(a[key] || 'unknown')); field.append(el('dt', '', cap(key)), el('dd', '', cap(value))); fields.append(field); } card.append(fields);
     card.append(el('p', 'note', a.reason), el('p', 'note', 'Last test: ' + (a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : 'never') + ' · ' + a.context));
-    readinessCommand(card, a.action); rows.append(card);
+    readinessCommand(card, a.action); agentGrid.append(card);
   }
   renderEnvironmentStatus();
 }
@@ -2814,7 +2783,7 @@ async function prepareSend(c, targets) {
     }
     if (cur() !== c) return false;
     c.gitCurrent = structuredClone(context);
-    return await preparePlanSend(c, targets);
+    return await preparePlanSend(c);
   } catch (e) { toast(e.message + ' Your draft is preserved.'); return false; }
 }
 

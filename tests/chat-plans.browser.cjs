@@ -72,7 +72,7 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
           const copied=clone(plans.get(binding.plan_slug));copied.slug=slug;copied.checkout=checkout;copied.version=1;copied.executions=[];copied.tasks.forEach(t=>t.latest_execution=null);plans.set(slug,copied);
         }
         const nextBinding={conversation_id:id,plan_slug:slug,version:forked?1:binding.version+1,checkout,selections:{},origin:null};
-        next.id=id;next.plan_binding=nextBinding;next.planTasks={};next.planMode='discussion';
+        next.id=id;next.plan_binding=nextBinding;
         next.participants.forEach(p=>{p.session='';p.seen=next.log.length;});
         next.checkout=checkout;
         if(forked){next.title='Fork: '+source.title;nextBinding.origin={conversation_id:source.id,previous_plan:binding.plan_slug,current_plan:slug,message_count:source.log.length,checkout:binding.checkout};f.saved.state.convs.unshift(next);}
@@ -138,12 +138,14 @@ async function chooser(page,mode='existing'){
   await page.waitForFunction(()=>!document.querySelector('#planchoice').disabled&&planEdit?.loading===false);
   await page.locator('#planchoice').selectOption(mode);
 }
-async function link(page,id){await chooser(page);await page.locator('#existingplan').selectOption(id);await page.locator('#planapply').click();await page.waitForSelector('#plandialog',{state:'hidden'});await page.waitForFunction(()=>document.querySelector('#planlabel').textContent.startsWith('Plan: Plan'));}
+async function link(page,id){await chooser(page);await page.locator('#existingplan').selectOption(id);await page.locator('#planapply').click();await page.waitForSelector('#plandialog',{state:'hidden'});await page.waitForFunction(()=>document.querySelector('#planlabel').textContent.startsWith('Plan '));}
 async function reply(page,text){await page.locator('#input').fill(text);await page.locator('#send').click();await page.waitForFunction(()=>cur().log.some(e=>e.text==='Fixture reply'&&!e.pending));}
 
 test('free conversation writes without a plan; Cancel and Esc never create/link plans',options,async()=>{
   const t=await setup();try{
     assert.equal(await t.page.locator('dialog[open]').count(),0);
+    assert.equal(await t.page.locator('#planbar, #contextrepo, #contextcheckout').count(),0);
+    assert.equal(await t.page.locator('#contextbar #branchicon, #contextbar #planicon, #contextbar #planlabel').count(),3);
     await t.page.locator('#input').fill('My unsent draft');const before=await current(t.page);
     await chooser(t.page,'create');await t.page.locator('#newplantitle').fill('Discard me');await t.page.locator('#newplanobjective').fill('Unused objective');
     await t.page.locator('#plancancel').click();assert.deepEqual(await current(t.page),before);
@@ -154,63 +156,54 @@ test('free conversation writes without a plan; Cancel and Esc never create/link 
   }finally{await t.close();}
 });
 
-test('empty chat creates a shared plan, adds a quick task, and retains link after reload',options,async()=>{
+test('empty chat creates a shared plan and retains the link after reload',options,async()=>{
   const t=await setup();try{
     await chooser(t.page,'create');await t.page.locator('#newplantitle').fill('Authentication');await t.page.locator('#newplanobjective').fill('Authenticate without editing TOML');await t.page.locator('#newplancriteria').fill('Login test passes');
     assert.equal(await t.page.locator('#newplanslug').inputValue(),'authentication');
     await t.page.locator('#planapply').click();await t.page.waitForSelector('#plandialog',{state:'hidden'});
     assert.equal((await current(t.page)).id,'source');assert.equal((await current(t.page)).planBinding.plan_id,'authentication');
-    await t.page.locator('#plantoggle').click();await t.page.locator('#quicktask').fill('Add login test');await t.page.locator('#quicktaskadd').click();
-    await t.page.waitForFunction(()=>document.querySelector('#plantasks').textContent.includes('Add login test'));
-    assert.match(await t.page.locator('#plancontent').textContent(),/Authenticate without editing TOML/);
+    assert.equal(await t.page.locator('#plantoggle, #planexecution, #quicktaskform').count(),0);
     await t.page.waitForTimeout(700);await t.page.reload();await t.page.waitForFunction(()=>document.querySelector('#planlabel').textContent.includes('Authentication'));
-    assert.equal(await t.page.locator('#planmode').inputValue(),'discussion');assert.deepEqual(t.errors,[]);
+    assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
 test('changing plan with history forks only after confirmation and preserves original draft and link',options,async()=>{
   const t=await setup({linked:true,history:true});try{
-    await t.page.locator('#planmode').selectOption('task');await t.page.locator('#plantargets select').selectOption('T001');await t.page.locator('#input').fill('Original draft');
+    await t.page.locator('#input').fill('Original draft');
     const before=await current(t.page);
     await chooser(t.page);await t.page.locator('#existingplan').selectOption('beta');assert.match(await t.page.locator('#planchangeeffect').innerText(),/agent sessions restart/);
     assert.equal(await t.page.locator('#planapply').innerText(),'Create fork and change plan');await t.page.locator('#planapply').click();await t.page.waitForSelector('#plandialog',{state:'hidden'});
     const fork=await current(t.page);assert.notEqual(fork.id,'source');assert.deepEqual(fork.log,before.log);assert.equal(fork.checkout,before.checkout);
-    assert.equal(fork.planBinding.plan_id,'beta');assert.deepEqual(fork.planTasks,{});assert.equal(fork.participants[0].session,'');assert.equal(fork.participants[0].role,before.participants[0].role);
-    assert.match(await t.page.locator('#planorigin').textContent(),/previous plan: alpha/);
+    assert.equal(fork.planBinding.plan_id,'beta');assert.equal(fork.participants[0].session,'');assert.equal(fork.participants[0].role,before.participants[0].role);
+    assert.equal(await t.page.locator('#planorigin').evaluate(node=>node.parentElement.id),'contextbar');
+    assert.equal(await t.page.locator('#conversationadvanced summary svg.i, #planorigin summary svg.i').count(),2);
+    await t.page.locator('#planorigin summary').click();
+    assert.equal(await t.page.locator('#forkconversation').textContent(),'Original');assert.equal(await t.page.locator('#forkplan').textContent(),'alpha');assert.equal(await t.page.locator('#forkmessages').textContent(),'2 messages');
+    await t.page.locator('#historyclose').click();assert.equal(await t.page.locator('#planorigin').evaluate(node=>node.open),false);
+    await t.page.locator('#conversationadvanced summary').click();await t.page.keyboard.press('Escape');assert.equal(await t.page.locator('#conversationadvanced').evaluate(node=>node.open),false);
+    await t.page.locator('#planorigin summary').click();await t.page.locator('#contextbranch').click();assert.equal(await t.page.locator('#planorigin').evaluate(node=>node.open),false);
     const original=await t.page.evaluate(()=>state.convs.find(c=>c.id==='source'));assert.equal(original.planBinding.plan_id,'alpha');assert.equal(original.participants[0].session,'old-native-session');
     assert.equal(await t.page.locator('#input').inputValue(),'');await t.page.locator('#undo').click();await t.page.waitForFunction(()=>cur().id==='source');
     assert.equal((await current(t.page)).id,'source');assert.equal(await t.page.locator('#input').inputValue(),'Original draft');assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
-test('discussion overrides write permission; execution requires tasks and completion requires validation',options,async()=>{
+test('linked plans stay read only and expose no per-agent task controls',options,async()=>{
   const t=await setup({linked:true});try{
     await reply(t.page,'Discuss approach');const discussion=t.f.requests.find(r=>r.path==='/api/chat').body;
-    assert.equal(discussion.write,false);assert.equal(discussion.intent,'discussion');assert.ok(Number.isSafeInteger(discussion.binding_version));assert.equal(discussion.task_id,null);
-    await t.page.locator('#planmode').selectOption('task');await t.page.locator('#input').fill('Execute change');const count=t.f.requests.filter(r=>r.path==='/api/chat').length;
-    await t.page.locator('#send').click();await t.page.waitForFunction(()=>document.querySelector('#toasttext').textContent.includes('Select an available task'));
-    assert.equal(await t.page.locator('#input').inputValue(),'Execute change');assert.equal(t.f.requests.filter(r=>r.path==='/api/chat').length,count);
-    await t.page.locator('#plantargets select').selectOption('T001');await t.page.locator('#send').click();
-    await t.page.waitForFunction(()=>cur().log.some(e=>e.execution_id));
-    const execution=t.f.requests.filter(r=>r.path==='/api/chat').at(-1).body;assert.equal(execution.task_id,'T001');assert.equal(execution.participant,'Dev');assert.equal(execution.write,true);
-    assert.equal(t.f.plans.get('alpha').tasks[0].status,'validation_pending');
-    await t.page.locator('#plantoggle').click();await t.page.locator('#plantasks button').click();await t.page.locator('#taskcompleteapply').click();
-    assert.equal(t.f.plans.get('alpha').tasks[0].status,'validation_pending','empty confirmation cannot complete a task');
-    await t.page.locator('#taskvalidation').fill('Ran tests; all 5 passed.');await t.page.locator('#taskconfirmed').check();await t.page.locator('#taskcompleteapply').click();
-    await t.page.waitForSelector('#taskcompletedialog',{state:'hidden'});assert.equal(t.f.plans.get('alpha').tasks[0].status,'completed');assert.match(await t.page.locator('#planexecutions').innerText(),/Completed/);
+    assert.equal(discussion.write,false);assert.equal(discussion.intent,'discussion');assert.ok(Number.isSafeInteger(discussion.binding_version));assert.equal(discussion.task_id,undefined);
+    assert.equal(await t.page.locator('#planmode, #plantargets, #plantoggle, #taskcompletedialog').count(),0);
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
-test('binding failure and task revision conflicts preserve input and require refresh',options,async()=>{
+test('binding failures preserve the selected plan and draft',options,async()=>{
   const t=await setup({linked:true});try{
     await t.page.locator('#input').fill('Preserved draft');await chooser(t.page);await t.page.locator('#existingplan').selectOption('beta');t.f.fail='/api/conversations/source/plan';
     await t.page.locator('#planapply').click();await t.page.waitForFunction(()=>!document.querySelector('#planlinkerror').hidden);
     assert.equal((await current(t.page)).planBinding.plan_id,'alpha');assert.equal(await t.page.locator('#input').inputValue(),'Preserved draft');
-    t.f.fail=null;await t.page.locator('#plancancel').click();await t.page.locator('#plantoggle').click();await t.page.locator('#planrefresh').click();await t.page.waitForFunction(()=>!document.querySelector('#planrefresh').disabled);t.f.plans.get('alpha').version++;
-    await t.page.locator('#quicktask').fill('Retain this task');await t.page.locator('#quicktaskadd').click();await t.page.waitForFunction(()=>document.querySelector('#planerror').textContent.includes('Refresh'));
-    assert.equal(await t.page.locator('#quicktask').inputValue(),'Retain this task');await t.page.locator('#planrefresh').click();await t.page.waitForFunction(()=>!document.querySelector('#planrefresh').disabled);
-    await t.page.locator('#quicktaskadd').click();await t.page.waitForFunction(()=>document.querySelector('#plantasks').textContent.includes('Retain this task'));assert.deepEqual(t.errors,[]);
+    t.f.fail=null;await t.page.locator('#plancancel').click();assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
@@ -226,12 +219,12 @@ test('checkout changes resolve the linked plan before changing sessions or check
   }finally{await t.close();}
 });
 
-test('planned fork retains its plan and clears tasks; switching to free chat also forks',options,async()=>{
+test('planned fork retains its plan; switching to free chat also forks',options,async()=>{
   const t=await setup({linked:true,history:true});try{
     await t.page.locator('#input').fill('/fork');await t.page.locator('#send').click();await t.page.waitForFunction(()=>cur().id!=='source');
-    assert.equal((await current(t.page)).planBinding.plan_id,'alpha');assert.deepEqual((await current(t.page)).planTasks,{});
+    assert.equal((await current(t.page)).planBinding.plan_id,'alpha');
     const linkedId=(await current(t.page)).id;await chooser(t.page,'free');await t.page.locator('#planapply').click();await t.page.waitForSelector('#plandialog',{state:'hidden'});
-    assert.notEqual((await current(t.page)).id,linkedId);assert.equal((await current(t.page)).planBinding.plan_id,null);assert.equal(await t.page.locator('#planexecution').isVisible(),false);
+    assert.notEqual((await current(t.page)).id,linkedId);assert.equal((await current(t.page)).planBinding.plan_id,null);
     assert.equal(t.f.bindings.get(linkedId).plan_slug,'alpha');assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
@@ -244,27 +237,22 @@ test('optional plans stay usable on old servers; linked conversations block unve
   }finally{await linked.close();}
 });
 
-test('task selection is per writing participant and disallows conflicting concurrent tasks',options,async()=>{
+test('linked team conversations keep every participant in discussion mode',options,async()=>{
   const t=await setup({linked:true,team:true});try{
-    t.f.plans.get('alpha').tasks.push({id:'T002',title:'Review change',status:'pending'});
-    await t.page.locator('#planmode').selectOption('task');await t.page.locator('#plantoggle').click();await t.page.locator('#planrefresh').click();await t.page.waitForFunction(()=>!document.querySelector('#planrefresh').disabled);
-    await t.page.locator('#planclose').click();
-    assert.equal(await t.page.locator('#plantargets select').count(),2);
-    await t.page.getByLabel('Task for Dev',{exact:true}).selectOption('T001');await t.page.getByLabel('Task for Reviewer',{exact:true}).selectOption('T001');await t.page.locator('#input').fill('Concurrent work');await t.page.locator('#send').click();
-    await t.page.waitForFunction(()=>document.querySelector('#toasttext').textContent.includes('separate tasks'));assert.equal(t.f.requests.filter(r=>r.path==='/api/chat').length,0);
-    await t.page.getByLabel('Task for Reviewer',{exact:true}).selectOption('T002');await t.page.locator('#send').click();await t.page.waitForFunction(()=>!busy(cur())&&cur().log.filter(e=>e.execution_id).length===2);
-    assert.deepEqual(t.f.requests.filter(r=>r.path==='/api/chat').map(r=>[r.body.participant,r.body.task_id]),[['Dev','T001'],['Reviewer','T002']]);assert.deepEqual(t.errors,[]);
+    await reply(t.page,'Review together');
+    const requests=t.f.requests.filter(r=>r.path==='/api/chat').map(r=>r.body);
+    assert.equal(requests.length,2);assert.ok(requests.every(r=>r.intent==='discussion'&&r.write===false&&r.task_id===undefined));
+    assert.equal(await t.page.locator('#planmode, #plantargets').count(),0);assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
-test('plan dialogs fit short mobile screens and display untrusted plan text safely',options,async()=>{
+test('plan dialog fits short mobile screens',options,async()=>{
   const t=await setup({linked:true},{width:390,height:450});try{
     t.f.plans.get('alpha').content='<script>window.injected=true</script>\n'+ 'Long objective '.repeat(80);
     await chooser(t.page,'create');await t.page.locator('#newplantitle').fill('Mobile plan');await t.page.locator('#newplanobjective').fill('Large objective');
     const metrics=await t.page.locator('#plandialog').evaluate(d=>{const rect=d.getBoundingClientRect(),form=d.querySelector('form');return{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,height:innerHeight,width:innerWidth,padding:parseFloat(getComputedStyle(form).paddingLeft),scroll:d.scrollHeight>d.clientHeight};});
     assert.ok(metrics.left>=0&&metrics.right<=metrics.width&&metrics.top>=0&&metrics.bottom<=metrics.height);assert.ok(metrics.padding>=20);assert.ok(metrics.scroll);
-    await t.page.keyboard.press('Escape');await t.page.locator('#plantoggle').click();await t.page.waitForFunction(()=>document.querySelector('#plancontent').textContent.includes('<script>'));
-    assert.equal(await t.page.evaluate(()=>window.injected),undefined);assert.equal(await t.page.locator('#plancontent script').count(),0);
+    await t.page.keyboard.press('Escape');assert.equal(await t.page.locator('#planpanel, #plancontent').count(),0);
     assert.deepEqual(t.errors,[]);if(process.env.AIC_PLAN_SCREENSHOT)await t.page.screenshot({path:process.env.AIC_PLAN_SCREENSHOT});
   }finally{await t.close();}
 });
@@ -292,11 +280,9 @@ test('a remotely changed binding never changes the selected plan silently during
   }finally{await t.close();}
 });
 
-test('checkout migration copies the plan; external Markdown can be explicitly reloaded',options,async()=>{
+test('checkout migration copies the plan',options,async()=>{
   const t=await setup({linked:true,history:true});try{
-    await t.page.locator('#plantoggle').click();await t.page.locator('#planpanel summary').filter({hasText:'Objective and scope'}).click();
-    t.f.externalContent='Objective changed deliberately in PLAN.md';await t.page.locator('#planreload').click();await t.page.waitForFunction(()=>document.querySelector('#plancontent').textContent.includes('changed deliberately'));
-    await t.page.locator('#planclose').click();await t.page.locator('#conversationadvanced summary').click();await t.page.locator('#worktreebtn').click();
+    await t.page.locator('#conversationadvanced summary').click();await t.page.locator('#worktreebtn').click();
     await t.page.locator('#worktreeselect').selectOption('/repo-other');await t.page.locator('#worktreeconfirm').click();await t.page.waitForFunction(()=>planEdit?.loading===false);
     await t.page.locator('#planchoice').selectOption('migrate');await t.page.locator('#migrateplanslug').fill('copied-alpha');
     assert.match(await t.page.locator('#plancheckoutnote').innerText(),/original plan stays/);
@@ -320,7 +306,7 @@ test('refresh reconnects to an in-flight run and replays only missing events',op
   }finally{await t.close();}
 });
 
-test('live Rust API: create plan, track a writing turn, validate files and fork the shared binding',
+test('live Rust API: create a plan, discuss it, fork it and return to a free conversation',
   {skip:!chromium||!process.env.AIC_TEST_BINARY},async()=>{
     const {fixture:liveFixture}=require('./chat-quotas.integration.cjs');
     const f=await liveFixture();let browser;
@@ -337,20 +323,13 @@ test('live Rust API: create plan, track a writing turn, validate files and fork 
       await page.goto(f.base);await page.waitForSelector('#chips .chip');
       await chooser(page,'create');await page.locator('#newplantitle').fill('Live frontend plan');await page.locator('#newplanobjective').fill('Track work through the real API');await page.locator('#newplancriteria').fill('Validated fixture execution');
       await page.locator('#planapply').click();await page.waitForSelector('#plandialog',{state:'hidden'});
-      await page.locator('#plantoggle').click();await page.locator('#quicktask').fill('Exercise tracked execution');await page.locator('#quicktaskadd').click();await page.waitForFunction(()=>document.querySelector('#plantasks').textContent.includes('T001'));
-      await page.locator('#planclose').click();await page.locator('#planmode').selectOption('task');await page.locator('#plantargets select').selectOption('T001');
-      await page.waitForFunction(()=>pendingTaskSelections===0);
-      await reply(page,'Execute the selected task');await page.waitForFunction(()=>!!cur().log.find(e=>e.execution_id));
+      await reply(page,'Discuss the linked plan');
       const binding=await (await f.request('/api/conversations/live-source/plan')).json();
-      assert.equal(binding.plan_slug,'live-frontend-plan');assert.equal(binding.selections.Dev,'T001');
-      const plan=await (await f.request('/api/plans/live-frontend-plan')).json();assert.equal(plan.tasks[0].checked,false);assert.equal(plan.executions[0].state,'validation_pending');
-      await page.locator('#plantoggle').click();await page.locator('#planrefresh').click();await page.waitForFunction(()=>!document.querySelector('#planrefresh').disabled);await page.locator('#plantasks button').click();
-      await page.locator('#taskvalidation').fill('Verified the isolated fixture reply and API execution record.');await page.locator('#taskconfirmed').check();await page.locator('#taskcompleteapply').click();await page.waitForSelector('#taskcompletedialog',{state:'hidden'});
-      assert.match(fs.readFileSync(path.join(f.root,'.aic/plans/live-frontend-plan/TASKS.md'),'utf8'),/\[x\] T001/);
-      assert.match(fs.readFileSync(path.join(f.root,'.aic/plans/live-frontend-plan/EXECUTION.md'),'utf8'),/Verified the isolated fixture reply/);
+      assert.equal(binding.plan_slug,'live-frontend-plan');assert.deepEqual(binding.selections,{});
+      assert.equal(await page.locator('#plantoggle, #planmode, #plantargets, #taskcompletedialog').count(),0);
       if(process.env.AIC_PLAN_DESKTOP_SCREENSHOT)await page.screenshot({path:process.env.AIC_PLAN_DESKTOP_SCREENSHOT});
-      await page.locator('#planclose').click();await page.locator('#input').fill('/fork');await page.locator('#send').click();await page.waitForFunction(()=>cur().id!=='live-source');
-      const fork=await current(page);assert.equal(fork.planBinding.plan_id,'live-frontend-plan');assert.equal(fork.participants[0].session,'');assert.deepEqual(fork.planTasks,{});
+      await page.locator('#input').fill('/fork');await page.locator('#send').click();await page.waitForFunction(()=>cur().id!=='live-source');
+      const fork=await current(page);assert.equal(fork.planBinding.plan_id,'live-frontend-plan');assert.equal(fork.participants[0].session,'');
       await chooser(page,'free');await page.locator('#planapply').click();await page.waitForSelector('#plandialog',{state:'hidden'});assert.equal((await current(page)).planBinding.plan_id,null);
       assert.equal((await (await f.request('/api/conversations/live-source/plan')).json()).plan_slug,'live-frontend-plan');
       assert.deepEqual(errors,[]);

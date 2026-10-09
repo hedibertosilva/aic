@@ -13,13 +13,12 @@
     <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
     <button id="new" class="primary" title="New conversation (Ctrl+Shift+O)"></button>
     <input id="importfile" type="file" accept=".json,.md,application/json,text/markdown" hidden>
-    <input type="search" id="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
+    <input type="search" id="search" placeholder="Search" aria-label="Search" autocomplete="off">
   </header>
   <nav id="list"></nav>
   <footer id="repobar">
     <div class="repoinfo">
       <div id="reponame"></div>
-      <span id="repobranch"></span>
       <span id="repo"></span>
     </div>
     <button id="copyrepo" class="icon" aria-label="Copy repository path" title="Copy repository path"></button>
@@ -35,7 +34,7 @@
     <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
     <section id="quotas" aria-labelledby="quotatitle" hidden>
-      <header><strong id="quotatitle">Usage limits</strong><span class="grow"></span>
+      <header><div class="quotatitles"><strong id="quotatitle">Usage limits</strong><span id="quotasubtitle">Provider limits and conversation usage</span></div><span class="grow"></span>
         <button id="quotarefresh" class="icon" type="button" aria-label="Refresh usage limits" title="Refresh usage limits"></button>
         <button id="quotaclose" class="icon" type="button" aria-label="Close usage limits" title="Close usage limits"></button>
       </header>
@@ -43,24 +42,37 @@
       <p id="quotaunknown" class="note" hidden>Earlier replies in this conversation weren't attributed to an agent and are not included in these totals.</p>
     </section>
   </div>
-  <div id="contextbar" aria-label="Current repository context"><strong id="contextrepo"></strong><span id="contextbranch"></span><span id="contextcheckout"></span><details id="conversationadvanced"><summary>Advanced</summary><div class="conversationoptions"><strong>This conversation only</strong><p class="note">Change its working checkout. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p><button id="worktreebtn" type="button">Change working checkout…</button></div></details></div>
-  <div id="planbar" aria-label="Conversation plan">
-    <span id="planlabel">Free conversation</span>
-    <button id="planlink" type="button">Link or create plan</button>
-    <button id="plantoggle" type="button" aria-label="Tasks and executions for this plan" aria-expanded="false" aria-controls="planpanel" hidden>Tasks</button>
+  <div id="contextbar" aria-label="Current conversation context">
+    <span class="contextitem branchcontext"><span id="branchicon" class="contexticon"></span><span id="contextbranch"></span></span>
+    <button id="planlink" class="contextitem" type="button"><span id="planicon" class="contexticon"></span><span id="planlabel">Free conversation</span></button>
+    <details id="conversationadvanced">
+      <summary><span id="advancedicon" class="contexticon"></span><span class="contextsummarylabel">Advanced</span></summary>
+      <div class="conversationoptions contextpopover">
+        <header><div class="contextpopovertitles"><strong>Advanced</strong><span>Conversation-specific settings</span></div><button id="advancedclose" class="icon" type="button" aria-label="Close Advanced" title="Close Advanced"></button></header>
+        <div class="contextpopoverbody">
+          <section class="contextpopovercard">
+            <strong>This conversation only</strong>
+            <p class="note">Change its working checkout. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
+            <button id="worktreebtn" type="button">Change working checkout…</button>
+          </section>
+        </div>
+      </div>
+    </details>
+    <details id="planorigin" hidden>
+      <summary><span id="historyicon" class="contexticon"></span><span class="contextsummarylabel">Fork history</span></summary>
+      <div class="forkoptions contextpopover">
+        <header><div class="contextpopovertitles"><strong>Fork history</strong><span>Origin of this conversation</span></div><button id="historyclose" class="icon" type="button" aria-label="Close Fork history" title="Close Fork history"></button></header>
+        <div class="contextpopoverbody">
+          <dl class="contextpopovercard">
+            <div><dt>Conversation</dt><dd id="forkconversation"></dd></div>
+            <div><dt>Previous plan</dt><dd id="forkplan"></dd></div>
+            <div><dt>Inherited history</dt><dd id="forkmessages"></dd></div>
+          </dl>
+          <p class="note">New messages use the current conversation context.</p>
+        </div>
+      </div>
+    </details>
   </div>
-  <details id="planorigin" hidden><summary>Fork history</summary><p id="planorigintext"></p></details>
-  <dialog id="planpanel" aria-labelledby="plantitle" hidden>
-    <header><strong id="plantitle"></strong><span class="grow"></span><button id="planrefresh" type="button">Refresh</button><button id="planclose" type="button">Close</button></header>
-    <p class="note" id="planstatus" role="status"></p>
-    <p class="note err" id="planerror" role="alert" hidden></p>
-    <details><summary>Objective and scope</summary><pre id="plancontent"></pre><button id="planreload" type="button">Reload changes from plan files</button></details>
-    <h3>Tasks</h3>
-    <div id="plantasks"></div>
-    <form id="quicktaskform"><label for="quicktask">Quick task</label><div class="taskinput"><input id="quicktask" required maxlength="200" placeholder="Describe the work to do"><button id="quicktaskadd" type="submit">Add task</button></div></form>
-    <h3>Executions</h3>
-    <div id="planexecutions"></div>
-  </dialog>
   <div id="banner" role="alert" hidden></div>
   <div id="view">
     <div id="layout" role="group" aria-label="Reply layout"></div>
@@ -69,11 +81,6 @@
   <footer id="composer">
     <button id="jump" type="button"></button>
     <div id="ac" role="listbox"></div>
-    <div id="planexecution" hidden>
-      <label>Planned conversation <select id="planmode"><option value="discussion">Discuss — read only</option><option value="task">Execute tasks</option></select></label>
-      <p id="planmodenote" class="note">Discussion keeps the plan context and does not allow file edits.</p>
-      <div id="plantargets"></div>
-    </div>
     <form id="form">
       <textarea id="input" rows="2" aria-label="Message" placeholder="Write your message…" autofocus></textarea>
       <div class="toolbar">
@@ -190,12 +197,13 @@
 </dialog>
 
 <dialog id="readydialog" aria-labelledby="readytitle">
-  <h2 id="readytitle">Your environment</h2>
-  <p id="readyreason" role="status"></p>
+  <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
+  <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <p class="note">Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</p>
-  <p class="note err" id="readyerror" hidden></p>
-  <div class="buttons"><button id="readyrefresh" type="button">Refresh environment</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
+  <div class="readyfooter"><div class="readyobservation" role="note"><strong>Note</strong><span>Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</span></div>
+    <p class="note err" id="readyerror" hidden></p>
+    <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
+  </div>
 </dialog>
 <dialog id="worktreedialog" aria-labelledby="worktreetitle">
   <h2 id="worktreetitle">Working checkout for this conversation</h2>
@@ -228,16 +236,6 @@
     <p id="plancheckoutnote" class="note" hidden></p>
     <p id="planlinkerror" class="note err" role="alert" hidden></p>
     <div class="buttons"><button id="plancancel" type="button">Cancel</button><span class="grow"></span><button id="planapply" type="submit" class="primary">Apply</button></div>
-  </form>
-</dialog>
-<dialog id="taskcompletedialog" aria-labelledby="taskcompletetitle">
-  <form id="taskcompleteform">
-    <h2 id="taskcompletetitle">Validate task completion</h2>
-    <p id="taskcompletename"></p>
-    <label>Validation evidence <textarea id="taskvalidation" rows="4" required placeholder="Tests performed, results, or what you checked manually"></textarea></label>
-    <label class="check"><input id="taskconfirmed" type="checkbox" required> I confirm that the task meets its acceptance criteria.</label>
-    <p id="taskcompleteerror" class="note err" role="alert" hidden></p>
-    <div class="buttons"><button id="taskcompletecancel" type="button">Cancel</button><span class="grow"></span><button id="taskcompleteapply" type="submit" class="primary">Mark completed</button></div>
   </form>
 </dialog>
 <div id="toast" role="status"><span id="toasttext"></span><button id="undo" type="button">Undo</button></div>

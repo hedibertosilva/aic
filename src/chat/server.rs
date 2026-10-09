@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -53,6 +55,9 @@ struct App {
     /// Host headers we accept; guards against DNS rebinding when listening
     /// on loopback. `None` when bound elsewhere (the user opted in).
     allowed_hosts: Option<Vec<String>>,
+    /// URL of this server as seen by an agent process. Sandboxed chat turns
+    /// share the host network so loopback resolves to this same instance.
+    api_url: String,
     /// Models each agent CLI reported, so the dialog does not spawn it every time.
     models: Mutex<HashMap<String, chat::ModelCatalog>>,
     quotas: Mutex<HashMap<String, QuotaCache>>,
@@ -137,6 +142,12 @@ struct SettingsRequest {
 }
 
 pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
+    // Take the repository-wide lock before opening or recovering the chat
+    // database. A second instance must not classify the first one's active
+    // runs as interrupted, even when it chooses a different TCP port.
+    let _server_lock = lock_chat_server(repo_root, host, port)?;
+    let server = tiny_http::Server::http((host, port))
+        .map_err(|e| anyhow!("binding {host}:{port}: {e}"))?;
     let config = Config::load_merged(repo_root)?;
     let mut chat_db = open_chat_db(repo_root)?;
     plans::recover(&mut chat_db, repo_root)?;
@@ -145,13 +156,13 @@ pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
     let allowed_hosts = loopback.then(|| {
         vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
     });
+    let api_host = match host { "0.0.0.0" => "127.0.0.1", "::" => "[::1]", "::1" => "[::1]", value => value };
     let app = Arc::new(App {
         repo_root: repo_root.to_path_buf(), config: RwLock::new(config), chat_db: Mutex::new(chat_db),
-        allowed_hosts, models: Mutex::default(), quotas: Mutex::default(), active_runs: Mutex::default(),
+        allowed_hosts, api_url: format!("http://{api_host}:{port}"), models: Mutex::default(),
+        quotas: Mutex::default(), active_runs: Mutex::default(),
     });
 
-    let server = tiny_http::Server::http((host, port))
-        .map_err(|e| anyhow!("binding {host}:{port}: {e}"))?;
     println!("aic chat on http://{host}:{port}  (repo: {})", repo_root.display());
     if open { crate::common::browser::open(&format!("http://{}:{port}",if host == "::1" {"[::1]"} else {host})); }
     if !loopback {
@@ -171,6 +182,40 @@ pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// Kernel advisory lock held for the lifetime of one chat server. `flock`
+/// remains effective across the host and container PID namespaces because
+/// both processes open the same bind-mounted repository file.
+struct ChatServerLock {
+    _file: File,
+}
+
+fn lock_chat_server(repo_root: &Path, host: &str, port: u16) -> Result<ChatServerLock> {
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    unsafe extern "C" { fn flock(fd: i32, operation: i32) -> i32; }
+
+    let dir = repo_root.join(".aic").join("chat");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("server.lock");
+    let mut file = OpenOptions::new().create(true).read(true).write(true).open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    // SAFETY: flock accepts an open file descriptor and integer flags only.
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            let mut owner = String::new();
+            let _ = file.read_to_string(&mut owner);
+            let owner = if owner.trim().is_empty() { String::new() } else { format!(" ({})", owner.trim()) };
+            bail!("another aic chat instance is already running for this repository{owner}");
+        }
+        return Err(error).with_context(|| format!("locking {}", path.display()));
+    }
+    file.set_len(0)?;
+    file.rewind()?;
+    writeln!(file, "pid {}, http://{}:{}", std::process::id(), host, port)?;
+    Ok(ChatServerLock { _file: file })
 }
 
 fn open_chat_db(repo_root: &Path) -> Result<Connection> {
@@ -446,15 +491,24 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             _ => respond_text(request, 404, "text/plain", "not found"),
         };
     }
+    let serve_static = |req: Request, filename: &str, mime: &str, embedded: &str| -> Result<()> {
+        let dev_file = app.repo_root.join("src/chat/web").join(filename);
+        if dev_file.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&dev_file) {
+                return respond_text(req, 200, mime, content);
+            }
+        }
+        respond_text(req, 200, mime, embedded)
+    };
     match (request.method().clone(), path.as_str()) {
-        (Method::Get, "/") => respond_text(request, 200, "text/html; charset=utf-8", INDEX_HTML),
-        (Method::Get, "/chat.css") => respond_text(request, 200, "text/css; charset=utf-8", CHAT_CSS),
-        (Method::Get, "/chat-onboarding.js") => respond_text(request, 200, "text/javascript; charset=utf-8", ONBOARDING_JS),
-        (Method::Get, "/chat.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_JS),
-        (Method::Get, "/chat-import.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_IMPORT_JS),
-        (Method::Get, "/chat-quotas.js") => respond_text(request, 200, "text/javascript; charset=utf-8", CHAT_QUOTAS_JS),
+        (Method::Get, "/") => serve_static(request, "chat.html", "text/html; charset=utf-8", INDEX_HTML),
+        (Method::Get, "/chat.css") => serve_static(request, "chat.css", "text/css; charset=utf-8", CHAT_CSS),
+        (Method::Get, "/chat-onboarding.js") => serve_static(request, "chat-onboarding.js", "text/javascript; charset=utf-8", ONBOARDING_JS),
+        (Method::Get, "/chat.js") => serve_static(request, "chat.js", "text/javascript; charset=utf-8", CHAT_JS),
+        (Method::Get, "/chat-import.js") => serve_static(request, "chat-import.js", "text/javascript; charset=utf-8", CHAT_IMPORT_JS),
+        (Method::Get, "/chat-quotas.js") => serve_static(request, "chat-quotas.js", "text/javascript; charset=utf-8", CHAT_QUOTAS_JS),
         (Method::Get, "/favicon.svg" | "/favicon.ico") => {
-            respond_text(request, 200, "image/svg+xml", FAVICON_SVG)
+            serve_static(request, "favicon.svg", "image/svg+xml", FAVICON_SVG)
         }
         (Method::Get, "/api/worktrees") => {
             let trees = crate::common::workspaces::list(&app.repo_root)?;
@@ -1034,8 +1088,11 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
     } else {
         "You are not allowed to edit files in this chat. If asked to change something, reply with the proposed change as text instead of making it."
     };
+    let plan_api_note = guard.turn.plan_slug.as_deref().map(|slug| format!(
+        "The current chat server is available as $AIC_CHAT_API and the selected checkout as $AIC_CHAT_CHECKOUT. Create plan tasks through HTTP POST to $AIC_CHAT_API/api/plans/{slug}/tasks with Content-Type: application/json and a body containing checkout, title and the current plan version. Read the current version with GET first, then use the updated version returned by each POST for the next task. Do not start another aic chat server."
+    ));
     let system = [Some(access_note), req.system.as_deref().filter(|s| !s.trim().is_empty()),
-        (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str())]
+        (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -1051,7 +1108,9 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         } else if !guard.turn.system.is_empty() {
             // A selected task may change between turns of a native session.
             // Re-send server-owned plan and access framing on every such turn.
-            prompt = format!("{access_note}\n\n{}\n\n{prompt}", guard.turn.system);
+            let current_plan = [Some(guard.turn.system.as_str()), plan_api_note.as_deref()]
+                .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+            prompt = format!("{access_note}\n\n{current_plan}\n\n{prompt}");
         }
         system_prompt = None;
     }
@@ -1076,6 +1135,11 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         read_only: !req.write,
         resume,
         stream: true,
+        env: vec![
+            ("AIC_CHAT_API".into(), app.api_url.clone()),
+            ("AIC_CHAT_CHECKOUT".into(), work_root.to_string_lossy().into_owned()),
+        ],
+        host_network: sandboxed,
         ..Default::default()
     };
 
@@ -1262,7 +1326,7 @@ mod tests {
     fn test_app(root: &Path) -> App {
         App {
             repo_root: root.to_path_buf(), config: RwLock::new(Config::default()),
-            chat_db: Mutex::new(open_chat_db(root).unwrap()), allowed_hosts: None,
+            chat_db: Mutex::new(open_chat_db(root).unwrap()), allowed_hosts: None, api_url: "http://127.0.0.1:7878".into(),
             models: Mutex::default(), quotas: Mutex::default(), active_runs: Mutex::default(),
         }
     }
@@ -1324,7 +1388,7 @@ done
         config.agents.get_mut("codex").unwrap().binary = binary.to_string_lossy().into_owned();
         for other in ["claude", "agy"] { if let Some(agent) = config.agents.get_mut(other) { agent.binary = "/missing-test/".to_string() + other; } }
         let app = Arc::new(App { repo_root:dir.path().to_path_buf(), config:RwLock::new(config),
-            chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None,
+            chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None, api_url:"http://127.0.0.1:7878".into(),
             models:Mutex::default(),quotas:Mutex::default(),active_runs:Mutex::default() });
         quota_snapshot(&app);
         refresh_quota(&app,"codex"); // In-flight read must not spawn another process.

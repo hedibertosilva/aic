@@ -45,6 +45,10 @@ pub struct RunOpts {
     /// Emit `stream-json` events instead of one JSON envelope. Only
     /// meaningful with `CliAgent::spawn_stream`.
     pub stream: bool,
+    /// Environment entries supplied only to this invocation.
+    pub env: Vec<(String, String)>,
+    /// Let a sandboxed invocation reach services on the host loopback.
+    pub host_network: bool,
 }
 
 /// A streaming run from `CliAgent::spawn_stream`.
@@ -212,6 +216,7 @@ impl CliAgent {
                 if let Some(cwd) = &opts.cwd {
                     cmd.current_dir(cwd);
                 }
+                cmd.envs(opts.env.iter().map(|(name, value)| (name, value)));
                 cmd
             }
         })
@@ -279,6 +284,7 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
                 workdir: cwd.to_path_buf(), access: Access::ReadOnly,
                 interactive: false, agent: self.binary_stem().to_string(),
                 args: args.iter().map(|a| a.to_string()).collect(), name: container.clone(),
+                env: Vec::new(), host_network: false,
             })?,
             None => { let mut cmd = Command::new(&self.binary); cmd.args(args).current_dir(cwd); cmd }
         };
@@ -331,6 +337,8 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
             interactive: false,
             agent: self.binary_stem().to_string(),
             args: argv.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+            env: opts.env.clone(),
+            host_network: opts.host_network,
             name,
         };
         sandbox.command(&spec)
