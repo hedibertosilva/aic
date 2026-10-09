@@ -168,13 +168,20 @@ test('sole ready agent still needs explicit confirmation; unavailable preference
     await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
     await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#pagent').inputValue(), ''); assert.equal(await page.locator('#psave').isDisabled(), true);
+    await page.keyboard.press('Escape'); await page.waitForSelector('#pdialog', { state: 'hidden' });
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
+    await page.waitForSelector('#pdialog[open]'); await page.mouse.click(4, 4);
+    await page.waitForSelector('#pdialog', { state: 'hidden' });
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
+    await page.waitForSelector('#pdialog[open]');
     await page.locator('#pagent').selectOption('codex'); await page.locator('#psave').click();
     assert.equal((await savedConversation(page)).participants[0].agent, 'codex');
     const file = path.join(f.root, 'config/config.toml'); fs.writeFileSync(file, fs.readFileSync(file, 'utf8').replace('default_agent=""', 'default_agent="claude"'));
     await page.locator('#new').click(); await emptyChat(page);
     await page.locator('#empty button').filter({ hasText: 'Add participant' }).click();
     await page.waitForSelector('#pdialog[open]');
-    assert.match(await page.locator('#ppreference').innerText(), /preferred agent \(claude\) is unavailable/);
+    assert.equal(await page.locator('#ppreference').count(), 0);
+    assert.match(await page.locator('.participantenvironment').innerText(), /Environment/);
     assert.equal(await page.locator('#readydialog').getAttribute('open'), null, 'ready alternative goes directly to selection');
     assert.equal((await savedConversation(page)).participants.length, 0);
     assert.equal(await page.locator('#pagent').inputValue(), '');
@@ -333,5 +340,39 @@ test('Environment indicator ignores unused agents, follows participants and keep
     await page.locator('#list .conv .open').filter({hasText:withoutClaude.title}).click();
     await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
     await page.locator('#quotabtn').click(); assert.equal(await page.locator('#quotas').isVisible(), true);
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('pasted text stays movable, rejects media and expands from the sent message', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    browser = await chromium.launch({headless:true}); const page = await browser.newPage();
+    const errors = []; page.on('pageerror', error => errors.push(error.message));
+    await page.goto(f.base); await page.waitForSelector('#chips .chip');
+    await page.locator('#input').fill('Existing text');
+    await page.locator('#input').evaluate(node => {
+      node.setSelectionRange(4, 4);
+      const data = new DataTransfer(); data.setData('text/plain', 'alpha\nbeta\ngamma');
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData:data, bubbles:true, cancelable:true}));
+    });
+    const marker = '[Pasted Text · +3 lines]';
+    assert.equal(await page.locator('#input').inputValue(), marker + '\nExisting text');
+    await page.locator('#input').fill('Before\n' + marker + '\nAfter');
+    await page.waitForTimeout(500); await page.reload(); await page.waitForSelector('#chips .chip');
+    assert.equal(await page.locator('#input').inputValue(), 'Before\n' + marker + '\nAfter', 'paste metadata survives reload');
+    await page.locator('#input').evaluate(node => {
+      const data = new DataTransfer(); data.items.add(new File(['image'], 'image.png', {type:'image/png'}));
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData:data, bubbles:true, cancelable:true}));
+    });
+    assert.equal(await page.locator('#input').inputValue(), 'Before\n' + marker + '\nAfter');
+    assert.match(await page.locator('#toast').innerText(), /Media can't be pasted/);
+    await page.locator('#send').click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.text === 'Before\nalpha\nbeta\ngamma\nAfter'));
+    assert.equal(await page.locator('.user .pastedtext').count(), 1);
+    assert.equal(await page.locator('.pastedtextpreview').innerText(), 'alpha');
+    assert.equal(await page.locator('.pastedtextcontent').isHidden(), true);
+    await page.locator('.pastedtexttoggle').click();
+    assert.equal(await page.locator('.pastedtextcontent').innerText(), 'beta\ngamma');
+    assert.deepEqual(errors, []);
   } finally { await browser?.close(); await f.close(); }
 });

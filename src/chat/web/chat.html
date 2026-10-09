@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>aic chat</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script>try{const theme=localStorage.getItem("aic-chat-theme");if(theme==="light"||theme==="dark")document.documentElement.dataset.theme=theme}catch{}</script>
 <link rel="stylesheet" href="/chat.css">
 </head>
 <body>
@@ -30,8 +31,9 @@
     <button id="menu" class="icon" aria-label="Conversations"></button>
     <span id="chips"></span>
     <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
-    <button id="readybtn" type="button">Environment</button>
+    <button id="readybtn" class="environmentbtn" type="button">Environment</button>
     <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
+    <button id="themebtn" class="icon" type="button"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
     <section id="quotas" aria-labelledby="quotatitle" hidden>
       <header><div class="quotatitles"><strong id="quotatitle">Usage limits</strong><span id="quotasubtitle">Provider limits and conversation usage</span></div><span class="grow"></span>
@@ -95,48 +97,66 @@
 
 <dialog id="pdialog" aria-labelledby="ptitle">
   <form id="pform" method="dialog">
-    <div class="phead">
-      <h2 id="ptitle">Add participant</h2>
-      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="lbl">Active</span><span class="knob"></span></button>
+    <div class="phead participanthead">
+      <div><h2 id="ptitle">Add Participant</h2><p>Identity, model and permissions for this conversation.</p></div>
+      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="track" aria-hidden="true"><span class="knob"></span></span><span class="lbl">Active</span></button>
     </div>
-    <div class="grid2">
-      <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
-      <label>Agent <select id="pagent"></select></label>
-      <label>Model <select id="pmodel"></select></label>
-      <label>Effort <select id="peffort"></select></label>
+
+    <div class="participantbody">
+      <div class="participantenvironment" role="note"><div><strong>Environment</strong><span>Review agent readiness and recovery commands for this checkout.</span></div><button type="button" id="penvironment" class="environmentbtn">Environment</button></div>
+      <section class="participantsection" aria-labelledby="pidentitytitle">
+        <h3 id="pidentitytitle">Identity and model</h3>
+        <div class="participantcard">
+          <div class="grid2">
+            <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
+            <label>Agent <select id="pagent"></select></label>
+            <label>Model <select id="pmodel"></select></label>
+            <label>Effort <select id="peffort"></select></label>
+          </div>
+        </div>
+      </section>
+
+      <section class="participantsection" aria-labelledby="pprofiletitle">
+        <h3 id="pprofiletitle">Profile and instructions</h3>
+        <div class="participantcard participantprofile">
+          <fieldset class="colours">
+            <legend>Colour</legend>
+            <span id="phues" role="radiogroup" aria-label="Colour"></span>
+          </fieldset>
+          <label>Role / instructions <textarea id="prole" rows="5" placeholder="Describe expected behavior, scope and constraints (Optional)" autocomplete="off"></textarea></label>
+        </div>
+      </section>
+
+      <section class="participantsection" aria-labelledby="paccesstitle">
+        <h3 id="paccesstitle">Repository access</h3>
+        <div class="participantcard participantaccess">
+          <fieldset>
+            <legend class="sr-only">File access</legend>
+            <div class="seg" role="radiogroup" aria-label="File access">
+              <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
+              <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
+            </div>
+            <p class="note warn" id="pwritewarn" role="note" hidden></p>
+          </fieldset>
+        </div>
+      </section>
     </div>
-    <p class="note" id="pquota"></p>
-    <p class="note" id="preadiness"></p>
-    <p class="note warn" id="ppreference" hidden></p>
-    <p class="note">A participant is an agent instance in this conversation. Its role and file access do not change the global agent configuration.</p>
-    <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
-    <fieldset class="colours">
-      <legend>Colour</legend>
-      <span id="phues" role="radiogroup" aria-label="Colour"></span>
-    </fieldset>
-    <label>Role / instructions <textarea id="prole" rows="5" placeholder="Describe expected behavior, scope and constraints (optional)" autocomplete="off"></textarea></label>
-    <fieldset>
-      <legend>File access</legend>
-      <div class="seg" role="radiogroup" aria-label="File access">
-        <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
-        <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
-      </div>
-      <p class="note warn" id="pwritewarn" hidden></p>
-    </fieldset>
-    <p class="note err" id="perror" hidden></p>
-    <button type="button" id="penvironment">View environment and recovery commands</button>
-    <div class="buttons" id="pbuttons">
-      <button type="button" id="premove" class="danger" hidden>Remove</button>
-      <span class="grow"></span>
-      <button type="button" id="pcancel">Cancel</button>
-      <button type="submit" id="psave" class="primary">Save</button>
-    </div>
-    <div id="pconfirm" hidden>
-      <p class="note warn" id="pconfirmtext"></p>
-      <div class="buttons">
+
+    <div class="participantfooter">
+      <p class="note err" id="perror" role="alert" hidden></p>
+      <div class="buttons" id="pbuttons">
+        <button type="button" id="premove" class="danger" hidden>Remove</button>
         <span class="grow"></span>
-        <button type="button" id="pkeep">Cancel</button>
-        <button type="button" id="pdoremove" class="danger">Remove</button>
+        <button type="button" id="pcancel">Cancel</button>
+        <button type="submit" id="psave" class="primary">Save</button>
+      </div>
+      <div id="pconfirm" hidden>
+        <p class="note warn" id="pconfirmtext"></p>
+        <div class="buttons">
+          <span class="grow"></span>
+          <button type="button" id="pkeep">Cancel</button>
+          <button type="button" id="pdoremove" class="danger">Remove</button>
+        </div>
       </div>
     </div>
   </form>
@@ -174,24 +194,45 @@
 
 <dialog id="cdialog" aria-labelledby="ctitle">
   <form id="cform" method="dialog">
-    <h2 id="ctitle">Configuration</h2>
-    <div class="grid2">
-      <label>Default agent for new chats <select id="cdefault"></select></label>
-      <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
-      <label>Sandbox <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
-      <label>Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+    <div class="confighead">
+      <div><h2 id="ctitle">Configuration</h2><p>Defaults for agents, permissions, and sandboxed runs.</p></div>
     </div>
-    <label class="check"><input type="checkbox" id="cskippermissions"> Automatically approve tool permissions in headless runs</label>
-    <p class="note">Plan and review settings (executor, reviewer, rounds, base branch) belong to <code>aic workflow</code>: edit them with <code>aic config</code>.</p>
-    <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
-    <label class="check"><input type="checkbox" id="cconfirmdefault"> Confirm changing the default agent for new chats</label>
-    <fieldset id="agentvisibility"><legend>Agents shown in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The effective default agent always stays visible. Hiding an agent keeps its configuration and existing participants.</p></fieldset>
-    <p class="note warn" id="cwarn" hidden></p>
-    <p class="note err" id="cerror" hidden></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="ccancel">Cancel</button>
-      <button type="submit" id="csave" class="primary">Save</button>
+
+    <div class="configbody">
+      <div class="configscope" role="note"><strong>Applies globally</strong><span>Saved to your aic configuration on this machine. Repository settings can override these defaults.</span></div>
+
+      <section class="configsection" aria-labelledby="cagentstitle">
+        <h3 id="cagentstitle">Agents</h3>
+        <div class="configcard configagents">
+          <label class="configfield">Default agent<select id="cdefault"></select><span class="fieldhint">Used for new chats; leave empty to choose each time.</span></label>
+          <label class="check configcheck"><input type="checkbox" id="cconfirmdefault"><span class="checkcopy"><strong>Confirm default changes</strong><small>Required when saving a different default agent.</small></span></label>
+          <fieldset id="agentvisibility"><legend>Visible in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The current and selected defaults always remain visible. Hiding an agent affects future choices only; its setup and existing participants stay unchanged.</p></fieldset>
+        </div>
+      </section>
+
+      <section class="configsection" aria-labelledby="cruntimetitle">
+        <h3 id="cruntimetitle">Execution</h3>
+        <div class="configcard configruntime">
+          <div class="grid2">
+            <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
+            <label>Sandbox runtime <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
+            <label class="configimage">Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+          </div>
+          <label class="check configcheck"><input type="checkbox" id="cskippermissions"><span class="checkcopy"><strong>Approve tool requests automatically</strong><small>Applies to headless runs. Enable only for repositories you trust.</small></span></label>
+        </div>
+      </section>
+
+      <div class="configworkflow" role="note"><strong>Workflow settings</strong><span>Executor, reviewer, rounds, and base branch are managed by <code>aic workflow</code>. Edit them with <code>aic config</code>.</span></div>
+    </div>
+
+    <div class="configfooter">
+      <p class="note warn" id="cwarn" hidden></p>
+      <p class="note err" id="cerror" role="alert" hidden></p>
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="ccancel">Cancel</button>
+        <button type="submit" id="csave" class="primary">Save</button>
+      </div>
     </div>
   </form>
 </dialog>
@@ -200,7 +241,7 @@
   <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
   <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <div class="readyfooter"><div class="readyobservation" role="note"><strong>Note</strong><span>Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</span></div>
+  <div class="readyfooter"><div class="readyobservation" role="note"><strong>Note</strong><span>Login, sandbox preparation and paid agent tests run in the terminal.<br>Refresh reads their results without making a provider call.</span></div>
     <p class="note err" id="readyerror" hidden></p>
     <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
   </div>

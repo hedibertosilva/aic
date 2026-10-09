@@ -16,6 +16,13 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(f.base, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#chips .chip');
+    const initialTheme = await page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    await page.locator('#themebtn').click();
+    const selectedTheme = initialTheme === 'dark' ? 'light' : 'dark';
+    assert.equal(await page.locator('html').getAttribute('data-theme'), selectedTheme);
+    assert.equal(await page.evaluate(() => localStorage.getItem('aic-chat-theme')), selectedTheme);
+    await page.reload({ waitUntil: 'domcontentloaded' }); await page.waitForSelector('#chips .chip');
+    assert.equal(await page.locator('html').getAttribute('data-theme'), selectedTheme, 'theme survives reload');
     await page.locator('#quotabtn').click();
     await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes('34%'));
     assert.equal(await page.locator('#quotarows > .quota').count(), 3);
@@ -41,7 +48,8 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('#quotabtn').getAttribute('aria-expanded'), 'false');
     await page.locator('#chips .chip').click(); await page.waitForSelector('#pdialog[open]');
-    assert.match(await page.locator('#pquota').innerText(), /80%/);
+    assert.equal(await page.locator('#pquota').count(), 0);
+    assert.match(await page.locator('.participantenvironment').innerText(), /Environment/);
     assert.equal(await page.locator('#psave').isEnabled(), true); await page.locator('#pcancel').click();
     await page.locator('#input').fill('hello fixture'); await page.locator('#send').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.agent === 'codex' && e.usage));
@@ -53,7 +61,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     assert.match(await page.locator('#quotas').innerText(), /cost n\/a/);
     await page.keyboard.press('Escape');
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('gemini');
-    assert.match(await page.locator('#pquota').innerText(), /Gemini is out of quota/);
+    assert.equal(await page.locator('#pquota').count(), 0);
     await page.locator('#psave').click();
     assert.equal(await page.locator('.card header .cardmeta').first().innerText(), 'Codex · 80%');
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('codex');

@@ -5,8 +5,11 @@
 const $ = (id) => document.getElementById(id);
 const KEY = "aic-chat-v2";
 const DRAFTS_KEY = "aic-chat-drafts";
+const DRAFT_PASTES_KEY = "aic-chat-draft-pastes";
+const THEME_KEY = "aic-chat-theme";
 let state = { convs: [], current: null, layout: "auto" };
 let drafts = {}; // conversation id -> unsent text, saved apart from the (big) state
+let draftPastes = {}; // conversation id -> text hidden behind movable paste markers
 let meta = { agents: [], details: {}, default: "", repo: "", sandboxed: false };
 let serverCheckout = "";
 let readiness = null, gitContext = null;
@@ -38,7 +41,7 @@ const ICONS = {
   menu: I('<path d="M4 7h16M4 12h16M4 17h16"/>'),
   plus: I('<path d="M12 5v14M5 12h14"/>'),
   down: I('<path d="M12 5v14M6 13l6 6 6-6"/>'),
-  send: I('<path d="M12 19V5M6 11l6-6 6 6"/>'),
+  send: I('<path d="M21 3 10.7 13.3M21 3l-6.5 18-3.8-7.7L3 9.5z"/>'),
   trash: I('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>'),
   expand: I('<path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/>'),
   collapse: I('<path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/>'),
@@ -57,6 +60,8 @@ const ICONS = {
   branch: I('<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M8 15h2a8 8 0 0 0 8-5"/>'),
   plan: I('<rect x="5" y="4" width="14" height="16" rx="1.5"/><path d="M9 9h6M9 13h6M9 17h4"/>'),
   history: I('<path d="M4 7v5h5"/><path d="M5.2 16.5A8 8 0 1 0 4.7 8"/><path d="M12 8v5l3 2"/>'),
+  sun: I('<circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
+  moon: I('<path d="M20.5 15.2A8.5 8.5 0 0 1 8.8 3.5 8.5 8.5 0 1 0 20.5 15.2z"/>'),
 };
 function icon(kind) {
   const t = document.createElement("template");
@@ -101,6 +106,10 @@ let remoteRevision = null, remoteConflict = false;
 function loadLocal() {
   try { state = Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}); } catch {}
   try { drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {}; } catch {}
+  const cachedPastes = state.pastedDrafts && typeof state.pastedDrafts === "object" ? state.pastedDrafts : {};
+  try { draftPastes = { ...cachedPastes, ...(JSON.parse(localStorage.getItem(DRAFT_PASTES_KEY)) || {}) }; } catch { draftPastes = cachedPastes; }
+  if (!draftPastes || typeof draftPastes !== "object" || Array.isArray(draftPastes)) draftPastes = {};
+  state.pastedDrafts = draftPastes;
   normalizeState();
 }
 // Run this after loading either cache or SQLite. Reconnectable runs stay
@@ -143,7 +152,9 @@ function save() {
 function saveSoon() { clearTimeout(save.t); save.t = setTimeout(save, 500); }
 function saveDrafts() {
   clearTimeout(saveDrafts.t); saveDrafts.t = 0;
+  state.pastedDrafts = draftPastes;
   storeItem(DRAFTS_KEY, JSON.stringify(drafts));
+  storeItem(DRAFT_PASTES_KEY, JSON.stringify(draftPastes));
   saveRemoteSoon();
 }
 function saveDraftsSoon() { clearTimeout(saveDrafts.t); saveDrafts.t = setTimeout(saveDrafts, 400); }
@@ -216,11 +227,37 @@ const busy = (c) => !!c && [...running.keys()].some((k) => k.startsWith(c.id + "
 const kindOf = (p) => meta.details?.[p.agent]?.kind || "claude";
 
 /* ---------- colours ---------- */
-// Eight well-separated hues, in the order new participants get them.
-const PALETTE = [210, 25, 135, 290, 350, 180, 55, 250];
+// One persistent hue identifies a participant. Each option has a deliberately
+// darker light-theme colour and a brighter dark-theme counterpart so names,
+// borders and avatars retain contrast when the OS theme changes.
+const PARTICIPANT_PALETTE = [
+  { hue: 210, name: "Blue",    light: "#1d4ed8", dark: "#60a5fa" },
+  { hue: 25,  name: "Orange",  light: "#c2410c", dark: "#fb923c" },
+  { hue: 135, name: "Green",   light: "#15803d", dark: "#4ade80" },
+  { hue: 290, name: "Purple",  light: "#7e22ce", dark: "#c084fc" },
+  { hue: 350, name: "Rose",    light: "#be123c", dark: "#fb7185" },
+  { hue: 180, name: "Teal",    light: "#0f766e", dark: "#2dd4bf" },
+  { hue: 55,  name: "Amber",   light: "#a16207", dark: "#facc15" },
+  { hue: 250, name: "Indigo",  light: "#4338ca", dark: "#818cf8" },
+  { hue: 195, name: "Cyan",    light: "#0e7490", dark: "#22d3ee" },
+  { hue: 320, name: "Fuchsia", light: "#a21caf", dark: "#e879f9" },
+  { hue: 90,  name: "Lime",    light: "#4d7c0f", dark: "#a3e635" },
+  { hue: 220, name: "Slate",   light: "#475569", dark: "#94a3b8" },
+];
+const PALETTE = PARTICIPANT_PALETTE.map((colour) => colour.hue);
 function hashHue(name) { let h = 0; for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; }
 const hueOf = (p) => (typeof p.hue === "number" ? p.hue : hashHue(p.name)); // old conversations: hash
 function hueFor(c, name) { const p = c.participants.find((x) => x.name === name); return p ? hueOf(p) : hashHue(name); }
+const paletteColour = (hue) => PARTICIPANT_PALETTE.find((colour) => colour.hue === hue);
+function applyParticipantColour(node, hue) {
+  node.style.setProperty("--h", hue);
+  const colour = paletteColour(hue);
+  if (colour) {
+    node.style.setProperty("--participant-light", colour.light);
+    node.style.setProperty("--participant-dark", colour.dark);
+  }
+  return node;
+}
 const hueGap = (a, b) => { const d = Math.abs(a - b) % 360; return Math.min(d, 360 - d); };
 function pickHue(c, except) {
   const used = c.participants.filter((p) => p !== except).map(hueOf);
@@ -235,7 +272,7 @@ function pickHue(c, except) {
 }
 function avatar(c, name, big) {
   const a = el("span", "avatar" + (big ? " big" : ""), name.charAt(0));
-  a.style.setProperty("--h", hueFor(c, name)); a.setAttribute("aria-hidden", "true");
+  applyParticipantColour(a, hueFor(c, name)); a.setAttribute("aria-hidden", "true");
   return a;
 }
 function writeBadge() {
@@ -345,18 +382,6 @@ async function refreshQuotas(agent, silent = false) {
   } catch (err) { quotaManualReads.clear(); if (!silent) toast("Couldn't refresh usage limits: " + err.message); }
   finally { quotaRefreshPending = false; renderQuotas(); }
 }
-function renderQuotaDialog() {
-  const agent = $("pagent").value, q = quotaOf(agent, quotaModel(agent, $("pmodel").value)), note = $("pquota");
-  if (!agent) { note.textContent = ""; return; }
-  const level = ChatQuotas.level(q), w = ChatQuotas.critical(q);
-  note.className = "note" + (level === "out" ? " err" : level === "warn" ? " warn" : "");
-  const quota = q?.state === "read_error" ? "Couldn't refresh quota · " + ChatQuotas.updated(q)
-    : level === "out" ? `${cap(agent)} is out of quota. Replies may fail · ${ChatQuotas.resetText(w)}`
-    : q?.windows?.length ? q.windows.map(w => `${w.label}: ${ChatQuotas.percent(w.used_pct) || "n/a"}`).join(" · ") + " · " + ChatQuotas.updated(q)
-    : ChatQuotas.summary(q || { reason: "No quota reading yet" });
-  note.textContent = quota + " · This conversation: " + (quotaConversation === (cur()?.id || "") ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…");
-  note.title = q?.source || "";
-}
 function renderQuotas() {
   const c = cur(), sameConversation = quotaConversation === (c?.id || "");
   const rows = $("quotarows"), focused = document.activeElement?.dataset.quotaFocus;
@@ -429,7 +454,6 @@ function renderQuotas() {
   });
   $("quotaunknown").hidden = !c?.log.some(e => e.from !== "you" && !e.agent);
   if (focused) [...rows.querySelectorAll("[data-quota-focus]")].find(e => e.dataset.quotaFocus === focused)?.focus();
-  if ($("pdialog").open) renderQuotaDialog();
   if (!sameConversation && !quotaRequest && meta.agents.length) fetchQuotaState();
 }
 
@@ -902,7 +926,7 @@ function convRow(c) {
   const open = el("button", "open"); open.type = "button";
   open.appendChild(el("span", "title", c.title));
   const sub = el("span", "sub");
-  c.participants.slice(0, 8).forEach((p) => { const d = el("span", "dot"); d.style.setProperty("--h", hueOf(p)); d.title = p.name; sub.appendChild(d); });
+  c.participants.slice(0, 8).forEach((p) => { const d = applyParticipantColour(el("span", "dot"), hueOf(p)); d.title = p.name; sub.appendChild(d); });
   if (busy(c)) sub.appendChild(el("span", "working dots", "working"));
   open.appendChild(sub);
   if (c.id === state.current) open.setAttribute("aria-current", "true");
@@ -1014,7 +1038,7 @@ function renderBar() {
     const chip = el("button", "chip" + (p.inactive ? " off" : "")); chip.type = "button";
     const chipUsage = ChatQuotas.critical(quotaOf(p.agent, quotaModel(p.agent, p.model)))?.used_pct;
     if (ChatQuotas.numeric(chipUsage) && chipUsage > 80) chip.classList.add("high-usage");
-    chip.style.setProperty("--h", hueFor(c, p.name));
+    applyParticipantColour(chip, hueFor(c, p.name));
     chip.title = (p.role ? p.role + "\n\n" : "") + (p.inactive ? p.name + " — inactive. " : "") + "Edit " + p.name;
     if (p.inactive) chip.setAttribute("aria-label", p.name + ", inactive");
     const identity = el("span", "chipidentity");
@@ -1106,7 +1130,7 @@ function collapseAll(c) {
 }
 function card(c, e) {
   const d = el("article", "card");
-  d.style.setProperty("--h", hueFor(c, e.from));
+  applyParticipantColour(d, hueFor(c, e.from));
   const head = el("header"), status = el("div", "status"), body = el("div", "body md"), acts = el("div"), foot = el("footer");
   d.append(head, status, body, acts, foot);
   d.onclick = () => { if (d.classList.contains("folded")) toggleExpand(c, e); };
@@ -1127,7 +1151,7 @@ function paintCard(c, e) {
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
   if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
-    k.card.style.setProperty("--h", hueFor(c, e.from));
+    applyParticipantColour(k.card, hueFor(c, e.from));
     k.head.textContent = "";
     const identity = el("span", "cardidentity");
     identity.appendChild(quotaStatusDot(quotaStatus, "carddot"));
@@ -1212,17 +1236,55 @@ setInterval(() => {
   document.querySelectorAll("[data-tick]").forEach((n) => { n.textContent = Math.round((Date.now() - Number(n.dataset.tick)) / 1000) + "s"; });
 }, 1000);
 
+function pastedTextBox(paste) {
+  const box = el("div", "pastedtext");
+  const label = el("div", "pastedtextlabel", `[Pasted Text · +${paste.lines} lines]`);
+  const lines = paste.text.split("\n");
+  const preview = el("pre", "pastedtextpreview", lines.shift() || "");
+  const content = el("pre", "pastedtextcontent", lines.join("\n")); content.hidden = true;
+  const toggle = el("button", "pastedtexttoggle", "Expand"); toggle.type = "button";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.hidden = !lines.length;
+  toggle.onclick = () => {
+    const expanded = content.hidden;
+    content.hidden = !expanded;
+    toggle.textContent = expanded ? "Collapse" : "Expand";
+    toggle.setAttribute("aria-expanded", String(expanded));
+  };
+  box.append(label, preview, content, toggle);
+  return box;
+}
+function renderUserMessage(node, e) {
+  const pastes = Array.isArray(e.pasted) ? e.pasted
+    .filter(paste => Number.isSafeInteger(paste.start) && Number.isSafeInteger(paste.end)
+      && Number.isSafeInteger(paste.lines) && paste.lines > 0
+      && paste.start >= 0 && paste.end >= paste.start && paste.end <= e.text.length)
+    .sort((a, b) => a.start - b.start)
+    .map(paste => ({ ...paste, text: e.text.slice(paste.start, paste.end) })) : [];
+  if (!pastes.length) {
+    const sk = skillOf(e.text);
+    if (sk) {
+      const badge = el("span", "badge skill", "/" + sk); badge.title = knownSkill(sk)?.description || "skill";
+      node.append(badge, document.createTextNode(e.text.slice(sk.length + 1)));
+    } else node.textContent = e.text;
+    return;
+  }
+  let offset = 0;
+  for (const paste of pastes) {
+    if (paste.start < offset) continue;
+    if (paste.start > offset) node.appendChild(document.createTextNode(e.text.slice(offset, paste.start)));
+    node.appendChild(pastedTextBox(paste));
+    offset = paste.end;
+  }
+  if (offset < e.text.length) node.appendChild(document.createTextNode(e.text.slice(offset)));
+}
 function userBubble(c, e) {
   const u = el("div", "user");
   const fill = () => {
     u.textContent = "";
     if (e.to) u.appendChild(el("span", "to", "TO · " + e.to.join(", ")));
     const text = el("div", "text");
-    const sk = skillOf(e.text);
-    if (sk) {
-      const s = el("span", "badge skill", "/" + sk); s.title = knownSkill(sk)?.description || "skill";
-      text.append(s, document.createTextNode(e.text.slice(sk.length + 1)));
-    } else text.textContent = e.text;
+    renderUserMessage(text, e);
     u.appendChild(text);
     if (e.edited) u.appendChild(el("span", "edited", "edited"));
     const tools = el("span", "hovertools tools");
@@ -1364,7 +1426,7 @@ function emptyState(c) {
     : "Ask anything about this repository. Add a participant (even a second Claude) to compare answers side by side."));
   c.participants.forEach((p) => {
     const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
-    b.style.setProperty("--h", hueOf(p));
+    applyParticipantColour(b, hueOf(p));
     b.append(avatar(c, p.name, true), el("span", "name", p.name));
     const tags = el("span"); tags.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     if (p.write) { tags.append(" "); tags.appendChild(writeBadge()); }
@@ -1413,7 +1475,7 @@ function renderComposer() {
     active(c).forEach((p) => {
       const on = sel.includes(p);
       const b = el("button", "pill"); b.type = "button";
-      b.style.setProperty("--h", hueOf(p));
+      applyParticipantColour(b, hueOf(p));
       b.setAttribute("aria-pressed", String(on));
       b.appendChild(el("span", "dot"));
       b.appendChild(el("span", "", p.name));
@@ -1592,7 +1654,8 @@ async function launch(c, targets, userText, to, opts = {}) {
   c.updated = Date.now();
   if (userText) {
     const first = !c.log.some((e) => e.from === "you");
-    c.log.push({ from: "you", round, text: userText, t0: Date.now(), ...(to ? { to } : {}), ...(opts.edited ? { edited: true } : {}) });
+    c.log.push({ from: "you", round, text: userText, t0: Date.now(), ...(to ? { to } : {}),
+      ...(opts.edited ? { edited: true } : {}), ...(opts.pasted?.length ? { pasted: opts.pasted } : {}) });
     if (first && !c.renamed) c.title = userText.slice(0, 48);
   }
   const jobs = targets
@@ -1812,7 +1875,82 @@ async function turn(c, { p, text: prompt, entry, planRun }) {
 }
 
 /* ---------- input ---------- */
-function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
+const PASTE_MARKER_SOURCE = String.raw`\[Pasted Text · \+(\d+) lines\]`;
+const pasteMarker = lines => `[Pasted Text · +${lines} lines]`;
+function blocksFor(c) {
+  if (!c) return [];
+  if (!Array.isArray(draftPastes[c.id])) draftPastes[c.id] = [];
+  return draftPastes[c.id];
+}
+function insertPasteMarker(c, marker, block) {
+  const input = $("input"), value = input.value;
+  const start = input.selectionStart, end = input.selectionEnd;
+  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
+  let lineEnd = value.indexOf("\n", end); if (lineEnd < 0) lineEnd = value.length;
+  const head = value.slice(0, lineStart);
+  const sameLineText = value.slice(lineStart, start) + value.slice(end, lineEnd);
+  const tail = value.slice(lineEnd);
+  let replacement = marker, caret = head.length + marker.length + 1;
+  if (sameLineText) replacement += "\n" + sameLineText + tail;
+  else if (tail.startsWith("\n")) replacement += tail;
+  else replacement += "\n" + tail;
+  input.value = head + replacement;
+  input.setSelectionRange(caret, caret);
+  if (block) blocksFor(c).push(block);
+  hist.idx = -1; onInput();
+}
+function expandPastedText(c, displayText) {
+  const available = blocksFor(c), used = new Set();
+  const pasted = [], re = new RegExp(PASTE_MARKER_SOURCE, "g");
+  let output = "", offset = 0, match;
+  while ((match = re.exec(displayText))) {
+    output += displayText.slice(offset, match.index);
+    let index = available.findIndex((block, i) => !used.has(i) && block.marker === match[0]);
+    if (index < 0) index = available.findIndex(block => block.marker === match[0]);
+    const block = index >= 0 ? available[index] : null;
+    if (block) {
+      used.add(index);
+      const start = output.length;
+      output += block.text;
+      pasted.push({ start, end: output.length, lines: block.lines });
+    } else output += match[0];
+    offset = match.index + match[0].length;
+  }
+  output += displayText.slice(offset);
+  return { text: output, pasted };
+}
+function transferHasMedia(transfer) {
+  return !!transfer?.files?.length || [...(transfer?.items || [])].some(item => item.kind === "file");
+}
+function pasteFromTransfer(event, transfer) {
+  const c = cur(); if (!c) return;
+  event.preventDefault();
+  if (transferHasMedia(transfer)) { toast("Media can't be pasted into chat."); return; }
+  const text = transfer?.getData("text/plain") || "";
+  if (!text) { toast("Only plain text can be pasted into chat."); return; }
+  const knownMarker = new RegExp(`^${PASTE_MARKER_SOURCE}$`).exec(text);
+  if (knownMarker && blocksFor(c).some(block => block.marker === text)) {
+    insertPasteMarker(c, text);
+    return;
+  }
+  const normalized = text.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n").length, marker = pasteMarker(lines);
+  insertPasteMarker(c, marker, { id: crypto.randomUUID(), marker, text: normalized, lines });
+}
+function normalizeMarkerLine(input) {
+  const start = input.selectionStart;
+  const lineStart = input.value.lastIndexOf("\n", start - 1) + 1;
+  let lineEnd = input.value.indexOf("\n", start); if (lineEnd < 0) lineEnd = input.value.length;
+  const line = input.value.slice(lineStart, lineEnd), re = new RegExp(PASTE_MARKER_SOURCE, "g");
+  const markers = [...line.matchAll(re)].map(match => match[0]);
+  if (!markers.length || markers.length === 1 && line === markers[0]) return;
+  const rest = line.replace(re, "").trim();
+  const replacement = markers.join("\n") + (rest ? "\n" + rest : "");
+  input.value = input.value.slice(0, lineStart) + replacement + input.value.slice(lineEnd);
+  const caret = lineStart + replacement.length;
+  input.setSelectionRange(caret, caret);
+}
+function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; delete draftPastes[c.id]; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
 let sendPending = false;
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -1859,11 +1997,12 @@ $("form").onsubmit = async (e) => {
     if (!(await prepareSend(c, ready))) return;
     clearInput(c); launch(c, ready, null, null, { preflightDone: true }); return;
   }
-  const sk = skillOf(body), problem = sk && skillProblem(sk, targets);
+  const expanded = expandPastedText(c, body);
+  const sk = skillOf(expanded.text), problem = sk && skillProblem(sk, targets);
   if (problem) { toast(problem); return; }
   if (!(await prepareSend(c, targets))) return;
   clearInput(c);
-  launch(c, targets, body, to, { preflightDone: true });
+  launch(c, targets, expanded.text, to, { preflightDone: true, pasted: expanded.pasted });
   } finally { sendPending = false; }
 };
 
@@ -1975,6 +2114,7 @@ function autosize() {
 }
 function onInput() {
   const t = $("input");
+  normalizeMarkerLine(t);
   // Capitalise the first letter typed; @mentions and /skills start with a symbol, so they are left alone.
   if (/^\p{Ll}/u.test(t.value)) {
     const { selectionStart: a, selectionEnd: b } = t;
@@ -1986,6 +2126,9 @@ function onInput() {
   if (c) { drafts[c.id] = $("input").value; saveDraftsSoon(); syncPillsFromText(c); renderComposer(); }
 }
 $("input").oninput = () => { hist.idx = -1; onInput(); };
+$("input").onpaste = event => pasteFromTransfer(event, event.clipboardData);
+$("input").ondragover = event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "copy"; };
+$("input").ondrop = event => pasteFromTransfer(event, event.dataTransfer);
 $("input").onblur = acClose;
 $("input").onclick = acUpdate;
 
@@ -2030,11 +2173,9 @@ async function openDialog(p) {
   try { await refreshReadiness(c); } catch { toast('Environment status unavailable. Check Environment before adding an agent.'); }
   if (cur() !== c) return;
   editing = p || null;
-  $("ptitle").textContent = p ? "Edit " + p.name : "Add participant";
-  $("psave").textContent = p ? "Save" : "Add";
+  $("ptitle").textContent = p ? "Edit Participant" : "Add Participant";
+  $("psave").textContent = "Save";
   $("pname").value = p ? p.name : "";
-  $('ppreference').hidden = !!p || !meta.default || ChatOnboarding.ready(readiness, meta.default);
-  $('ppreference').textContent = 'Your preferred agent (' + meta.default + ') is unavailable. Choose a ready agent for this conversation. The global preference stays unchanged.';
   updateAgentOptions(p ? p.agent : defaultAgent());
   updateParticipantReadiness();
   dlgModel = p?.model || ""; dlgEffort = p?.effort || "";
@@ -2061,11 +2202,7 @@ function updateDialog() {
     fillSelect("peffort", live?.efforts?.length ? live.efforts : EFFORTS[kind] || [], dlgEffort, d.effort);
   };
   suggest();
-  renderQuotaDialog();
   fetchModels(agent).then((live) => { if ($("pagent").value === agent) suggest(live); });
-  // A new participant, or an existing one moved to another agent, starts a
-  // fresh native session. Explain how its first prompt is seeded.
-  $("pagentwarn").hidden = !!editing && editing.agent === agent;
   const w = $("pwritewarn");
   w.hidden = access() !== "write";
   w.replaceChildren(icon("alert"), el("span", "", `Can create, change and delete files in ${meta.repo || "this repository"}, following the permission mode in your config.`));
@@ -2074,9 +2211,10 @@ function updateDialog() {
   const taken = new Set(c ? c.participants.filter((q) => q !== editing).map(hueOf) : []);
   options.forEach((h) => {
     const b = el("button", "hue"); b.type = "button";
-    b.style.setProperty("--h", h);
+    applyParticipantColour(b, h);
     b.setAttribute("role", "radio"); b.setAttribute("aria-checked", String(h === dlgHue));
-    b.setAttribute("aria-label", `Hue ${h}` + (taken.has(h) ? " (used by someone else)" : ""));
+    const colour = paletteColour(h);
+    b.setAttribute("aria-label", (colour?.name || `Hue ${h}`) + (taken.has(h) ? " (used by someone else)" : ""));
     b.title = taken.has(h) ? "Used by someone else" : "";
     b.tabIndex = h === dlgHue ? 0 : -1;
     b.onclick = () => { dlgHue = h; updateDialog(); hues.querySelector('[aria-checked="true"]').focus(); };
@@ -2090,12 +2228,17 @@ function updateDialog() {
   });
 }
 function dialogError(msg) { $("perror").textContent = msg; $("perror").hidden = false; }
-$("pmodel").onchange = () => { dlgModel = $("pmodel").value; renderQuotaDialog(); }; // the limit that applies depends on the model
+$("pmodel").onchange = () => { dlgModel = $("pmodel").value; };
 $("peffort").onchange = () => { dlgEffort = $("peffort").value; };
 $("pagent").onchange = () => { dlgModel = ""; dlgEffort = ""; updateDialog(); }; // each agent has its own models
 document.querySelectorAll('input[name="paccess"]').forEach((r) => { r.onchange = updateDialog; });
 $("pname").oninput = () => { $("pname").value = $("pname").value.replace(/\s+/g, "-").replace(/[^\w-]/g, ""); };
 $("pcancel").onclick = () => $("pdialog").close();
+// Escape uses the dialog's native cancel behaviour. A click on its backdrop
+// targets the dialog itself, rather than the form contained by it.
+$("pdialog").addEventListener("click", (event) => {
+  if (event.target === event.currentTarget) $("pdialog").close();
+});
 // The switch in the dialog header pauses a participant: it keeps its settings and history, and gets no new
 // messages. Like the other fields it only takes effect on Save.
 let dlgInactive = false;
@@ -2226,6 +2369,9 @@ async function openConfig() {
   }
 }
 $("ccancel").onclick = () => $("cdialog").close();
+$('cdialog').addEventListener('click', event => {
+  if (event.target === event.currentTarget && !configSaving) $('cdialog').close();
+});
 $('cdialog').addEventListener('close', () => { settingsDraft = null; });
 $('cdialog').addEventListener('cancel', e => { if (configSaving) e.preventDefault(); });
 $('cdefault').addEventListener('change', renderAgentVisibility);
@@ -2290,6 +2436,26 @@ $("copyrepo").onclick = () => copyText(meta.repo, $("copyrepo"));
 $("addbtn").onclick = () => openDialog(null);
 $("configbtn").appendChild(icon("settings"));
 $("configbtn").onclick = openConfig;
+const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+function currentTheme() {
+  return document.documentElement.dataset.theme || (systemTheme.matches ? 'dark' : 'light');
+}
+function renderThemeButton() {
+  const next = currentTheme() === 'dark' ? 'light' : 'dark';
+  setIcon($("themebtn"), next === 'dark' ? 'moon' : 'sun');
+  const label = `Switch to ${next} mode`;
+  $("themebtn").setAttribute('aria-label', label);
+  $("themebtn").title = label;
+}
+renderThemeButton();
+systemTheme.addEventListener?.('change', () => { if (!document.documentElement.dataset.theme) renderThemeButton(); });
+$("themebtn").onclick = () => {
+  const theme = currentTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(THEME_KEY, theme); } catch {}
+  renderThemeButton();
+  announce(`${cap(theme)} mode enabled`);
+};
 $("quotabtn").appendChild(icon("meter"));
 $("quotarefresh").appendChild(icon("retry"));
 $("quotaclose").appendChild(icon("close"));
@@ -2332,7 +2498,11 @@ document.addEventListener("keydown", (e) => {
     const saved = await res.json();
     if (Number.isSafeInteger(saved.revision)) remoteRevision = saved.revision;
     if (saved.state && typeof saved.state === "object" && Array.isArray(saved.state.convs)) {
+      const localPastes = draftPastes;
       state = Object.assign({ convs: [], current: null, layout: "auto" }, saved.state);
+      const remotePastes = state.pastedDrafts && typeof state.pastedDrafts === "object" && !Array.isArray(state.pastedDrafts) ? state.pastedDrafts : {};
+      draftPastes = { ...remotePastes, ...localPastes };
+      state.pastedDrafts = draftPastes;
       const localDrafts = drafts;
       drafts = saved.drafts && typeof saved.drafts === "object" ? saved.drafts : {};
       // Keep unsent local work after a version conflict or interrupted save.
@@ -2689,13 +2859,14 @@ function readinessDot(state) {
 }
 const readinessValue = value => value === 'ready_sandbox' ? 'ready' : value;
 function renderEnvironmentStatus() {
-  const button = $('readybtn');
   const status = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
-  button.dataset.state = status.state;
   const description = status.state === 'unknown' ? 'Environment status unknown' : status.state === 'blocked' ? 'Environment blocked' : status.pending ? 'Environment: ' + status.pending + (status.pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
-  button.textContent = 'Environment';
-  button.setAttribute('aria-label', description);
-  button.title = description;
+  for (const button of [$('readybtn'), $('penvironment')]) {
+    button.dataset.state = status.state;
+    button.textContent = 'Environment';
+    button.setAttribute('aria-label', description);
+    button.title = description;
+  }
 }
 function renderReadiness() {
   const rows = $('readyrows'); rows.textContent = '';
@@ -2737,8 +2908,7 @@ $('readyclose').onclick = () => $('readydialog').close();
 $('readydialog').addEventListener('close', () => { (environmentFocus?.isConnected ? environmentFocus : $('readybtn')).focus(); });
 $('readyrefresh').onclick = async () => { $('readyrefresh').disabled = true; $('readyerror').hidden = true; try { await refreshReadiness(cur(), { full: true, catalog: true }); renderReadiness(); } catch (e) { $('readyerror').textContent = e.message; $('readyerror').hidden = false; } finally { $('readyrefresh').disabled = false; } };
 function updateParticipantReadiness() {
-  const agent = $('pagent').value, a = readiness?.agents?.find(a => a.agent === agent);
-  $('preadiness').textContent = a ? a.agent + ' · ' + a.readiness + ' · ' + a.reason + (a.action ? ' · Next: ' + a.action : '') : 'Choose a ready agent. Environment shows verification and recovery commands.';
+  const agent = $('pagent').value;
   $('psave').disabled = (!editing || editing.agent !== agent) && !ChatOnboarding.ready(readiness, agent);
 }
 $('pagent').addEventListener('change', updateParticipantReadiness);
@@ -2747,7 +2917,7 @@ function renderAgentVisibility() {
   if (!settingsDraft) return;
   const defaults = new Set([meta.default, $('cdefault').value].filter(Boolean));
   for (const name of meta.agents) {
-    const label = el('label', 'check'), box = document.createElement('input'); box.type = 'checkbox';
+    const label = el('label', 'check configcheck'), box = document.createElement('input'); box.type = 'checkbox';
     if (defaults.has(name)) settingsDraft.hiddenAgents.delete(name);
     box.checked = !settingsDraft.hiddenAgents.has(name);
     box.disabled = defaults.has(name);
@@ -2755,7 +2925,10 @@ function renderAgentVisibility() {
       if (defaults.has(name)) return;
       if (box.checked) settingsDraft.hiddenAgents.delete(name); else settingsDraft.hiddenAgents.add(name);
     };
-    label.append(box, document.createTextNode(cap(name) + (defaults.has(name) ? ' — default' : ''))); rows.append(label);
+    const copy = el('span', 'checkcopy'), title = el('strong', '', cap(name));
+    copy.append(title);
+    if (defaults.has(name)) copy.append(el('small', '', 'Default · always visible'));
+    label.append(box, copy); rows.append(label);
   }
 }
 async function prepareSend(c, targets) {
@@ -2815,10 +2988,9 @@ $('worktreeconfirm').onclick = async () => {
 function updateAgentOptions(selected = $('pagent').value) {
   const select = $('pagent'); select.textContent = '';
   const placeholder = el('option', '', 'Choose a ready agent'); placeholder.value = ''; select.append(placeholder);
-  for (const a of meta.agents.filter(a => a === meta.default || !(state.hiddenAgents || []).includes(a) || a === selected || a === editing?.agent)) {
-    const available = ChatOnboarding.ready(readiness, a);
-    const option = el('option', '', cap(a) + (available ? ' — ready' : ' — unavailable')); option.value = a;
-    option.disabled = !available && a !== editing?.agent; select.append(option);
+  for (const a of meta.agents.filter(a => ChatOnboarding.ready(readiness, a)
+    && (a === meta.default || !(state.hiddenAgents || []).includes(a) || a === selected || a === editing?.agent))) {
+    const option = el('option', '', cap(a)); option.value = a; select.append(option);
   }
-  select.value = selected;
+  select.value = [...select.options].some(option => option.value === selected) ? selected : '';
 }
