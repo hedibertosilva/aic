@@ -433,7 +433,7 @@ function renderQuotas() {
     }
     row.appendChild(quota);
     const consumption = el("div", "sub quota-consumption");
-    consumption.append(el("span", "", "This conversation"), el("strong", "", sameConversation ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…"));
+    consumption.append(el("span", "quota-consumption-label", "This conversation"), el("strong", "", sameConversation ? ChatQuotas.consumptionText(quotaData.consumption[agent]) : "Loading usage…"));
     consumption.title = "Spent by aic in this conversation, including regenerated and deleted replies"; row.appendChild(consumption);
     details.hidden = !quotaExpanded.has(agent);
     (q.windows || []).forEach(window => {
@@ -685,13 +685,16 @@ function openRename(c) {
   $("rgen").disabled = !def || !hasText;
   $("rgen").title = hasText ? "" : "Send a message first";
   who.disabled = !def;
-  setGenLabel($("rgen"), "Generate title");
+  setGenLabel($("rgen"), "Generate");
   renderRenameCount();
   $("rdialog").showModal();
   $("rinput").focus(); $("rinput").select();
 }
 $("rinput").oninput = renderRenameCount;
 $("rcancel").onclick = () => $("rdialog").close();
+$("rdialog").onclick = (event) => {
+  if (event.target === event.currentTarget) $("rdialog").close();
+};
 $("rdialog").onclose = () => { titleCtl?.abort(); titleCtl = null; renamingConv = null; };
 $("rgen").onclick = async () => {
   const c = renamingConv, p = c?.participants.find((q) => q.name === $("rwho").value);
@@ -710,7 +713,7 @@ $("rgen").onclick = async () => {
   } catch (err) {
     if (err.name === "AbortError") return;
     renameError("Couldn't generate a title: " + (err.message || err));
-    setGenLabel(btn, "Generate title");
+    setGenLabel(btn, "Generate");
   } finally {
     if (titleCtl === ctl) titleCtl = null;
     btn.disabled = false; $("rwho").disabled = false; $("rinput").readOnly = false;
@@ -730,11 +733,14 @@ let deleting = null;
 function removeConv(c) {
   if (busy(c)) { toast("Stop its replies before deleting it."); return; }
   deleting = c;
-  $("dtext").textContent = `This will delete “${c.title}” and all its messages. You can undo right after.`;
+  $("dtext").textContent = c.title;
   $("ddialog").showModal();
   $("dcancel").focus();
 }
 $("dcancel").onclick = () => $("ddialog").close();
+$("ddialog").onclick = (event) => {
+  if (event.target === event.currentTarget) $("ddialog").close();
+};
 $("ddialog").onclose = () => { deleting = null; };
 $("ddelete").onclick = () => {
   const c = deleting;
@@ -1409,44 +1415,84 @@ const SUGGESTIONS = [
 ];
 function emptyState(c) {
   const d = el("div"); d.id = "empty";
-  const importButton = el("button", "person add");
+  const importButton = el("button", "emptyaction importaction");
   importButton.type = "button"; importButton.onclick = chooseImport;
-  importButton.append(icon("download"), el("span", "", "Import conversation"), el("small", "", ".json · .md"));
-  const people = el("div", "people");
+  importButton.append(icon("download"));
+  const importCopy = el("span", "emptyactioncopy");
+  importCopy.append(el("strong", "", "Import conversation"), el("small", "", "Continue from an aic .json or .md file"));
+  importButton.appendChild(importCopy);
+
+  const hero = el("header", "emptyhero");
+  const mark = el("span", "emptymark"); mark.appendChild(icon("spark"));
+  hero.appendChild(mark);
+
   if (!meta.agents.length) {
-    d.append(el("h1", "", "No agents configured"), el("p", "", "Add one with `aic config` and reload this page."));
-    people.appendChild(importButton); d.appendChild(people);
+    hero.append(el("span", "emptyeyebrow", "New conversation"), el("h1", "", "No agents configured"),
+      el("p", "", "Add an agent with aic config, then reload this page — or import an existing conversation."));
+    const actions = el("div", "emptyactions"); actions.appendChild(importButton);
+    d.append(hero, actions);
     return d;
   }
-  if (!c) { people.appendChild(importButton); d.appendChild(people); return d; }
+  if (!c) {
+    hero.append(el("span", "emptyeyebrow", "Conversation"), el("h1", "", "Nothing open"),
+      el("p", "", "Choose a conversation from the sidebar or import one from a file."));
+    const actions = el("div", "emptyactions"); actions.appendChild(importButton);
+    d.append(hero, actions);
+    return d;
+  }
+
   const group = c.participants.length > 1;
-  d.appendChild(el("h1", "", group ? "Talk to several agents at once" : "Start a conversation"));
-  d.appendChild(el("p", "", group
-    ? "Your message goes to everyone in “To:”. Once they've answered, you can ask them to comment on each other's replies."
-    : "Ask anything about this repository. Add a participant (even a second Claude) to compare answers side by side."));
-  c.participants.forEach((p) => {
-    const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
-    applyParticipantColour(b, hueOf(p));
-    b.append(avatar(c, p.name, true), el("span", "name", p.name));
-    const tags = el("span"); tags.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
-    if (p.write) { tags.append(" "); tags.appendChild(writeBadge()); }
-    b.appendChild(tags);
-    if (p.role) b.appendChild(el("span", "role", p.role));
-    b.onclick = () => openDialog(p);
-    people.appendChild(b);
-  });
-  const add = el("button", "person add"); add.type = "button";
-  add.append(icon("plus"), el("span", "", "Add participant"));
+  hero.append(el("span", "emptyeyebrow", group ? `${c.participants.length} participants ready` : "New conversation"),
+    el("h1", "", group ? "Bring the right perspectives together" : "What do you want to work on?"),
+    el("p", "", group
+      ? "Send one prompt to the selected participants, compare their replies, then let them review each other."
+      : c.participants.length
+        ? `Start with a question for ${c.participants[0].name}, or add another participant for a second perspective.`
+        : "Choose an agent for this conversation, or bring in a conversation you already started."));
+  d.appendChild(hero);
+
+  const add = el("button", "emptyaction primaryaction"); add.type = "button";
+  add.appendChild(icon("plus"));
+  const addCopy = el("span", "emptyactioncopy");
+  addCopy.append(el("strong", "", "Add participant"), el("small", "", c.participants.length ? "Add another point of view" : "Choose an agent, model and access"));
+  add.appendChild(addCopy);
   add.onclick = () => openDialog(null);
-  people.append(add, importButton);
-  d.appendChild(people);
+
+  const actions = el("div", "emptyactions"); actions.append(add, importButton);
+  d.appendChild(actions);
+
+  if (c.participants.length) {
+    const participantSection = el("section", "emptyparticipants");
+    const participantHeading = el("div", "emptysectiontitle");
+    participantHeading.append(el("span", "", "In this conversation"), el("small", "", "Select a participant to edit"));
+    const people = el("div", "people");
+    c.participants.forEach((p) => {
+      const b = el("button", "person"); b.type = "button"; b.title = "Edit " + p.name;
+      applyParticipantColour(b, hueOf(p));
+      const identity = el("span", "personidentity");
+      identity.append(avatar(c, p.name, true), el("span", "name", p.name));
+      b.appendChild(identity);
+      const tags = el("span", "persontags"); tags.appendChild(el("span", "badge", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
+      if (p.write) tags.appendChild(writeBadge());
+      b.appendChild(tags);
+      if (p.role) b.appendChild(el("span", "role", p.role));
+      b.onclick = () => openDialog(p);
+      people.appendChild(b);
+    });
+    participantSection.append(participantHeading, people);
+    d.appendChild(participantSection);
+  }
+
+  const promptSection = el("section", "emptyprompts");
+  promptSection.appendChild(el("div", "emptysectiontitle", "Try a starting point"));
   const sug = el("div", "suggest");
   SUGGESTIONS.forEach((s) => {
-    const b = el("button", "", s); b.type = "button";
+    const b = el("button"); b.type = "button";
+    b.append(icon("send"), el("span", "", s));
     b.onclick = () => { const i = $("input"); i.value = s; autosize(); i.focus(); onInput(); };
     sug.appendChild(b);
   });
-  d.appendChild(sug);
+  promptSection.appendChild(sug); d.appendChild(promptSection);
   return d;
 }
 
@@ -2173,7 +2219,7 @@ async function openDialog(p) {
   try { await refreshReadiness(c); } catch { toast('Environment status unavailable. Check Environment before adding an agent.'); }
   if (cur() !== c) return;
   editing = p || null;
-  $("ptitle").textContent = p ? "Edit Participant" : "Add Participant";
+  $("ptitle").textContent = p ? "Edit participant" : "Add participant";
   $("psave").textContent = "Save";
   $("pname").value = p ? p.name : "";
   updateAgentOptions(p ? p.agent : defaultAgent());
@@ -2744,9 +2790,9 @@ function updatePlanChoice() {
   $('newplancriteria').disabled = choice !== 'create' || !!editor?.saving;
   const history = !!editor?.c.log.length;
   $('planchangeeffect').textContent = history
-    ? 'Changing the plan creates a fork. History and participants are preserved; agent sessions restart. The original conversation keeps its plan.'
+    ? 'Changing the plan creates a fork. History and participants are preserved; agent sessions restart.'
     : 'This changes the plan of this empty conversation. No plan files are copied.';
-  $('planapply').textContent = history ? 'Create fork and change plan' : 'Apply to this conversation';
+  $('planapply').textContent = history ? 'Create Fork and Change Plan' : 'Apply Plan';
   const same = editor && !editor.targetCheckout && ((choice === 'free' && !editor.c.planBinding?.plan_id)
     || (choice === 'existing' && $('existingplan').value === editor.c.planBinding?.plan_id));
   $('planapply').disabled = !editor || editor.loading || editor.saving || same || (choice === 'existing' && !$('existingplan').value);
@@ -2780,6 +2826,9 @@ $('planchoice').onchange = updatePlanChoice; $('existingplan').onchange = update
 $('newplantitle').oninput = () => { if (!$('newplanslug').dataset.edited) $('newplanslug').value = $('newplantitle').value.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80); };
 $('newplanslug').oninput = () => { $('newplanslug').dataset.edited = 'true'; };
 $('plancancel').onclick = () => $('plandialog').close();
+$('plandialog').onclick = event => {
+  if (event.target === event.currentTarget && !planEdit?.saving) $('plandialog').close();
+};
 $('plandialog').addEventListener('close', () => { planEdit = null; delete $('newplanslug').dataset.edited; });
 $('plandialog').addEventListener('cancel', event => { if (planEdit?.saving) event.preventDefault(); });
 $('planform').onsubmit = async event => {

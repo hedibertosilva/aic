@@ -162,32 +162,61 @@
   </form>
 </dialog>
 
-<dialog id="ddialog" aria-labelledby="dtitle">
+<dialog id="ddialog" aria-labelledby="dtitle" aria-describedby="ddescription">
   <div id="dform">
-    <h2 id="dtitle">Delete conversation?</h2>
-    <p id="dtext"></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="dcancel" autofocus>Cancel</button>
-      <button type="button" id="ddelete" class="danger">Delete</button>
+    <div class="confighead">
+      <div><h2 id="dtitle">Delete conversation?</h2><p id="ddescription">This removes its messages and participant setup.</p></div>
+    </div>
+    <div class="configbody">
+      <div class="configscope deletewarning" role="note">
+        <strong id="dtext"></strong>
+        <span>You can undo this action immediately after deleting.</span>
+      </div>
+    </div>
+    <div class="configfooter">
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="dcancel" autofocus>Cancel</button>
+        <button type="button" id="ddelete" class="danger">Delete</button>
+      </div>
     </div>
   </div>
 </dialog>
 
-<dialog id="rdialog" aria-labelledby="rtitle">
+<dialog id="rdialog" aria-labelledby="rtitle" aria-describedby="rdescription">
   <form id="rform" method="dialog">
-    <h2 id="rtitle">Rename conversation</h2>
-    <label>Title <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35"></label>
-    <div id="rcount" aria-live="polite"></div>
-    <div class="rgen">
-      <label>Generate with <select id="rwho"></select></label>
-      <button type="button" id="rgen">Generate title</button>
+    <div class="confighead">
+      <div><h2 id="rtitle">Rename conversation</h2><p id="rdescription">Use a short title that is easy to find in the sidebar.</p></div>
     </div>
-    <p class="note err" id="rerror" hidden></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="rcancel">Cancel</button>
-      <button type="submit" id="rsave" class="primary">Save</button>
+    <div class="configbody">
+      <section class="configsection" aria-labelledby="rnametitle">
+        <h3 id="rnametitle">Title</h3>
+        <div class="configcard renamecard">
+          <div class="configfield">
+            <label for="rinput">Conversation title</label>
+            <div class="renameinputrow">
+              <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35">
+              <div id="rcount" aria-live="polite"></div>
+            </div>
+            <span class="fieldhint">Keep it concise so it remains readable in the sidebar.</span>
+          </div>
+        </div>
+      </section>
+      <div class="configscope renamegenerator" role="group" aria-labelledby="renameassistanttitle">
+        <div class="renameassistantcopy"><strong id="renameassistanttitle">Suggestion</strong><span>Use this conversation's messages to create a title.</span></div>
+        <div class="rgen">
+          <label for="rwho">Use <select id="rwho"></select></label>
+          <button type="button" id="rgen">Generate</button>
+        </div>
+      </div>
+      <p class="note err" id="rerror" role="alert" hidden></p>
+    </div>
+    <div class="configfooter">
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="rcancel">Cancel</button>
+        <button type="submit" id="rsave" class="primary">Save</button>
+      </div>
     </div>
   </form>
 </dialog>
@@ -262,21 +291,40 @@
 </dialog>
 <dialog id="plandialog" aria-labelledby="plandialogtitle">
   <form id="planform">
-    <h2 id="plandialogtitle">Plan for this conversation</h2>
-    <p class="note">A plan coordinates work across conversations. Participant roles and file permissions stay separate.</p>
-    <label>Conversation <select id="planchoice"><option value="free">Free conversation</option><option value="existing">Link an existing plan</option><option value="create">Create a plan</option><option id="planmigrateoption" value="migrate" hidden>Copy plan to this checkout</option></select></label>
-    <label id="existingplanfield" hidden>Plan <select id="existingplan"></select></label>
-    <fieldset id="createplanfields" hidden>
-      <label>Title <input id="newplantitle" maxlength="160"></label>
-      <label>Slug <input id="newplanslug" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="authentication"></label>
-      <label>Objective and scope <textarea id="newplanobjective" rows="4"></textarea></label>
-      <label>Acceptance criteria <textarea id="newplancriteria" rows="3"></textarea></label>
-    </fieldset>
-    <label id="migrateplanfield" hidden>Destination slug <input id="migrateplanslug" maxlength="100" pattern="[A-Za-z0-9_-]+"></label>
-    <p id="planchangeeffect" class="note warn"></p>
-    <p id="plancheckoutnote" class="note" hidden></p>
-    <p id="planlinkerror" class="note err" role="alert" hidden></p>
-    <div class="buttons"><button id="plancancel" type="button">Cancel</button><span class="grow"></span><button id="planapply" type="submit" class="primary">Apply</button></div>
+    <div class="confighead">
+      <div><h2 id="plandialogtitle">Plan for this conversation</h2><p>A plan coordinates work across conversations. <br/>Participant roles and file permissions stay separate.</p></div>
+    </div>
+
+    <div class="configbody planbody">
+      <section class="configsection" aria-labelledby="planmodetitle">
+        <h3 id="planmodetitle">Conversation mode</h3>
+        <div class="configcard planselectioncard">
+          <label class="configfield">Plan setup<select id="planchoice"><option value="free">Free conversation</option><option value="existing">Link an existing plan</option><option value="create">Create a plan</option><option id="planmigrateoption" value="migrate" hidden>Copy plan to this checkout</option></select></label>
+          <label class="configfield" id="existingplanfield" hidden>Plan<select id="existingplan"></select><span class="fieldhint">Plans available in this checkout.</span></label>
+          <label class="configfield" id="migrateplanfield" hidden>Destination slug<input id="migrateplanslug" maxlength="100" pattern="[A-Za-z0-9_-]+"><span class="fieldhint">A unique identifier for the copy in the destination checkout.</span></label>
+        </div>
+      </section>
+
+      <section class="configsection" id="createplanfields" aria-labelledby="newplandetailstitle" hidden>
+        <h3 id="newplandetailstitle">New plan details</h3>
+        <div class="configcard plancreatecard">
+          <div class="grid2">
+            <label class="configfield">Title<input id="newplantitle" maxlength="160"><span class="fieldhint">A clear name for the work.</span></label>
+            <label class="configfield">Slug<input id="newplanslug" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="authentication"><span class="fieldhint">Lowercase letters, numbers and hyphens.</span></label>
+          </div>
+          <label class="configfield">Objective and scope<textarea id="newplanobjective" rows="4"></textarea><span class="fieldhint">Describe the outcome and boundaries of the work.</span></label>
+          <label class="configfield">Acceptance criteria<textarea id="newplancriteria" rows="3"></textarea><span class="fieldhint">Optional conditions that define completion.</span></label>
+        </div>
+      </section>
+
+      <div id="plancheckoutnote" class="configscope plancheckoutnote" role="note" hidden></div>
+      <div id="planchangeeffect" class="configscope planchangeeffect" role="note"></div>
+      <p id="planlinkerror" class="note err" role="alert" hidden></p>
+    </div>
+
+    <div class="configfooter planfooter">
+      <div class="buttons"><button id="plancancel" type="button">Cancel</button><span class="grow"></span><button id="planapply" type="submit" class="primary">Apply</button></div>
+    </div>
   </form>
 </dialog>
 <div id="toast" role="status"><span id="toasttext"></span><button id="undo" type="button">Undo</button></div>
