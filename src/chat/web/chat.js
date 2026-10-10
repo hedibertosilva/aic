@@ -2994,13 +2994,16 @@ async function prepareSend(c, targets) {
     if (!c.gitOrigin) { c.gitOrigin = structuredClone(context); saveSoon(); }
     if (ChatOnboarding.branchChanged(c.gitOrigin, context, c.gitAcknowledged)) {
       $('branchtext').textContent = 'Branch changed from ' + c.gitOrigin.label + ' to ' + context.label + '.';
-      $('branchdetails').textContent = 'Origin: ' + c.gitOrigin.checkout + '\nCurrent: ' + context.checkout;
+      $('branchorigin').textContent = c.gitOrigin.label || c.gitOrigin.branch || (c.gitOrigin.sha ? c.gitOrigin.sha.slice(0, 8) : 'Unknown');
+      $('branchcurrent').textContent = context.label || context.branch || (context.sha ? context.sha.slice(0, 8) : 'Unknown');
+      $('branchcheckout').textContent = context.checkout;
       const approved = await new Promise(resolve => {
         const dialog = $('branchdialog');
         const end = value => { dialog.close(); resolve(value); };
         $('branchcontinue').onclick = () => { c.gitAcknowledged = ChatOnboarding.gitKey(context); saveSoon(); end(true); };
         $('branchnew').onclick = () => { end(false); newConv(); };
         $('branchcancel').onclick = () => end(false);
+        dialog.onclick = event => { if (event.target === dialog) end(false); };
         dialog.oncancel = () => resolve(false); dialog.showModal();
       });
       if (!approved) return false;

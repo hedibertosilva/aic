@@ -297,12 +297,28 @@
     <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><span class="grow"></span><button id="worktreeconfirm" type="button" class="primary">Change Checkout</button></div>
   </div>
 </dialog>
-<dialog id="branchdialog" aria-labelledby="branchtitle">
-  <h2 id="branchtitle">Git context changed</h2>
-  <p id="branchtext"></p>
-  <p>This conversation keeps its history and participant sessions. The next sends will use the files in the current branch.</p>
-  <details><summary>Details</summary><pre id="branchdetails"></pre></details>
-  <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create new chat</button><button id="branchcontinue" type="button" class="primary">Continue on this branch</button></div>
+<dialog id="branchdialog" aria-labelledby="branchtitle" aria-describedby="branchdescription">
+  <div class="confighead">
+    <div><h2 id="branchtitle">Git context changed</h2><p id="branchdescription">The repository branch changed outside this conversation.</p></div>
+  </div>
+
+  <div class="configbody branchbody">
+    <p id="branchtext" class="sr-only" role="status"></p>
+    <section class="configsection" aria-labelledby="branchtransitiontitle">
+      <h3 id="branchtransitiontitle">Branch transition</h3>
+      <div id="branchdetails" class="configcard branchcomparison">
+        <div class="branchreference"><span>Origin branch</span><strong id="branchorigin"></strong></div>
+        <div class="branchreference current"><span>Current branch</span><strong id="branchcurrent"></strong></div>
+        <div class="branchcheckout"><span>Checkout</span><code id="branchcheckout"></code></div>
+      </div>
+    </section>
+
+    <div class="configscope branchimpact" role="note"><strong>If you continue</strong><span>This conversation keeps its history and participant sessions. The next sends use files from the current branch.</span></div>
+  </div>
+
+  <div class="configfooter branchfooter">
+    <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create New Chat</button><span class="grow"></span><button id="branchcontinue" type="button" class="primary">Continue Here</button></div>
+  </div>
 </dialog>
 <dialog id="plandialog" aria-labelledby="plandialogtitle">
   <form id="planform">

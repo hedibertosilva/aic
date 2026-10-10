@@ -528,7 +528,7 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 .environmentbtn { font-size: 12px; color: var(--muted); }
 .environmentbtn[data-state="blocked"] { color: var(--warn); }
 #repo { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#branchdetails { white-space: pre-wrap; overflow-wrap: anywhere; }
+#branchdetails { overflow-wrap: anywhere; }
 
 #contextbar { display: flex; flex-wrap: wrap; gap: 6px 12px; padding: 6px 14px; font-size: 12px; border-bottom: 1px solid var(--border, #8884); }
 
@@ -1085,6 +1085,26 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
   .worktreefooter .buttons { align-items: stretch; flex-direction: column-reverse; }
   .worktreefooter .buttons .grow { display: none; }
   .worktreefooter .buttons button { width: 100%; }
+}
+
+/* Branch changes emphasize the references that changed, not the shared path. */
+#branchdialog { width: min(620px, calc(100vw - 24px)); background: var(--bg); }
+#branchdialog .confighead p { max-width: 54ch; }
+#branchdialog .configbody { gap: 16px; }
+.branchcomparison { padding: 14px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.branchreference { min-width: 0; padding: 10px 11px; display: flex; flex-direction: column; gap: 3px; background: var(--panel); border-left: 3px solid var(--muted); }
+.branchreference.current { border-left-color: var(--accent); }
+.branchreference span, .branchcheckout span { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.branchreference strong { overflow: hidden; font-size: 13px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.branchcheckout { grid-column: 1 / -1; min-width: 0; padding-top: 11px; display: flex; flex-direction: column; gap: 4px; border-top: 1px solid var(--line); }
+.branchcheckout code { overflow: hidden; color: var(--fg); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.branchfooter { padding-top: 0; }
+@media (max-width: 480px) {
+  .branchcomparison { grid-template-columns: 1fr; }
+  .branchcheckout { grid-column: auto; }
+  .branchfooter .buttons { align-items: stretch; flex-direction: column-reverse; }
+  .branchfooter .buttons .grow { display: none; }
+  .branchfooter .buttons button { width: 100%; }
 }
 
 /* Plan editor follows the same hierarchy as Configuration. */
