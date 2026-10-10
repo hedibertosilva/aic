@@ -2397,8 +2397,7 @@ async function openConfig() {
     setOptions("cdefault", ["", ...config.agents], config.default_agent);
     $("cdefault").options[0].textContent = "No preference — ask for each new chat";
     for (const option of $("cdefault").options) option.disabled = !!option.value && option.value !== config.default_agent && !ChatOnboarding.ready(readiness, option.value);
-    $("cconfirmdefault").checked = false;
-    settingsDraft = { hiddenAgents: new Set(state.hiddenAgents || []) };
+    settingsDraft = { hiddenAgents: new Set(state.hiddenAgents || []), defaultAgent: config.default_agent };
     renderAgentVisibility();
     $("cpermission").value = config.permission_mode;
     $("cskippermissions").checked = !!config.skip_permissions;
@@ -2429,7 +2428,7 @@ $("cform").onsubmit = async (e) => {
   error.hidden = true; saveBtn.disabled = true; configSaving = true; $('ccancel').disabled = true;
   const payload = {
     default_agent: $("cdefault").value,
-    confirm_default: $("cconfirmdefault").checked,
+    confirm_default: $("cdefault").value !== settingsDraft.defaultAgent,
     permission_mode: $("cpermission").value,
     skip_permissions: $("cskippermissions").checked,
     sandbox: $("csandbox").value,
@@ -2954,6 +2953,9 @@ async function openReadiness() {
 $('readybtn').onclick = () => openReadiness();
 $('penvironment').onclick = () => openReadiness();
 $('readyclose').onclick = () => $('readydialog').close();
+$('readydialog').addEventListener('click', event => {
+  if (event.target === event.currentTarget) $('readydialog').close();
+});
 $('readydialog').addEventListener('close', () => { (environmentFocus?.isConnected ? environmentFocus : $('readybtn')).focus(); });
 $('readyrefresh').onclick = async () => { $('readyrefresh').disabled = true; $('readyerror').hidden = true; try { await refreshReadiness(cur(), { full: true, catalog: true }); renderReadiness(); } catch (e) { $('readyerror').textContent = e.message; $('readyerror').hidden = false; } finally { $('readyrefresh').disabled = false; } };
 function updateParticipantReadiness() {
@@ -2966,7 +2968,7 @@ function renderAgentVisibility() {
   if (!settingsDraft) return;
   const defaults = new Set([meta.default, $('cdefault').value].filter(Boolean));
   for (const name of meta.agents) {
-    const label = el('label', 'check configcheck'), box = document.createElement('input'); box.type = 'checkbox';
+    const label = el('label', 'check configcheck visibilityoption'), box = document.createElement('input'); box.type = 'checkbox';
     if (defaults.has(name)) settingsDraft.hiddenAgents.delete(name);
     box.checked = !settingsDraft.hiddenAgents.has(name);
     box.disabled = defaults.has(name);
@@ -3020,6 +3022,9 @@ $('worktreebtn').onclick = async () => {
   } catch (e) { toast(e.message); }
 };
 $('worktreecancel').onclick = () => $('worktreedialog').close();
+$('worktreedialog').onclick = event => {
+  if (event.target === event.currentTarget) $('worktreedialog').close();
+};
 $('worktreeconfirm').onclick = async () => {
   const c = cur(); if (!c || busy(c)) return;
   if ((c.planBinding?.plan_id || c.planBinding?.revision > 0) && $('worktreeselect').value !== (c.checkout || meta.repo)) {

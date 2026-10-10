@@ -55,7 +55,7 @@
           <section class="contextpopovercard">
             <strong>This conversation only</strong>
             <p class="note">Change its working checkout. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
-            <button id="worktreebtn" type="button">Change working checkout…</button>
+            <button id="worktreebtn" type="button">Change Checkout</button>
           </section>
         </div>
       </div>
@@ -233,8 +233,9 @@
       <section class="configsection" aria-labelledby="cagentstitle">
         <h3 id="cagentstitle">Agents</h3>
         <div class="configcard configagents">
-          <label class="configfield">Default agent<select id="cdefault"></select><span class="fieldhint">Used for new chats; leave empty to choose each time.</span></label>
-          <label class="check configcheck"><input type="checkbox" id="cconfirmdefault"><span class="checkcopy"><strong>Confirm default changes</strong><small>Required when saving a different default agent.</small></span></label>
+          <div class="configdefault">
+            <label class="configfield">Default agent<select id="cdefault"></select><span class="fieldhint">Used for new chats; leave empty to choose each time.</span></label>
+          </div>
           <fieldset id="agentvisibility"><legend>Visible in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The current and selected defaults always remain visible. Hiding an agent affects future choices only; its setup and existing participants stay unchanged.</p></fieldset>
         </div>
       </section>
@@ -243,9 +244,9 @@
         <h3 id="cruntimetitle">Execution</h3>
         <div class="configcard configruntime">
           <div class="grid2">
-            <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
-            <label>Sandbox runtime <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
-            <label class="configimage">Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+            <label class="configfield">Permission mode<select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select><span class="fieldhint">Default file access for headless agent runs.</span></label>
+            <label class="configfield">Sandbox runtime<select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select><span class="fieldhint">Runtime used to isolate repository access.</span></label>
+            <label class="configfield configimage">Sandbox image<input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"><span class="fieldhint">Container image used when sandboxing is enabled.</span></label>
           </div>
           <label class="check configcheck"><input type="checkbox" id="cskippermissions"><span class="checkcopy"><strong>Approve tool requests automatically</strong><small>Applies to headless runs. Enable only for repositories you trust.</small></span></label>
         </div>
@@ -270,17 +271,31 @@
   <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
   <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <div class="readyfooter"><div class="readyobservation" role="note"><strong>Note</strong><span>Login, sandbox preparation and paid agent tests run in the terminal.<br>Refresh reads their results without making a provider call.</span></div>
+  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Terminal checks</strong><span>Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</span></div>
     <p class="note err" id="readyerror" hidden></p>
     <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
   </div>
 </dialog>
-<dialog id="worktreedialog" aria-labelledby="worktreetitle">
-  <h2 id="worktreetitle">Working checkout for this conversation</h2>
-  <p>Select a registered worktree. Visible history stays; native participant sessions restart. Readiness must be verified in the selected checkout.</p>
-  <label>Checkout <select id="worktreeselect"></select></label>
-  <p class="note err" id="worktreeerror" hidden></p>
-  <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><button id="worktreeconfirm" type="button">Confirm checkout and restart sessions</button></div>
+<dialog id="worktreedialog" aria-labelledby="worktreetitle" aria-describedby="worktreedescription">
+  <div class="confighead">
+    <div><h2 id="worktreetitle">Working checkout</h2><p id="worktreedescription">Choose where this conversation's agents read and edit repository files.</p></div>
+  </div>
+
+  <div class="configbody worktreebody">
+    <section class="configsection" aria-labelledby="worktreesectiontitle">
+      <h3 id="worktreesectiontitle">This conversation</h3>
+      <div class="configcard worktreecard">
+        <label class="configfield">Registered checkout<select id="worktreeselect"></select><span class="fieldhint">Only worktrees registered for this repository are available.</span></label>
+      </div>
+    </section>
+
+    <div class="configscope worktreeimpact" role="note"><strong>What changes</strong><span>Visible history and participants stay. Agent sessions restart, and readiness is checked again in the selected checkout.</span></div>
+    <p class="note err" id="worktreeerror" role="alert" hidden></p>
+  </div>
+
+  <div class="configfooter worktreefooter">
+    <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><span class="grow"></span><button id="worktreeconfirm" type="button" class="primary">Change Checkout</button></div>
+  </div>
 </dialog>
 <dialog id="branchdialog" aria-labelledby="branchtitle">
   <h2 id="branchtitle">Git context changed</h2>

@@ -29,7 +29,7 @@ a sandbox can see shared Git metadata, but only explicitly mounted working trees
 Selection of another worktree and copying conversations have separate controls;
 never change an active native session's directory silently.
 
-Git context → Advanced → This conversation only → Change working checkout lists only registered worktrees
+Git context → Advanced → This conversation only → Change Checkout lists only registered worktrees
 of the same repository. This P2 control is not a primary action in the chat footer.
 Confirming a selection keeps visible history and starts fresh participant sessions;
 it is unavailable while replies run. Run `aic agent test` in the destination

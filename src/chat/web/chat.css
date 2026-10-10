@@ -498,8 +498,7 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 .readycommand code { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
 .readycommand button { min-height: 28px; padding: 3px 8px; flex: none; background: var(--card); font-size: 10px; }
 .readyfooter { padding-top: 12px; border-top: 1px solid var(--line); }
-.readyobservation { margin: 0 0 12px; padding: 10px 12px; display: flex; align-items: baseline; gap: 9px; color: var(--note); background: color-mix(in srgb, var(--note) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--note) 38%, var(--line)); border-left: 3px solid var(--note); font-size: 11px; line-height: 1.45; }
-.readyobservation strong { flex: none; color: var(--note); font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.readyfooter .readyobservation { margin: 0 0 12px; }
 .readyfooter .buttons { margin-top: 0; }
 @media (max-width: 700px) { .readygrid, .readyagents { grid-template-columns: 1fr; } #readyrows dl { grid-template-columns: 1fr 1fr 1fr; } }
 #worktreedialog label { display: flex; flex-direction: column; gap: 6px; }
@@ -969,18 +968,21 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
 }
 
 /* Global configuration mirrors the participant editor's hierarchy. */
-#cdialog { width: min(760px, calc(100vw - 32px)); background: var(--bg); }
-#cform { padding: 22px 24px 20px; gap: 18px; }
+#cdialog { width: min(760px, calc(100vw - 32px)); overflow: hidden; background: var(--bg); }
+#cform { max-height: calc(100dvh - 32px); padding: 22px 24px 20px; gap: 18px; }
+.confighead, .configfooter { flex: none; }
 .confighead > div { min-width: 0; }
 .confighead p { max-width: 58ch; margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .configbody { display: flex; flex-direction: column; gap: 20px; }
+#cform > .configbody { min-height: 0; margin-inline: -6px; padding-inline: 6px; overflow-y: auto; scrollbar-gutter: stable; }
 .configsection h3 { margin: 0 0 9px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; line-height: 1.2; text-transform: uppercase; }
 .configcard { min-width: 0; padding: 16px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
 .configcard .grid2 { gap: 14px 16px; }
 .configscope, .configworkflow { margin: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; color: var(--muted); background: var(--card); border-left: 3px solid var(--accent); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .configscope strong, .configworkflow strong { color: var(--fg); font-size: 12px; line-height: 1.35; }
 .configscope span, .configworkflow span { max-width: 68ch; }
-.configagents { display: grid; grid-template-columns: minmax(230px, .9fr) minmax(260px, 1.1fr); gap: 16px 24px; align-items: start; }
+.configagents { display: flex; flex-direction: column; gap: 16px; }
+.configdefault { width: min(100%, 360px); }
 .configfield { min-width: 0; }
 .fieldhint { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .configfield select + .fieldhint { margin-top: 1px; }
@@ -994,10 +996,36 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
 .checkcopy { min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
 .checkcopy strong { color: var(--fg); font-size: 12px; font-weight: 600; }
 .checkcopy small { color: var(--muted); font-size: 11px; line-height: 1.4; }
-#agentvisibility { grid-column: 1 / -1; padding-top: 16px; border-top: 1px solid var(--line); }
+#agentvisibility { padding-top: 16px; border-top: 1px solid var(--line); }
 #agentvisibility legend { padding-bottom: 10px; }
-#agentvisibilityrows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 16px; }
-#agentvisibilityrows .configcheck { min-width: 0; padding-block: 2px; }
+#agentvisibilityrows { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+#agentvisibilityrows .visibilityoption {
+  min-width: 0;
+  min-height: 52px;
+  padding: 9px 11px;
+  align-items: center !important;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  transition: background-color .14s ease, border-color .14s ease;
+}
+#agentvisibilityrows .visibilityoption:has(input:checked) {
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--line));
+}
+#agentvisibilityrows .visibilityoption:has(input:not(:disabled)):hover {
+  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line));
+}
+#agentvisibilityrows .visibilityoption:has(input:focus-visible) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+#agentvisibilityrows .visibilityoption:has(input:disabled) {
+  background: var(--panel);
+  border-color: transparent;
+}
+#agentvisibilityrows .visibilityoption input[type="checkbox"] { margin-top: 0; }
+#agentvisibilityrows .visibilityoption .checkcopy { flex: 1; }
 #agentvisibility .note { max-width: 68ch; margin-top: 11px; color: var(--muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 .configruntime { display: flex; flex-direction: column; gap: 16px; }
 .configruntime .configimage { grid-column: 1 / -1; }
@@ -1010,9 +1038,6 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
 @media (max-width: 700px) {
   #cform { padding: 20px; }
   .configbody { gap: 18px; }
-  .configagents { grid-template-columns: 1fr; gap: 16px; }
-  #agentvisibility { grid-column: auto; }
-  #agentvisibilityrows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 480px) {
   #cdialog { width: min(100% - 24px, 760px); }
@@ -1046,6 +1071,20 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
   .configfooter .buttons button { flex: 1; }
   .rgen { align-items: stretch; flex-direction: column; }
   #rform .rgen label { justify-content: space-between; }
+}
+
+/* Checkout selector keeps the compact dialog shell while using Configuration's hierarchy. */
+#worktreedialog { width: min(600px, calc(100vw - 24px)); background: var(--bg); }
+#worktreedialog .confighead p { max-width: 54ch; }
+#worktreedialog .configbody { gap: 16px; }
+#worktreedialog .configfield { gap: 4px; color: var(--muted); font-size: 12px; }
+.worktreecard { padding: 14px; }
+.worktreecard select { width: 100%; min-height: 38px; color: var(--fg); background: var(--bg); border-color: var(--line); }
+.worktreefooter { padding-top: 0; }
+@media (max-width: 480px) {
+  .worktreefooter .buttons { align-items: stretch; flex-direction: column-reverse; }
+  .worktreefooter .buttons .grow { display: none; }
+  .worktreefooter .buttons button { width: 100%; }
 }
 
 /* Plan editor follows the same hierarchy as Configuration. */
