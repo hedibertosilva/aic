@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -45,6 +45,8 @@ const HEARTBEAT: Duration = Duration::from_secs(2);
 
 /// How long a CLI gets to list its models before the dialog falls back to its built-in suggestions.
 const LISTING_TIMEOUT: Duration = Duration::from_secs(8);
+
+static WRITE_LOCK_IDS: AtomicU64 = AtomicU64::new(1);
 
 struct App {
     repo_root: PathBuf,
@@ -87,6 +89,13 @@ struct PreflightRequest {
     checkout: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct DiagnosticActionRequest {
+    command: String,
+    #[serde(default)]
+    checkout: Option<String>,
+}
+
 #[derive(Deserialize, Serialize)]
 struct ChatRequest {
     agent: String,
@@ -124,6 +133,31 @@ struct ChatRequest {
     /// clients may omit it and retain the legacy connection-owned behavior.
     #[serde(default)]
     run_id: Option<String>,
+    #[serde(default)]
+    engineering_loop: Option<EngineeringLoopRequest>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EngineeringLoopRequest {
+    id: String,
+    state: String,
+    phase: String,
+    round: u32,
+    turns: u32,
+    max_rounds: u32,
+    max_turns: u32,
+    implementer: String,
+    #[serde(default)]
+    reviewer: Option<String>,
+    current: String,
+    objective: String,
+}
+
+#[derive(Deserialize)]
+struct EngineeringLoopRoundRequest {
+    conversation_id: String,
+    decision: String,
 }
 
 /// The settings the chat dialog edits (`[chat]`, `[permissions]` and
@@ -135,6 +169,10 @@ struct SettingsRequest {
     default_agent: String,
     #[serde(default)]
     confirm_default: bool,
+    #[serde(default)]
+    serialize_worktree_writes: Option<bool>,
+    #[serde(default)]
+    loop_max_rounds: Option<u32>,
     permission_mode: String,
     skip_permissions: bool,
     sandbox: SandboxKind,
@@ -152,6 +190,7 @@ pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
     let mut chat_db = open_chat_db(repo_root)?;
     plans::recover(&mut chat_db, repo_root)?;
     recover_chat_runs(&mut chat_db)?;
+    recover_engineering_loops(&chat_db)?;
     let loopback = matches!(host, "127.0.0.1" | "localhost" | "::1");
     let allowed_hosts = loopback.then(|| {
         vec![format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}")]
@@ -189,6 +228,163 @@ pub fn run(repo_root: &Path, host: &str, port: u16, open: bool) -> Result<()> {
 /// both processes open the same bind-mounted repository file.
 struct ChatServerLock {
     _file: File,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct WorktreeWriteLockOwner {
+    token: String,
+    pid: u32,
+    #[serde(default)]
+    process_pid: Option<u32>,
+    agent: String,
+    participant: String,
+    conversation: Option<String>,
+    run_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct WorktreeWriteLockState {
+    conversation: String,
+    owners: Vec<WorktreeWriteLockOwner>,
+}
+
+struct WorktreeWriteLock {
+    root: PathBuf,
+    token: String,
+}
+
+impl WorktreeWriteLock {
+    fn attach_process(&self, pid: u32) -> Result<()> {
+        with_worktree_lock_state(&self.root, |path| {
+            let mut state = load_worktree_lock_state(path)?
+                .context("worktree write lock disappeared before the agent started")?;
+            let owner = state.owners.iter_mut().find(|owner| owner.token == self.token)
+                .context("worktree write lock ownership changed before the agent started")?;
+            owner.process_pid = Some(pid);
+            save_worktree_lock_state(path, &state)
+        })
+    }
+}
+
+impl Drop for WorktreeWriteLock {
+    fn drop(&mut self) {
+        let result = with_worktree_lock_state(&self.root, |path| {
+            let Some(mut state) = load_worktree_lock_state(path)? else { return Ok(()) };
+            state.owners.retain(|owner| owner.token != self.token);
+            if state.owners.is_empty() {
+                if let Err(error) = std::fs::remove_file(path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(error.into());
+                }
+                Ok(())
+            } else {
+                save_worktree_lock_state(path, &state)
+            }
+        });
+        if let Err(error) = result {
+            eprintln!("releasing worktree write lock failed: {error:#}");
+        }
+    }
+}
+
+enum WorktreeWriteLockAttempt {
+    Acquired(WorktreeWriteLock),
+    Waiting(Option<WorktreeWriteLockOwner>),
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // Signal zero only checks whether the process exists; it does not send a signal.
+    let result = unsafe { kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
+}
+
+fn with_worktree_lock_state<T>(root: &Path, action: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    const LOCK_EX: i32 = 2;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    let dir = root.join(".aic").join("chat");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let guard_path = dir.join("worktree-write.guard");
+    let guard = OpenOptions::new().create(true).read(true).write(true).open(&guard_path)
+        .with_context(|| format!("opening {}", guard_path.display()))?;
+    if unsafe { flock(guard.as_raw_fd(), LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("locking {}", guard_path.display()));
+    }
+    let result = action(&dir.join("worktree-write.lock"));
+    drop(guard);
+    result
+}
+
+fn load_worktree_lock_state(path: &Path) -> Result<Option<WorktreeWriteLockState>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str(&text) {
+            Ok(state) => Ok(Some(state)),
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+                Ok(None)
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+fn save_worktree_lock_state(path: &Path, state: &WorktreeWriteLockState) -> Result<()> {
+    let temporary = path.with_file_name(format!("worktree-write.{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new().write(true).create(true).truncate(true).open(&temporary)
+            .with_context(|| format!("creating {}", temporary.display()))?;
+        serde_json::to_writer(&mut file, state)?;
+        file.flush()?;
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("updating {}", path.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn try_worktree_write_lock(
+    root: &Path,
+    owner: &WorktreeWriteLockOwner,
+) -> Result<WorktreeWriteLockAttempt> {
+    with_worktree_lock_state(root, |path| {
+        let mut state = load_worktree_lock_state(path)?.unwrap_or_else(|| WorktreeWriteLockState {
+            conversation: owner.conversation.clone().unwrap_or_else(|| owner.token.clone()),
+            owners: Vec::new(),
+        });
+        state.owners.retain(|holder| {
+            process_is_alive(holder.pid)
+                || holder.process_pid.is_some_and(process_is_alive)
+        });
+        if state.owners.is_empty() {
+            state.conversation = owner.conversation.clone().unwrap_or_else(|| owner.token.clone());
+        }
+        let conversation = owner.conversation.as_deref().unwrap_or(&owner.token);
+        if state.conversation.as_str() != conversation {
+            return Ok(WorktreeWriteLockAttempt::Waiting(state.owners.first().cloned()));
+        }
+        state.owners.push(owner.clone());
+        save_worktree_lock_state(path, &state)?;
+        Ok(WorktreeWriteLockAttempt::Acquired(WorktreeWriteLock {
+            root: root.to_path_buf(),
+            token: owner.token.clone(),
+        }))
+    })
 }
 
 fn lock_chat_server(repo_root: &Path, host: &str, port: u16) -> Result<ChatServerLock> {
@@ -247,6 +443,8 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
              conversation_id TEXT,
              participant TEXT,
              state TEXT NOT NULL,
+             force_write INTEGER NOT NULL DEFAULT 0,
+             waiting_for_write_lock INTEGER NOT NULL DEFAULT 0,
              created_at INTEGER NOT NULL,
              finished_at INTEGER
          );
@@ -257,8 +455,38 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
              created_at INTEGER NOT NULL,
              PRIMARY KEY (run_id, seq)
          );
+         CREATE TABLE IF NOT EXISTS chat_engineering_loops (
+             id TEXT PRIMARY KEY,
+             conversation_id TEXT NOT NULL,
+             checkout TEXT NOT NULL,
+             state TEXT NOT NULL,
+             phase TEXT NOT NULL,
+             round INTEGER NOT NULL,
+             turns INTEGER NOT NULL,
+             max_rounds INTEGER NOT NULL,
+             max_turns INTEGER NOT NULL,
+             implementer TEXT NOT NULL,
+             reviewer TEXT,
+             current_participant TEXT NOT NULL,
+             current_run_id TEXT,
+             objective TEXT NOT NULL,
+             reason TEXT,
+             created_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             finished_at INTEGER
+         );
          CREATE INDEX IF NOT EXISTS chat_run_events_run ON chat_run_events(run_id, seq);",
     )?;
+    // Older databases predate the per-run lock override. SQLite has no
+    // `ADD COLUMN IF NOT EXISTS`, so a duplicate-column error is harmless.
+    let _ = db.execute(
+        "ALTER TABLE chat_runs ADD COLUMN force_write INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = db.execute(
+        "ALTER TABLE chat_runs ADD COLUMN waiting_for_write_lock INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     consumption::init(&db)?;
     plans::init(&db)?;
     Ok(db)
@@ -302,7 +530,10 @@ fn append_chat_run_event(app: &App, id: &str, mut event: serde_json::Value) -> R
         let next = if state == "stopping" { "stopped" }
             else if event.get("ok").and_then(|v| v.as_bool()) == Some(true) { "completed" }
             else { "failed" };
-        tx.execute("UPDATE chat_runs SET state=?2,finished_at=?3 WHERE id=?1", params![id, next, now_millis()])?;
+        tx.execute(
+            "UPDATE chat_runs SET state=?2,waiting_for_write_lock=0,finished_at=?3 WHERE id=?1",
+            params![id, next, now_millis()],
+        )?;
     }
     tx.commit()?;
     Ok(event)
@@ -343,6 +574,407 @@ fn stop_chat_run(app: &App, id: &str) -> Result<Option<String>> {
     Ok(Some(state))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ForceChatRun {
+    Forced,
+    NotWaiting,
+    NotRunning(String),
+    Missing,
+}
+
+fn force_chat_run(app: &App, id: &str) -> Result<ForceChatRun> {
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let changed = db.execute(
+        "UPDATE chat_runs SET force_write=1
+         WHERE id=?1 AND state='running' AND waiting_for_write_lock=1",
+        [id],
+    )?;
+    if changed == 1 {
+        return Ok(ForceChatRun::Forced);
+    }
+    let run: Option<(String, bool)> = db
+        .query_row(
+            "SELECT state,waiting_for_write_lock FROM chat_runs WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match run {
+        None => ForceChatRun::Missing,
+        Some((state, _)) if state != "running" => ForceChatRun::NotRunning(state),
+        Some(_) => ForceChatRun::NotWaiting,
+    })
+}
+
+fn set_chat_run_waiting_for_write_lock(app: &App, id: Option<&str>, waiting: bool) -> Result<()> {
+    if let Some(id) = id {
+        let db = app.chat_db.lock().expect("chat database lock poisoned");
+        db.execute(
+            "UPDATE chat_runs SET waiting_for_write_lock=?2 WHERE id=?1 AND state='running'",
+            params![id, waiting],
+        )?;
+    }
+    Ok(())
+}
+
+fn chat_run_is_forced(app: &App, id: Option<&str>) -> bool {
+    let Some(id) = id else { return false };
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    db.query_row("SELECT force_write FROM chat_runs WHERE id=?1", [id], |row| row.get::<_, bool>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .unwrap_or(false)
+}
+
+fn chat_run_was_stopped(app: &App, id: Option<&str>) -> bool {
+    let Some(id) = id else { return false };
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    db.query_row("SELECT state FROM chat_runs WHERE id=?1", [id], |row| row.get::<_, String>(0))
+        .optional()
+        .ok()
+        .flatten()
+        .is_some_and(|state| matches!(state.as_str(), "stopping" | "stopped"))
+}
+
+#[derive(Debug)]
+struct EngineeringLoopRecord {
+    conversation_id: String,
+    checkout: String,
+    state: String,
+    phase: String,
+    round: u32,
+    turns: u32,
+    max_rounds: u32,
+    max_turns: u32,
+    implementer: String,
+    reviewer: Option<String>,
+    current_participant: String,
+    current_run_id: Option<String>,
+    objective: String,
+}
+
+fn engineering_loop_record(db: &Connection, id: &str) -> Result<Option<EngineeringLoopRecord>> {
+    db.query_row(
+        "SELECT conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
+                implementer,reviewer,current_participant,current_run_id,objective
+         FROM chat_engineering_loops WHERE id=?1",
+        [id],
+        |row| Ok(EngineeringLoopRecord {
+            conversation_id: row.get(0)?, checkout: row.get(1)?, state: row.get(2)?,
+            phase: row.get(3)?, round: row.get(4)?, turns: row.get(5)?,
+            max_rounds: row.get(6)?, max_turns: row.get(7)?, implementer: row.get(8)?,
+            reviewer: row.get(9)?, current_participant: row.get(10)?,
+            current_run_id: row.get(11)?, objective: row.get(12)?,
+        }),
+    ).optional().map_err(Into::into)
+}
+
+fn conversation_participant(db: &Connection, conversation: &str, name: &str) -> Result<Option<(bool, bool)>> {
+    let state: Option<String> = db.query_row("SELECT state_json FROM chat_state WHERE id=1", [], |row| row.get(0)).optional()?;
+    let Some(state) = state else { return Ok(None) };
+    let value: serde_json::Value = serde_json::from_str(&state)?;
+    Ok(value["convs"].as_array().and_then(|conversations| {
+        conversations.iter().find(|item| item["id"].as_str() == Some(conversation))
+    }).and_then(|conversation| conversation["participants"].as_array()).and_then(|participants| {
+        participants.iter().find(|participant| participant["name"].as_str() == Some(name))
+    }).map(|participant| (
+        !participant["inactive"].as_bool().unwrap_or(false),
+        participant["write"].as_bool().unwrap_or(false),
+    )))
+}
+
+fn begin_engineering_loop_turn(
+    app: &App,
+    request: &EngineeringLoopRequest,
+    conversation: &str,
+    participant: &str,
+    run_id: &str,
+    checkout: &Path,
+    max_rounds: u32,
+) -> Result<()> {
+    if !valid_run_id(&request.id) { bail!("invalid Loop Engineering id") }
+    if request.state != "running" { bail!("Loop Engineering is not running") }
+    if !matches!(request.phase.as_str(), "implementing" | "reviewing") {
+        bail!("invalid Loop Engineering phase")
+    }
+    if request.objective.trim().is_empty() { bail!("Loop Engineering objective is empty") }
+    if request.max_rounds == 0 || request.max_turns != request.max_rounds.saturating_mul(2)
+        || request.round == 0 || request.round > request.max_rounds
+        || request.turns >= request.max_turns
+    {
+        bail!("Loop Engineering limits are invalid")
+    }
+    if request.current != participant { bail!("participant is not the current Loop Engineering actor") }
+    if request.implementer == request.reviewer.as_deref().unwrap_or("") {
+        bail!("implementer and reviewer must be different")
+    }
+
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let Some((active, writable)) = conversation_participant(&db, conversation, participant)? else {
+        bail!("Loop Engineering participant is not in this conversation")
+    };
+    if !active { bail!("Loop Engineering participant is inactive") }
+    if request.phase == "implementing" && !writable {
+        bail!("Loop Engineering implementer must have write permission")
+    }
+    if let Some(reviewer) = &request.reviewer {
+        let Some((active, _)) = conversation_participant(&db, conversation, reviewer)? else {
+            bail!("Loop Engineering reviewer is not in this conversation")
+        };
+        if !active { bail!("Loop Engineering reviewer is inactive") }
+    }
+
+    match engineering_loop_record(&db, &request.id)? {
+        None => {
+            if request.max_rounds > 20 || request.max_rounds > max_rounds
+                || request.phase != "implementing" || request.round != 1 || request.turns != 0
+                || request.current != request.implementer
+            {
+                bail!("new Loop Engineering must start with its implementer")
+            }
+            db.execute(
+                "INSERT INTO chat_engineering_loops(
+                    id,conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
+                    implementer,reviewer,current_participant,current_run_id,objective,created_at,updated_at
+                 ) VALUES (?1,?2,?3,'running',?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)",
+                params![request.id,conversation,checkout.to_string_lossy(),request.phase,request.round,
+                    request.turns,request.max_rounds,request.max_turns,request.implementer,
+                    request.reviewer,request.current,run_id,request.objective,now_millis()],
+            )?;
+        }
+        Some(record) => {
+            if record.conversation_id != conversation || record.state != "running"
+                || record.checkout.as_str() != checkout.to_string_lossy().as_ref()
+                || record.objective.as_str() != request.objective.as_str()
+                || record.current_run_id.is_some() || record.phase != request.phase
+                || record.round != request.round || record.turns != request.turns
+                || record.max_rounds != request.max_rounds || record.max_turns != request.max_turns
+                || record.implementer != request.implementer || record.reviewer != request.reviewer
+                || record.current_participant != request.current
+            {
+                bail!("Loop Engineering state changed; refresh before continuing")
+            }
+            db.execute(
+                "UPDATE chat_engineering_loops SET current_run_id=?2,updated_at=?3 WHERE id=?1",
+                params![request.id,run_id,now_millis()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn engineering_loop_directive(text: &str) -> Option<serde_json::Value> {
+    let marker = "<!--";
+    let mut rest = text;
+    while let Some(start) = rest.find(marker) {
+        rest = &rest[start + marker.len()..];
+        let Some(end) = rest.find("-->") else { return None };
+        let body = rest[..end].trim();
+        if let Some(json) = body.strip_prefix("aic-loop") {
+            return serde_json::from_str(json.trim()).ok();
+        }
+        rest = &rest[end + 3..];
+    }
+    None
+}
+
+fn engineering_loop_system(request: &EngineeringLoopRequest) -> String {
+    let header = format!(
+        "Backend-enforced Loop Engineering {}, round {}/{}. Objective: {}",
+        request.id, request.round, request.max_rounds, request.objective
+    );
+    if request.phase == "reviewing" {
+        return format!(
+            "{header}\nYou are the reviewer. Review the implementer's work and end your response with exactly one directive: \
+             <!-- aic-loop {{\"verdict\":\"approved\"}} --> or \
+             <!-- aic-loop {{\"verdict\":\"changes_requested\",\"target\":\"{}\"}} -->.",
+            request.implementer,
+        );
+    }
+    let reviewer = request.reviewer.as_deref().map_or_else(
+        || "Choose another active participant as reviewer and put that exact participant name in PARTICIPANT_NAME.".to_string(),
+        |reviewer| format!("Send the review to {reviewer} and use that exact name as PARTICIPANT_NAME."),
+    );
+    format!(
+        "{header}\nYou are the implementer. Complete the work, then hand it off for review. {reviewer} \
+         End your response with exactly one directive: \
+         <!-- aic-loop {{\"action\":\"review\",\"target\":\"PARTICIPANT_NAME\"}} -->."
+    )
+}
+
+fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: &str, ok: bool) -> Result<()> {
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let Some(record) = engineering_loop_record(&db, loop_id)? else { return Ok(()) };
+    if record.state != "running" || record.current_run_id.as_deref() != Some(run_id) { return Ok(()) }
+    let turns = record.turns + 1;
+    let finish = |state: &str, reason: &str| -> Result<()> {
+        db.execute(
+            "UPDATE chat_engineering_loops SET state=?2,turns=?3,current_run_id=NULL,reason=?4,
+                    updated_at=?5,finished_at=?5 WHERE id=?1 AND state='running' AND current_run_id=?6",
+            params![loop_id,state,turns,reason,now_millis(),run_id],
+        )?;
+        Ok(())
+    };
+    if !ok { return finish("paused", "The current participant failed") }
+    let directive = engineering_loop_directive(output);
+    if record.phase == "implementing" {
+        if turns >= record.max_turns { return finish("limit_reached", "Turn limit reached") }
+        let target = directive.as_ref()
+            .filter(|value| value["action"].as_str() == Some("review"))
+            .and_then(|value| value["target"].as_str());
+        let Some(target) = target else { return finish("paused", "Implementer did not provide a valid handoff") };
+        if target == record.implementer { return finish("paused", "Implementer cannot review their own work") }
+        if record.reviewer.as_deref().is_some_and(|reviewer| reviewer != target) {
+            return finish("paused", "Implementer changed the selected reviewer")
+        }
+        if !conversation_participant(&db, &record.conversation_id, target)?.is_some_and(|(active, _)| active) {
+            return finish("paused", "Requested reviewer is unavailable")
+        }
+        db.execute(
+            "UPDATE chat_engineering_loops SET phase='reviewing',turns=?2,reviewer=?3,
+                    current_participant=?3,current_run_id=NULL,updated_at=?4
+             WHERE id=?1 AND state='running' AND current_run_id=?5",
+            params![loop_id,turns,target,now_millis(),run_id],
+        )?;
+        return Ok(())
+    }
+    match directive.as_ref().and_then(|value| value["verdict"].as_str()) {
+        Some("approved") => finish("approved", "Approved by reviewer"),
+        Some("changes_requested") => {
+            if directive.as_ref().and_then(|value| value["target"].as_str()) != Some(record.implementer.as_str()) {
+                return finish("paused", "Reviewer returned changes to an invalid participant")
+            }
+            if record.round >= record.max_rounds || turns >= record.max_turns {
+                db.execute(
+                    "UPDATE chat_engineering_loops
+                     SET state='awaiting_round_approval',turns=?2,current_run_id=NULL,
+                         reason='The configured round limit was reached without approval. Continue for one more round?',
+                         updated_at=?3,finished_at=NULL
+                     WHERE id=?1 AND state='running' AND current_run_id=?4",
+                    params![loop_id,turns,now_millis(),run_id],
+                )?;
+                return Ok(())
+            }
+            db.execute(
+                "UPDATE chat_engineering_loops SET phase='implementing',round=round+1,turns=?2,
+                        current_participant=implementer,current_run_id=NULL,updated_at=?3
+                 WHERE id=?1 AND state='running' AND current_run_id=?4",
+                params![loop_id,turns,now_millis(),run_id],
+            )?;
+            Ok(())
+        }
+        _ => finish("paused", "Reviewer did not provide a structured verdict"),
+    }
+}
+
+enum EngineeringLoopRoundDecision {
+    Missing,
+    Conflict(String),
+    Applied(serde_json::Value),
+}
+
+fn decide_engineering_loop_round(
+    app: &App,
+    id: &str,
+    conversation_id: &str,
+    decision: &str,
+) -> Result<EngineeringLoopRoundDecision> {
+    if !matches!(decision, "approve" | "decline") {
+        return Ok(EngineeringLoopRoundDecision::Conflict("invalid round decision".into()))
+    }
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let Some(record) = engineering_loop_record(&db, id)? else {
+        return Ok(EngineeringLoopRoundDecision::Missing)
+    };
+    if record.conversation_id != conversation_id {
+        return Ok(EngineeringLoopRoundDecision::Conflict("Loop Engineering belongs to another conversation".into()))
+    }
+    if record.state != "awaiting_round_approval" || record.current_run_id.is_some() {
+        return Ok(EngineeringLoopRoundDecision::Conflict("Loop Engineering is not waiting for a round decision".into()))
+    }
+    let now = now_millis();
+    if decision == "decline" {
+        db.execute(
+            "UPDATE chat_engineering_loops
+             SET state='declined',reason='Another round was declined by the user',updated_at=?2,finished_at=?2
+             WHERE id=?1 AND conversation_id=?3 AND state='awaiting_round_approval' AND current_run_id IS NULL",
+            params![id,now,conversation_id],
+        )?;
+        return Ok(EngineeringLoopRoundDecision::Applied(serde_json::json!({
+            "id":id, "state":"declined", "round":record.round,
+            "max_rounds":record.max_rounds, "max_turns":record.max_turns,
+            "reason":"Another round was declined by the user",
+        })))
+    }
+    if !conversation_participant(&db, conversation_id, &record.implementer)?
+        .is_some_and(|(active, writable)| active && writable)
+    {
+        return Ok(EngineeringLoopRoundDecision::Conflict(
+            "Loop Engineering implementer is unavailable or no longer has write permission".into(),
+        ))
+    }
+    let Some(round) = record.round.checked_add(1) else {
+        return Ok(EngineeringLoopRoundDecision::Conflict("round limit cannot be increased further".into()))
+    };
+    let Some(max_rounds) = record.max_rounds.checked_add(1) else {
+        return Ok(EngineeringLoopRoundDecision::Conflict("round limit cannot be increased further".into()))
+    };
+    let Some(max_turns) = record.max_turns.checked_add(2) else {
+        return Ok(EngineeringLoopRoundDecision::Conflict("turn limit cannot be increased further".into()))
+    };
+    db.execute(
+        "UPDATE chat_engineering_loops
+         SET state='running',phase='implementing',round=?2,max_rounds=?3,max_turns=?4,
+             current_participant=implementer,reason=NULL,updated_at=?5,finished_at=NULL
+         WHERE id=?1 AND conversation_id=?6 AND state='awaiting_round_approval' AND current_run_id IS NULL",
+        params![id,round,max_rounds,max_turns,now,conversation_id],
+    )?;
+    Ok(EngineeringLoopRoundDecision::Applied(serde_json::json!({
+        "id":id, "state":"running", "phase":"implementing", "round":round,
+        "max_rounds":max_rounds, "max_turns":max_turns,
+        "current":record.implementer,
+    })))
+}
+
+fn stop_engineering_loop(app: &App, id: &str) -> Result<Option<(String, Option<String>)>> {
+    let run = {
+        let db = app.chat_db.lock().expect("chat database lock poisoned");
+        let Some(record) = engineering_loop_record(&db, id)? else { return Ok(None) };
+        if matches!(record.state.as_str(), "running" | "paused" | "awaiting_round_approval") {
+            db.execute(
+                "UPDATE chat_engineering_loops SET state='stopped',reason='Stopped by user',updated_at=?2,finished_at=?2 WHERE id=?1",
+                params![id,now_millis()],
+            )?;
+            ("stopped".to_string(), record.current_run_id)
+        } else { (record.state, record.current_run_id) }
+    };
+    if let Some(run_id) = run.1.as_deref() { let _ = stop_chat_run(app, run_id)?; }
+    Ok(Some(run))
+}
+
+fn engineering_loop_snapshot(app: &App, id: &str) -> Result<Option<serde_json::Value>> {
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    db.query_row(
+        "SELECT conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
+                implementer,reviewer,current_participant,current_run_id,objective,reason,
+                created_at,updated_at,finished_at
+         FROM chat_engineering_loops WHERE id=?1",
+        [id],
+        |row| Ok(serde_json::json!({
+            "id":id, "conversation_id":row.get::<_,String>(0)?, "checkout":row.get::<_,String>(1)?,
+            "state":row.get::<_,String>(2)?, "phase":row.get::<_,String>(3)?,
+            "round":row.get::<_,u32>(4)?, "turns":row.get::<_,u32>(5)?,
+            "max_rounds":row.get::<_,u32>(6)?, "max_turns":row.get::<_,u32>(7)?,
+            "implementer":row.get::<_,String>(8)?, "reviewer":row.get::<_,Option<String>>(9)?,
+            "current":row.get::<_,String>(10)?, "current_run_id":row.get::<_,Option<String>>(11)?,
+            "objective":row.get::<_,String>(12)?, "reason":row.get::<_,Option<String>>(13)?,
+            "created_at":row.get::<_,i64>(14)?, "updated_at":row.get::<_,i64>(15)?,
+            "finished_at":row.get::<_,Option<i64>>(16)?,
+        })),
+    ).optional().map_err(Into::into)
+}
+
 /// The process itself cannot survive a server restart, but its durable run
 /// must still become terminal so a refreshed page does not poll forever.
 fn recover_chat_runs(db: &mut Connection) -> Result<()> {
@@ -361,9 +993,28 @@ fn recover_chat_runs(db: &mut Connection) -> Result<()> {
             "stopped": stopped, "seq": seq,
         });
         tx.execute("INSERT INTO chat_run_events(run_id,seq,event_json,created_at) VALUES (?1,?2,?3,?4)", params![id,seq,event.to_string(),now_millis()])?;
-        tx.execute("UPDATE chat_runs SET state=?2,finished_at=?3 WHERE id=?1", params![id,if stopped {"stopped"} else {"interrupted"},now_millis()])?;
+        tx.execute(
+            "UPDATE chat_runs SET state=?2,waiting_for_write_lock=0,finished_at=?3 WHERE id=?1",
+            params![id,if stopped {"stopped"} else {"interrupted"},now_millis()],
+        )?;
     }
     tx.commit()?;
+    Ok(())
+}
+
+fn recover_engineering_loops(db: &Connection) -> Result<()> {
+    db.execute(
+        "UPDATE chat_engineering_loops
+         SET state='paused',current_run_id=NULL,
+             reason='The chat server restarted during the current loop turn',updated_at=?1
+         WHERE state='running' AND current_run_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM chat_runs
+               WHERE chat_runs.id=chat_engineering_loops.current_run_id
+                 AND chat_runs.state IN ('completed','failed','stopped','interrupted')
+           )",
+        [now_millis()],
+    )?;
     Ok(())
 }
 
@@ -409,6 +1060,8 @@ fn config_json(config: &Config) -> serde_json::Value {
     agents.sort();
     serde_json::json!({
         "default_agent": config.chat_default_agent(),
+        "serialize_worktree_writes": config.chat.serialize_worktree_writes,
+        "loop_max_rounds": config.chat.loop_max_rounds,
         "permission_mode": config.permissions.mode,
         "skip_permissions": config.permissions.skip,
         "sandbox": config.sandbox.runtime,
@@ -469,6 +1122,53 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
         };
         return match result { Ok(body) => respond_text(request, 200, "application/json", body.to_string()), Err(e) => plan_error(request, e) };
     }
+    if let Some(rest) = path.strip_prefix("/api/chat/loops/") {
+        let (id, action) = rest.split_once('/').map_or((rest, ""), |(id, action)| (id, action));
+        if !valid_run_id(id) { return respond_text(request, 400, "text/plain", "invalid loop id"); }
+        return match (request.method().clone(), action) {
+            (Method::Get, "") => match engineering_loop_snapshot(app, id)? {
+                Some(body) => respond_text(request, 200, "application/json", body.to_string()),
+                None => respond_text(request, 404, "text/plain", "loop not found"),
+            },
+            (Method::Post, "stop") => {
+                let json = header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"));
+                if !json || !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+                match stop_engineering_loop(app, id)? {
+                    Some((state, run_id)) => respond_text(
+                        request, 202, "application/json",
+                        serde_json::json!({"id":id,"state":state,"current_run_id":run_id}).to_string(),
+                    ),
+                    None => respond_text(request, 404, "text/plain", "loop not found"),
+                }
+            }
+            (Method::Post, "round") => {
+                let json = header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"));
+                if !json || !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+                let mut body = String::new();
+                request.as_reader().take(MAX_BODY + 1).read_to_string(&mut body)?;
+                if body.len() as u64 > MAX_BODY {
+                    return respond_text(request, 413, "text/plain", "Loop Engineering request is too large")
+                }
+                let payload: EngineeringLoopRoundRequest = match serde_json::from_str::<EngineeringLoopRoundRequest>(&body) {
+                    Ok(payload) if matches!(payload.decision.as_str(), "approve" | "decline")
+                        && !payload.conversation_id.trim().is_empty() => payload,
+                    _ => return respond_text(request, 400, "text/plain", "invalid round decision"),
+                };
+                match decide_engineering_loop_round(app, id, &payload.conversation_id, &payload.decision)? {
+                    EngineeringLoopRoundDecision::Applied(body) => {
+                        respond_text(request, 200, "application/json", body.to_string())
+                    }
+                    EngineeringLoopRoundDecision::Missing => {
+                        respond_text(request, 404, "text/plain", "loop not found")
+                    }
+                    EngineeringLoopRoundDecision::Conflict(message) => {
+                        respond_text(request, 409, "text/plain", message)
+                    }
+                }
+            }
+            _ => respond_text(request, 404, "text/plain", "not found"),
+        };
+    }
     if let Some(rest) = path.strip_prefix("/api/chat/runs/") {
         let (id, action) = rest.split_once('/').map_or((rest, ""), |(id, action)| (id, action));
         if !valid_run_id(id) { return respond_text(request, 400, "text/plain", "invalid run id"); }
@@ -486,6 +1186,25 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
                 match stop_chat_run(app, id)? {
                     Some(state) => respond_text(request, 202, "application/json", serde_json::json!({"id":id,"state":state}).to_string()),
                     None => respond_text(request, 404, "text/plain", "run not found"),
+                }
+            }
+            (Method::Post, "force") => {
+                let json = header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"));
+                if !json || !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+                match force_chat_run(app, id)? {
+                    ForceChatRun::Forced => respond_text(
+                        request,
+                        202,
+                        "application/json",
+                        serde_json::json!({"id":id,"state":"running","forced":true}).to_string(),
+                    ),
+                    ForceChatRun::NotWaiting => respond_text(
+                        request, 409, "text/plain", "run is not waiting for the worktree lock",
+                    ),
+                    ForceChatRun::NotRunning(state) => respond_text(
+                        request, 409, "text/plain", format!("run is {state}"),
+                    ),
+                    ForceChatRun::Missing => respond_text(request, 404, "text/plain", "run not found"),
                 }
             }
             _ => respond_text(request, 404, "text/plain", "not found"),
@@ -548,6 +1267,81 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
                 }
             }
             respond_text(request, 200, "application/json", serde_json::to_string(&report)?)
+        }
+        (Method::Post, "/api/diagnostics/run") => {
+            if !same_origin(&request)
+                || !header_value(&request, "Content-Type")
+                    .is_some_and(|c| c.starts_with("application/json"))
+            {
+                return respond_text(request, 403, "text/plain", "forbidden");
+            }
+            let req: DiagnosticActionRequest =
+                match serde_json::from_reader(request.as_reader().take(64 * 1024)) {
+                    Ok(req) => req,
+                    Err(_) => {
+                        return respond_text(
+                            request,
+                            400,
+                            "text/plain",
+                            "Invalid environment action request",
+                        );
+                    }
+                };
+            let root = match crate::common::workspaces::resolve(
+                &app.repo_root,
+                req.checkout.as_deref(),
+            ) {
+                Ok(root) => root,
+                Err(_) => {
+                    return respond_text(
+                        request,
+                        400,
+                        "text/plain",
+                        "Select a registered worktree of this repository",
+                    );
+                }
+            };
+            let config = Config::load_merged(&root)?;
+            let report = diagnostics::snapshot(&root, &config);
+            let agent = report
+                .agents
+                .iter()
+                .find(|agent| agent.action == req.command)
+                .map(|agent| agent.agent.clone());
+            let result = if req.command == "aic sandbox build"
+                && (report.runtime.action == req.command || report.image.action == req.command)
+            {
+                crate::commands::sandbox::build(&config, None, None)
+            } else if let Some(agent) =
+                agent.filter(|_| req.command.starts_with("aic agent test "))
+            {
+                diagnostics::test_agent(&root, &config, &agent, Duration::from_secs(45))
+                    .map(|_| ())
+            } else {
+                return respond_text(
+                    request,
+                    409,
+                    "application/json",
+                    serde_json::json!({
+                        "error": "This action requires an interactive terminal or is no longer needed. Refresh Environment and use Copy if it still appears."
+                    })
+                    .to_string(),
+                );
+            };
+            match result {
+                Ok(()) => respond_text(
+                    request,
+                    200,
+                    "application/json",
+                    serde_json::json!({"ok":true}).to_string(),
+                ),
+                Err(err) => respond_text(
+                    request,
+                    422,
+                    "application/json",
+                    serde_json::json!({"error":format!("{err:#}")}).to_string(),
+                ),
+            }
         }
         (Method::Get, "/api/git") => {
             let selected = query_value(request.url(), "checkout");
@@ -822,6 +1616,9 @@ fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()
     if req.sandbox_image.trim().is_empty() {
         return respond_text(request, 400, "text/plain", "sandbox_image cannot be empty");
     }
+    if req.loop_max_rounds.is_some_and(|rounds| !(1..=20).contains(&rounds)) {
+        return respond_text(request, 400, "text/plain", "loop_max_rounds must be between 1 and 20");
+    }
 
     let mut global = Config::load_global()?;
     let available = current_config(app);
@@ -835,6 +1632,12 @@ fn save_settings(app: &App, request: Request, req: SettingsRequest) -> Result<()
         }
     }
     global.chat.default_agent = req.default_agent;
+    if let Some(value) = req.serialize_worktree_writes {
+        global.chat.serialize_worktree_writes = value;
+    }
+    if let Some(value) = req.loop_max_rounds {
+        global.chat.loop_max_rounds = value;
+    }
     global.permissions.mode = req.permission_mode;
     global.permissions.skip = req.skip_permissions;
     global.sandbox.runtime = req.sandbox;
@@ -1030,6 +1833,12 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
     if run_id.as_deref().is_some_and(|id| !valid_run_id(id)) {
         return respond_text(request, 400, "text/plain", "invalid run id");
     }
+    if req.engineering_loop.is_some()
+        && (run_id.is_none() || req.conversation_id.as_deref().is_none_or(str::is_empty)
+            || req.participant.as_deref().is_none_or(str::is_empty))
+    {
+        return respond_text(request, 400, "text/plain", "Loop Engineering requires a durable run, conversation and participant");
+    }
     let work_root = match crate::common::workspaces::resolve(&app.repo_root, req.checkout.as_deref()) {
         Ok(root) => root, Err(_) => return respond_text(request, 400, "text/plain", "Selected checkout is not a registered worktree"),
     };
@@ -1069,6 +1878,24 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
             return respond_text(request, 409, "text/plain", "This execution id is already in use; retry the message");
         }
     }
+    if let Some(engineering_loop) = &req.engineering_loop {
+        let result = begin_engineering_loop_turn(
+            app,
+            engineering_loop,
+            req.conversation_id.as_deref().expect("validated Loop Engineering conversation"),
+            req.participant.as_deref().expect("validated Loop Engineering participant"),
+            run_id.as_deref().expect("validated Loop Engineering run"),
+            &work_root,
+            config.chat.loop_max_rounds,
+        );
+        if let Err(err) = result {
+            if let Some(id) = &run_id {
+                let db = app.chat_db.lock().expect("chat database lock poisoned");
+                let _ = db.execute("DELETE FROM chat_runs WHERE id=?1", [id]);
+            }
+            return respond_text(request, 409, "text/plain", format!("Loop Engineering rejected: {err:#}"));
+        }
+    }
     req.write = guard.turn.write;
     let sandboxed = config.sandbox.runtime != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
@@ -1076,8 +1903,11 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
     let was_resumed = resume.is_some();
     let conversation = req.conversation_id.filter(|s| !s.is_empty());
     let agent_name = req.agent.clone();
+    let engineering_loop_id = req.engineering_loop.as_ref().map(|engineering_loop| engineering_loop.id.clone());
     let mut accounted = false;
     let mut started = false;
+    let mut engineering_loop_output = String::new();
+    let mut engineering_loop_finished = false;
 
     // Tell the agent what it may do, so it says so instead of hunting for a
     // workaround (copying files to /tmp, writing patches nobody can apply).
@@ -1091,8 +1921,9 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
     let plan_api_note = guard.turn.plan_slug.as_deref().map(|slug| format!(
         "The current chat server is available as $AIC_CHAT_API and the selected checkout as $AIC_CHAT_CHECKOUT. Create plan tasks through HTTP POST to $AIC_CHAT_API/api/plans/{slug}/tasks with Content-Type: application/json and a body containing checkout, title and the current plan version. Read the current version with GET first, then use the updated version returned by each POST for the next task. Do not start another aic chat server."
     ));
+    let engineering_loop_note = req.engineering_loop.as_ref().map(engineering_loop_system);
     let system = [Some(access_note), req.system.as_deref().filter(|s| !s.trim().is_empty()),
-        (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
+        engineering_loop_note.as_deref(), (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -1105,12 +1936,13 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         // session then remembers.
         if resume.is_none() {
             prompt = format!("{system}\n\n{prompt}");
-        } else if !guard.turn.system.is_empty() {
-            // A selected task may change between turns of a native session.
-            // Re-send server-owned plan and access framing on every such turn.
-            let current_plan = [Some(guard.turn.system.as_str()), plan_api_note.as_deref()]
+        } else if engineering_loop_note.is_some() || !guard.turn.system.is_empty() {
+            // Selected tasks and loop phases may change between turns of a
+            // native session. Re-send server-owned framing on every such turn.
+            let current_context = [engineering_loop_note.as_deref(),
+                (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
                 .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
-            prompt = format!("{access_note}\n\n{current_plan}\n\n{prompt}");
+            prompt = format!("{access_note}\n\n{current_context}\n\n{prompt}");
         }
         system_prompt = None;
     }
@@ -1156,8 +1988,135 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         None,
     );
     let responder = thread::spawn(move || request.respond(response));
+    // tiny_http starts writing the response only after its body reader yields
+    // data. Open the NDJSON stream before lock coordination so the browser is
+    // not left waiting for headers while the run is queued. Blank lines are
+    // already defined as heartbeats and ignored by the client.
+    let _ = tx.send(b"\n".to_vec());
     if let Some(execution_id) = &guard.turn.execution_id {
         emit_json(app, run_id.as_deref(), &tx, serde_json::json!({"type":"execution","id":execution_id}));
+    }
+
+    let write_lock = if req.write && config.chat.serialize_worktree_writes {
+        let owner = WorktreeWriteLockOwner {
+            token: format!(
+                "{}-{}-{}",
+                std::process::id(),
+                now_millis(),
+                WRITE_LOCK_IDS.fetch_add(1, Ordering::Relaxed)
+            ),
+            pid: std::process::id(),
+            process_pid: None,
+            agent: agent_name.clone(),
+            participant: req
+                .participant
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| agent_name.clone()),
+            conversation: conversation.clone(),
+            run_id: run_id.clone(),
+        };
+        let mut waiting_for: Option<Option<String>> = None;
+        loop {
+            if chat_run_was_stopped(app, run_id.as_deref()) {
+                emit_chat_event(app, run_id.as_deref(), &tx, &failed("Stopped.".into()));
+                if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+                    let _ = finish_engineering_loop_turn(app, loop_id, run_id, "", false);
+                }
+                drop(guard);
+                drop(tx);
+                responder.join().map_err(|_| anyhow!("response thread panicked"))??;
+                return Ok(());
+            }
+            if chat_run_is_forced(app, run_id.as_deref())
+                || !current_config(app).chat.serialize_worktree_writes
+            {
+                set_chat_run_waiting_for_write_lock(app, run_id.as_deref(), false)?;
+                if waiting_for.is_some() {
+                    emit_json(
+                        app,
+                        run_id.as_deref(),
+                        &tx,
+                        serde_json::json!({
+                            "type":"waiting", "reason":"worktree_lock", "waiting":false
+                        }),
+                    );
+                }
+                break None;
+            }
+            match try_worktree_write_lock(&work_root, &owner) {
+                Ok(WorktreeWriteLockAttempt::Acquired(lock)) => {
+                    set_chat_run_waiting_for_write_lock(app, run_id.as_deref(), false)?;
+                    if waiting_for.is_some() {
+                        emit_json(
+                            app,
+                            run_id.as_deref(),
+                            &tx,
+                            serde_json::json!({
+                                "type":"waiting", "reason":"worktree_lock", "waiting":false
+                            }),
+                        );
+                    }
+                    break Some(lock);
+                }
+                Ok(WorktreeWriteLockAttempt::Waiting(holder)) => {
+                    let holder_token = holder.as_ref().map(|holder| holder.token.clone());
+                    if waiting_for.as_ref() != Some(&holder_token) {
+                        // Persist before publishing the event: once the button is
+                        // visible, its request must be accepted by the backend.
+                        set_chat_run_waiting_for_write_lock(app, run_id.as_deref(), true)?;
+                        let label = holder
+                            .as_ref()
+                            .map(|holder| holder.participant.as_str())
+                            .filter(|label| !label.trim().is_empty())
+                            .unwrap_or("another writer");
+                        emit_json(
+                            app,
+                            run_id.as_deref(),
+                            &tx,
+                            serde_json::json!({
+                                "type":"waiting", "reason":"worktree_lock",
+                                "waiting":true, "holder":label
+                            }),
+                        );
+                        waiting_for = Some(holder_token);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(err) => {
+                    emit_chat_event(
+                        app,
+                        run_id.as_deref(),
+                        &tx,
+                        &failed(format!("Could not coordinate write access: {err:#}")),
+                    );
+                    if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+                        let _ = finish_engineering_loop_turn(app, loop_id, run_id, "", false);
+                    }
+                    drop(guard);
+                    drop(tx);
+                    responder.join().map_err(|_| anyhow!("response thread panicked"))??;
+                    return Ok(());
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    // Stop may race with the transition from the lock queue to process
+    // startup. Avoid spawning at all when the request was cancelled after it
+    // acquired its lease but before an active process could be registered.
+    if chat_run_was_stopped(app, run_id.as_deref()) {
+        emit_chat_event(app, run_id.as_deref(), &tx, &failed("Stopped.".into()));
+        if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+            let _ = finish_engineering_loop_turn(app, loop_id, run_id, "", false);
+        }
+        drop(guard);
+        drop(write_lock);
+        drop(tx);
+        responder.join().map_err(|_| anyhow!("response thread panicked"))??;
+        return Ok(());
     }
 
     match agent.spawn_stream(&opts) {
@@ -1166,17 +2125,48 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
             emit_chat_event(app, run_id.as_deref(), &tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
         }
         Ok(process) => {
+            if let Some(lock) = &write_lock
+                && let Err(err) = lock.attach_process(process.child.id())
+            {
+                process.killer.kill();
+                let mut child = process.child;
+                let _ = child.wait();
+                emit_chat_event(
+                    app,
+                    run_id.as_deref(),
+                    &tx,
+                    &failed(format!("Could not preserve write-lock ownership: {err:#}")),
+                );
+                if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+                    let _ = finish_engineering_loop_turn(app, loop_id, run_id, "", false);
+                }
+                drop(guard);
+                drop(write_lock);
+                drop(tx);
+                responder.join().map_err(|_| anyhow!("response thread panicked"))??;
+                return Ok(());
+            }
             if let Err(err) = plans::attach_process(&app.chat_db.lock().expect("chat database lock poisoned"), &guard.turn.token, &process.killer) {
                 process.killer.kill();
                 let mut child = process.child;
                 let _ = child.wait();
                 emit_chat_event(app, run_id.as_deref(), &tx, &failed("Execution could not be recorded. Preserve your draft and retry.".into()));
+                if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+                    let _ = finish_engineering_loop_turn(app, loop_id, run_id, "", false);
+                }
                 drop(tx);
                 return Err(err);
             }
             started = true;
             if let Some(id) = &run_id {
                 app.active_runs.lock().expect("active runs lock poisoned").insert(id.clone(), process.killer.clone());
+            }
+            // A stop can also arrive while spawn_stream or lock attachment is
+            // in progress, before active_runs contains the killer. Recheck
+            // after registration; from this point onward stop_chat_run can
+            // always find and kill the process itself.
+            if chat_run_was_stopped(app, run_id.as_deref()) {
+                process.killer.kill();
             }
             // Heartbeats keep the live response moving through proxies. A
             // durable run ignores a disconnected response and continues; an
@@ -1199,6 +2189,13 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
                 })
             };
             let result = pump_agent(agent.is_agy(), agent.is_codex(), process, |event| {
+                match &*event {
+                    ChatEvent::Delta { text } => engineering_loop_output.push_str(text),
+                    ChatEvent::Done { text, .. } if engineering_loop_output.is_empty() => {
+                        engineering_loop_output.push_str(text)
+                    }
+                    _ => {}
+                }
                 if let ChatEvent::Session { id } = event {
                     native_session = Some(id.clone());
                     let db = app.chat_db.lock().expect("chat database lock poisoned");
@@ -1207,11 +2204,23 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
                         let _ = db.execute("INSERT OR IGNORE INTO native_session_plan(agent,session_id,conversation_id,plan_slug) VALUES (?1,?2,?3,?4)",params![agent_name,id.as_str(),conversation,guard.turn.plan_slug]);
                     }
                 }
-                if let ChatEvent::Done { ok: false, error, .. } = event {
+                if let ChatEvent::Done { ok: false, error, .. } = event
+                    && !chat_run_was_stopped(app, run_id.as_deref())
+                {
                     let _ = diagnostics::record_failure(&work_root, &config, &agent_name, error.as_deref().unwrap_or("execution failed"));
                     *error = Some(diagnostics::classify_error(error.as_deref().unwrap_or("execution failed")).1.into());
                 }
-                if let ChatEvent::Done { ok, .. } = event { guard.success = *ok; }
+                if let ChatEvent::Done { ok, .. } = event {
+                    guard.success = *ok;
+                    if let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref()) {
+                        if let Err(err) = finish_engineering_loop_turn(
+                            app, loop_id, run_id, &engineering_loop_output, *ok,
+                        ) {
+                            eprintln!("advancing Loop Engineering failed: {err:#}");
+                        }
+                        engineering_loop_finished = true;
+                    }
+                }
                 if let ChatEvent::Done { usage, .. } = event {
                     if !accounted {
                         if let Some(conversation) = &conversation {
@@ -1237,10 +2246,22 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
             let _ = watcher.join();
             if let Err(err) = result {
                 guard.success = false;
-                let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
-                emit_chat_event(app, run_id.as_deref(), &tx, &failed(diagnostics::classify_error(&err.to_string()).1.into()));
+                let stopped = chat_run_was_stopped(app, run_id.as_deref());
+                if !stopped {
+                    let _ = diagnostics::record_failure(&work_root, &config, &agent_name, &err.to_string());
+                }
+                let message = if stopped { "Stopped." } else { diagnostics::classify_error(&err.to_string()).1 };
+                emit_chat_event(app, run_id.as_deref(), &tx, &failed(message.into()));
             }
         }
+    }
+    if !engineering_loop_finished
+        && let (Some(loop_id), Some(run_id)) = (engineering_loop_id.as_deref(), run_id.as_deref())
+        && let Err(err) = finish_engineering_loop_turn(
+            app, loop_id, run_id, &engineering_loop_output, guard.success,
+        )
+    {
+        eprintln!("advancing Loop Engineering failed: {err:#}");
     }
     // A process that never started did not produce a reply or consume usage.
     // Once started, a failure without a final Usage event remains a partial
@@ -1259,6 +2280,7 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
     // should not trigger an account quota read.
     if started && conversation.is_some() { refresh_quota(app, &agent_name); }
     drop(guard);
+    drop(write_lock);
     drop(tx);
     responder.join().map_err(|_| anyhow!("response thread panicked"))??;
     Ok(())
@@ -1323,12 +2345,54 @@ fn pump_agent(is_agy: bool, is_codex: bool, process: AgentProcess, mut emit: imp
 mod tests {
     use super::*;
 
+    fn write_lock_owner(token: &str, participant: &str, conversation: &str) -> WorktreeWriteLockOwner {
+        WorktreeWriteLockOwner {
+            token: token.into(),
+            pid: std::process::id(),
+            process_pid: None,
+            agent: "codex".into(),
+            participant: participant.into(),
+            conversation: Some(conversation.into()),
+            run_id: Some(token.into()),
+        }
+    }
+
     fn test_app(root: &Path) -> App {
         App {
             repo_root: root.to_path_buf(), config: RwLock::new(Config::default()),
             chat_db: Mutex::new(open_chat_db(root).unwrap()), allowed_hosts: None, api_url: "http://127.0.0.1:7878".into(),
             models: Mutex::default(), quotas: Mutex::default(), active_runs: Mutex::default(),
         }
+    }
+
+    #[test]
+    fn worktree_write_lock_groups_writers_by_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = match try_worktree_write_lock(dir.path(), &write_lock_owner("one", "Writer One", "conversation-a")).unwrap() {
+            WorktreeWriteLockAttempt::Acquired(lock) => lock,
+            WorktreeWriteLockAttempt::Waiting(_) => panic!("first writer should acquire the lock"),
+        };
+        let path = dir.path().join(".aic/chat/worktree-write.lock");
+        assert!(path.is_file());
+        let peer = match try_worktree_write_lock(dir.path(), &write_lock_owner("peer", "Writer Peer", "conversation-a")).unwrap() {
+            WorktreeWriteLockAttempt::Acquired(lock) => lock,
+            WorktreeWriteLockAttempt::Waiting(_) => panic!("writers in the same conversation should share the lock"),
+        };
+        match try_worktree_write_lock(dir.path(), &write_lock_owner("two", "Writer Two", "conversation-b")).unwrap() {
+            WorktreeWriteLockAttempt::Waiting(Some(holder)) => {
+                assert_eq!(holder.token, "one");
+                assert_eq!(holder.participant, "Writer One");
+            }
+            _ => panic!("second writer must wait"),
+        }
+        drop(first);
+        assert!(path.exists(), "the same-conversation peer still holds a lease");
+        drop(peer);
+        assert!(!path.exists());
+        assert!(matches!(
+            try_worktree_write_lock(dir.path(), &write_lock_owner("two", "Writer Two", "conversation-b")).unwrap(),
+            WorktreeWriteLockAttempt::Acquired(_)
+        ));
     }
 
     #[test]
@@ -1345,9 +2409,247 @@ mod tests {
         assert_eq!(replay["events"][0]["text"], "two");
 
         assert_eq!(stop_chat_run(&app, "run-1").unwrap().as_deref(), Some("stopping"));
+        assert!(chat_run_was_stopped(&app, Some("run-1")));
         let done = append_chat_run_event(&app, "run-1", serde_json::json!({"type":"done","ok":false,"error":"process exited"})).unwrap();
         assert_eq!(done["stopped"], true);
         assert_eq!(chat_run_snapshot(&app, "run-1", 0).unwrap().unwrap()["state"], "stopped");
+        assert!(chat_run_was_stopped(&app, Some("run-1")));
+    }
+
+    #[test]
+    fn a_running_chat_run_can_bypass_the_worktree_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        create_chat_run(&app, "forced-run", Some("conversation"), Some("Dev")).unwrap();
+        assert!(!chat_run_is_forced(&app, Some("forced-run")));
+        assert_eq!(force_chat_run(&app, "forced-run").unwrap(), ForceChatRun::NotWaiting);
+        set_chat_run_waiting_for_write_lock(&app, Some("forced-run"), true).unwrap();
+        assert_eq!(force_chat_run(&app, "forced-run").unwrap(), ForceChatRun::Forced);
+        assert!(chat_run_is_forced(&app, Some("forced-run")));
+
+        create_chat_run(&app, "finished-run", Some("conversation"), Some("Dev")).unwrap();
+        set_chat_run_waiting_for_write_lock(&app, Some("finished-run"), true).unwrap();
+        append_chat_run_event(&app, "finished-run", serde_json::json!({"type":"done","ok":true})).unwrap();
+        assert_eq!(
+            force_chat_run(&app, "finished-run").unwrap(),
+            ForceChatRun::NotRunning("completed".into()),
+        );
+        assert_eq!(force_chat_run(&app, "missing-run").unwrap(), ForceChatRun::Missing);
+    }
+
+    fn loop_request(
+        id: &str,
+        phase: &str,
+        round: u32,
+        turns: u32,
+        reviewer: Option<&str>,
+        current: &str,
+    ) -> EngineeringLoopRequest {
+        EngineeringLoopRequest {
+            id: id.into(), state: "running".into(), phase: phase.into(), round, turns,
+            max_rounds: 3, max_turns: 6, implementer: "Impl".into(),
+            reviewer: reviewer.map(str::to_owned), current: current.into(), objective: "Build it".into(),
+        }
+    }
+
+    #[test]
+    fn engineering_loop_validates_and_persists_each_transition() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        let state = serde_json::json!({"convs":[{
+            "id":"conversation", "participants":[
+                {"name":"Impl","write":true}, {"name":"Review","write":false,"role":"Reviewer"}
+            ], "log":[]
+        }],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "INSERT INTO chat_state(id,state_json,drafts_json,updated_at) VALUES (1,?1,'{}',?2)",
+            params![state.to_string(),now_millis()],
+        ).unwrap();
+
+        let root = dir.path();
+        begin_engineering_loop_turn(
+            &app, &loop_request("loop-1","implementing",1,0,None,"Impl"),
+            "conversation", "Impl", "run-1", root, 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-1", "run-1",
+            "Implemented. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+        ).unwrap();
+        let review = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
+        assert_eq!(review["phase"], "reviewing"); assert_eq!(review["turns"], 1);
+        assert_eq!(review["current"], "Review");
+
+        begin_engineering_loop_turn(
+            &app, &loop_request("loop-1","reviewing",1,1,Some("Review"),"Review"),
+            "conversation", "Review", "run-2", root, 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-1", "run-2",
+            "Needs work. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->", true,
+        ).unwrap();
+        let changes = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
+        assert_eq!(changes["phase"], "implementing"); assert_eq!(changes["round"], 2);
+        assert_eq!(changes["turns"], 2); assert_eq!(changes["current"], "Impl");
+
+        begin_engineering_loop_turn(
+            &app, &loop_request("loop-1","implementing",2,2,Some("Review"),"Impl"),
+            "conversation", "Impl", "run-3", root, 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-1", "run-3",
+            "Fixed. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+        ).unwrap();
+        begin_engineering_loop_turn(
+            &app, &loop_request("loop-1","reviewing",2,3,Some("Review"),"Review"),
+            "conversation", "Review", "run-4", root, 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-1", "run-4", "Approved. <!-- aic-loop {\"verdict\":\"approved\"} -->", true,
+        ).unwrap();
+        let approved = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
+        assert_eq!(approved["state"], "approved"); assert_eq!(approved["turns"], 4);
+        assert!(approved["finished_at"].is_number());
+    }
+
+    #[test]
+    fn stopping_engineering_loop_stops_its_current_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        let state = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Impl","write":true},{"name":"Review","write":false}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "INSERT INTO chat_state(id,state_json,drafts_json,updated_at) VALUES (1,?1,'{}',?2)",
+            params![state.to_string(),now_millis()],
+        ).unwrap();
+        create_chat_run(&app,"loop-run",Some("conversation"),Some("Impl")).unwrap();
+        begin_engineering_loop_turn(
+            &app, &loop_request("loop-stop","implementing",1,0,Some("Review"),"Impl"),
+            "conversation", "Impl", "loop-run", dir.path(), 3,
+        ).unwrap();
+        assert_eq!(stop_engineering_loop(&app,"loop-stop").unwrap().unwrap().0,"stopped");
+        assert!(chat_run_was_stopped(&app,Some("loop-run")));
+        assert_eq!(engineering_loop_snapshot(&app,"loop-stop").unwrap().unwrap()["state"],"stopped");
+    }
+
+    #[test]
+    fn engineering_loop_can_be_approved_on_its_final_allowed_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        let state = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Impl","write":true},{"name":"Review","write":false}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "INSERT INTO chat_state(id,state_json,drafts_json,updated_at) VALUES (1,?1,'{}',?2)",
+            params![state.to_string(),now_millis()],
+        ).unwrap();
+        let mut implementing = loop_request("loop-final","implementing",1,0,Some("Review"),"Impl");
+        implementing.max_rounds = 1;
+        implementing.max_turns = 2;
+        begin_engineering_loop_turn(
+            &app, &implementing, "conversation", "Impl", "run-final-1", dir.path(), 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-final", "run-final-1",
+            "Ready. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+        ).unwrap();
+        let mut reviewing = loop_request("loop-final","reviewing",1,1,Some("Review"),"Review");
+        reviewing.max_rounds = 1;
+        reviewing.max_turns = 2;
+        begin_engineering_loop_turn(
+            &app, &reviewing, "conversation", "Review", "run-final-2", dir.path(), 3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app, "loop-final", "run-final-2",
+            "Approved. <!-- aic-loop {\"verdict\":\"approved\"} -->", true,
+        ).unwrap();
+        let approved = engineering_loop_snapshot(&app,"loop-final").unwrap().unwrap();
+        assert_eq!(approved["state"],"approved");
+        assert_eq!(approved["turns"],2);
+    }
+
+    #[test]
+    fn engineering_loop_requires_a_human_decision_for_each_extra_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        let state = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Impl","write":true},{"name":"Review","write":false}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "INSERT INTO chat_state(id,state_json,drafts_json,updated_at) VALUES (1,?1,'{}',?2)",
+            params![state.to_string(),now_millis()],
+        ).unwrap();
+        let mut implementing = loop_request("loop-extra","implementing",1,0,Some("Review"),"Impl");
+        implementing.max_rounds = 1; implementing.max_turns = 2;
+        begin_engineering_loop_turn(
+            &app,&implementing,"conversation","Impl","extra-1",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"loop-extra","extra-1",
+            "Done. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->",true,
+        ).unwrap();
+        let mut reviewing = loop_request("loop-extra","reviewing",1,1,Some("Review"),"Review");
+        reviewing.max_rounds = 1; reviewing.max_turns = 2;
+        begin_engineering_loop_turn(
+            &app,&reviewing,"conversation","Review","extra-2",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"loop-extra","extra-2",
+            "Changes. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->",true,
+        ).unwrap();
+        let waiting = engineering_loop_snapshot(&app,"loop-extra").unwrap().unwrap();
+        assert_eq!(waiting["state"],"awaiting_round_approval");
+        assert_eq!(waiting["round"],1); assert_eq!(waiting["turns"],2);
+        assert!(matches!(
+            decide_engineering_loop_round(&app,"loop-extra","other","approve").unwrap(),
+            EngineeringLoopRoundDecision::Conflict(_)
+        ));
+        let unavailable = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Impl","write":false},{"name":"Review","write":false}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "UPDATE chat_state SET state_json=?1,updated_at=?2 WHERE id=1",
+            params![unavailable.to_string(),now_millis()],
+        ).unwrap();
+        assert!(matches!(
+            decide_engineering_loop_round(&app,"loop-extra","conversation","approve").unwrap(),
+            EngineeringLoopRoundDecision::Conflict(_)
+        ));
+        app.chat_db.lock().unwrap().execute(
+            "UPDATE chat_state SET state_json=?1,updated_at=?2 WHERE id=1",
+            params![state.to_string(),now_millis()],
+        ).unwrap();
+        let EngineeringLoopRoundDecision::Applied(approved) =
+            decide_engineering_loop_round(&app,"loop-extra","conversation","approve").unwrap()
+        else { panic!("round approval should be applied") };
+        assert_eq!(approved["state"],"running"); assert_eq!(approved["round"],2);
+        assert_eq!(approved["max_rounds"],2); assert_eq!(approved["max_turns"],4);
+
+        let mut implementing = loop_request("loop-extra","implementing",2,2,Some("Review"),"Impl");
+        implementing.max_rounds = 2; implementing.max_turns = 4;
+        begin_engineering_loop_turn(
+            &app,&implementing,"conversation","Impl","extra-3",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"loop-extra","extra-3",
+            "Again. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->",true,
+        ).unwrap();
+        let mut reviewing = loop_request("loop-extra","reviewing",2,3,Some("Review"),"Review");
+        reviewing.max_rounds = 2; reviewing.max_turns = 4;
+        begin_engineering_loop_turn(
+            &app,&reviewing,"conversation","Review","extra-4",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"loop-extra","extra-4",
+            "Still changes. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->",true,
+        ).unwrap();
+        assert_eq!(engineering_loop_snapshot(&app,"loop-extra").unwrap().unwrap()["state"],"awaiting_round_approval");
+        let EngineeringLoopRoundDecision::Applied(declined) =
+            decide_engineering_loop_round(&app,"loop-extra","conversation","decline").unwrap()
+        else { panic!("round decline should be applied") };
+        assert_eq!(declined["state"],"declined");
+        let terminal = engineering_loop_snapshot(&app,"loop-extra").unwrap().unwrap();
+        assert_eq!(terminal["state"],"declined"); assert!(terminal["finished_at"].is_number());
     }
 
     #[test]

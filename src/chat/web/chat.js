@@ -22,6 +22,7 @@ let quotaData = { agents: [], consumption: {} }, quotaConversation = null, quota
 const quotaExpanded = new Set(), quotaLevels = new Map(), quotaExpiryAttempts = new Map();
 const quotaManualReads = new Set();
 let quotaRefreshPending = false;
+let loopMaxRounds = 3;
 
 /* ---------- small helpers ---------- */
 function el(tag, cls, text) {
@@ -933,7 +934,9 @@ function convRow(c) {
   open.appendChild(el("span", "title", c.title));
   const sub = el("span", "sub");
   c.participants.slice(0, 8).forEach((p) => { const d = applyParticipantColour(el("span", "dot"), hueOf(p)); d.title = p.name; sub.appendChild(d); });
-  if (busy(c)) sub.appendChild(el("span", "working dots", "working"));
+  const lockWait = c.log.find((entry) => entry.pending && entry.waiting?.reason === "worktree_lock");
+  if (lockWait) sub.appendChild(el("span", "lockworking", `waiting for ${lockWait.waiting.holder || "another writer"}`));
+  else if (busy(c)) sub.appendChild(el("span", "working dots", "working"));
   open.appendChild(sub);
   if (c.id === state.current) open.setAttribute("aria-current", "true");
   open.onclick = () => { if (c.id !== state.current) switchTo(c.id); else document.body.classList.remove("drawer"); };
@@ -1175,13 +1178,13 @@ function paintCard(c, e) {
     tools.appendChild(ex); k.head.appendChild(tools);
   }
 
-  if (changed("status", [e.pending, e.activity || "", !!e.text])) {
+  if (changed("status", [e.pending, e.activity || "", !!e.text, e.waiting || null])) {
     k.status.textContent = "";
-    if (e.pending) {
+    if (e.pending && !e.waiting) {
       const act = el("span", "act dots", e.activity || (e.text ? "Writing" : "Thinking"));
       k.status.appendChild(act);
     }
-    k.status.hidden = !e.pending;
+    k.status.hidden = !e.pending || !!e.waiting;
   }
 
   if (e.error) {
@@ -1295,7 +1298,7 @@ function userBubble(c, e) {
     if (e.edited) u.appendChild(el("span", "edited", "edited"));
     const tools = el("span", "hovertools tools");
     tools.appendChild(iconBtn("copy", "Copy message", function () { copyText(e.text, this); }));
-    if (!busy(c) && lastUserEntry(c) === e) tools.appendChild(iconBtn("edit", "Edit and resend", () => editUser(c, e, u)));
+    if (!busy(c) && lastUserEntry(c) === e) tools.appendChild(iconBtn("edit", "Edit and Resend", () => editUser(c, e, u)));
     tools.appendChild(iconBtn("trash", "Delete message", () => deleteEntry(c, e)));
     u.appendChild(tools);
   };
@@ -1308,7 +1311,7 @@ function editUser(c, e, u) {
   const ta = el("textarea"); ta.value = e.text; ta.setAttribute("aria-label", "Edit message");
   const bar = el("div", "editbar");
   const cancel = el("button", "", "Cancel"); cancel.type = "button"; cancel.onclick = () => u._fill();
-  const ok = el("button", "primary", "Save & resend"); ok.type = "button";
+  const ok = el("button", "primary", "Save & Resend"); ok.type = "button";
   ok.onclick = () => { const t = ta.value.trim(); if (t) resendEdited(c, e, t); };
   ta.onkeydown = (ev) => {
     if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); ok.click(); }
@@ -1514,6 +1517,18 @@ function recipients(c, text) {
   const names = named && named.length ? named : c.sendTo;
   return names ? active(c).filter((p) => names.includes(p.name)) : active(c);
 }
+function composerLockNotice(conversation) {
+  const waits = (conversation?.log || [])
+    .filter((entry) => entry.pending && entry.waiting?.reason === "worktree_lock")
+    .map((entry) => ({ conversation, entry }));
+  if (!waits.length) return null;
+  const holders = uniq(waits.map(({ entry }) => entry.waiting.holder).filter(Boolean));
+  const holder = holders.length === 1 ? holders[0] : "another conversation";
+  return {
+    waits,
+    text: `${waits[0].entry.from} in “${waits[0].conversation.title}” is waiting for ${holder}. For safety, only one conversation can write to a worktree at a time.\nCheck the "Serialize writers across conversations" option in the chat settings for more information.`,
+  };
+}
 function renderComposer() {
   const c = cur(), to = $("to"); to.textContent = "";
   if (c) {
@@ -1536,6 +1551,22 @@ function renderComposer() {
       to.appendChild(b);
     });
   }
+  const lock = composerLockNotice(c), lockBanner = $("composerlock");
+  lockBanner.hidden = !lock;
+  if (lock) $("composerlocktext").textContent = lock.text;
+  const loop = c?.engineeringLoop, loopBanner = $("engineeringloop");
+  const loopActive = !!loop && ["running", "paused", "awaiting_round_approval"].includes(loop.state);
+  loopBanner.hidden = !loopActive;
+  if (loopActive) {
+    const phase = loop.state === "awaiting_round_approval" ? "Waiting for your decision"
+      : loop.state === "paused" ? "Paused" : loop.phase === "reviewing" ? "Reviewing" : "Implementing";
+    const reason = loop.reason?.replace(/\s+(Continue for one more round\?)$/, "\n$1");
+    $("engineeringloopstatus").textContent = `Round ${loop.round}/${loop.maxRounds} · ${phase} · ${loop.current || "selecting participant"}`
+      + (["paused", "awaiting_round_approval"].includes(loop.state) && reason ? ` · ${reason}` : "");
+    $("engineeringloopdecision").hidden = loop.state !== "awaiting_round_approval";
+    $("engineeringloopstop").hidden = loop.state === "awaiting_round_approval";
+    $("engineeringloopstop").disabled = false;
+  }
   const send = $("send"), stop = busy(c);
   setIcon(send, stop ? "stop" : "send");
   send.classList.toggle("stop", stop);
@@ -1544,6 +1575,80 @@ function renderComposer() {
   send.disabled = !c || !c.participants.length;
   renderHint();
 }
+$("composerlockforce").onclick = async () => {
+  const lock = composerLockNotice(cur());
+  if (!lock) return;
+  const button = $("composerlockforce"); button.disabled = true; button.textContent = "Forcing…";
+  const forced = lock.waits.map(({ entry }) => ({ entry, waiting: entry.waiting, eventSeq: entry.event_seq || 0 }));
+  forced.forEach(({ entry }) => delete entry.waiting);
+  render();
+  try {
+    const results = await Promise.all(forced.map(async ({ entry, waiting, eventSeq }) => {
+      try {
+        const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '/force', {
+          method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
+        });
+        if (!response.ok) throw new Error(await response.text() || 'Could not force the execution.');
+        return null;
+      } catch (error) {
+        // A normal lock release may win the race with this request. Do not
+        // resurrect its stale notice after a newer durable event has arrived.
+        if (entry.pending && (entry.event_seq || 0) === eventSeq) entry.waiting = waiting;
+        return error;
+      }
+    }));
+    const errors = results.filter(Boolean);
+    if (errors.length) {
+      render();
+      toast('Could not force ' + (errors.length === 1 ? 'the execution: ' : `${errors.length} executions: `) + (errors[0].message || errors[0]));
+    }
+  } finally {
+    button.disabled = false; button.textContent = "Force Execution"; $("input").focus();
+  }
+};
+$("engineeringloopstop").onclick = async () => {
+  const c = cur(), loop = c?.engineeringLoop;
+  if (!loop || !["running", "paused"].includes(loop.state)) return;
+  const button = $("engineeringloopstop"); button.disabled = true; button.textContent = "Stopping…";
+  try {
+    const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id) + '/stop', {
+      method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({conversation_id:c.id}),
+    });
+    if (!response.ok && response.status !== 404) throw new Error(await response.text());
+    stopAll(c); loop.state = "stopped"; loop.finishedAt = Date.now(); save(); render();
+  } catch (error) { toast("Could not stop Loop Engineering: " + (error.message || error)); }
+  finally { button.disabled = false; button.textContent = "Stop Loop Engineering"; }
+};
+async function decideEngineeringLoopRound(approve) {
+  const c = cur(), loop = c?.engineeringLoop;
+  if (!loop || loop.state !== "awaiting_round_approval") return;
+  const approveButton = $("engineeringloopapprove"), declineButton = $("engineeringloopdecline");
+  approveButton.disabled = declineButton.disabled = true;
+  try {
+    const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id) + '/round', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({conversation_id:c.id, decision:approve ? "approve" : "decline"}),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    const snapshot = await response.json();
+    if (!approve) {
+      loop.state = snapshot.state || "declined"; loop.reason = snapshot.reason || "Another round was declined by the user.";
+      loop.finishedAt = Date.now(); save(); render(); return;
+    }
+    const implementer = active(c).find((participant) => participant.name === loop.implementer);
+    if (!implementer) {
+      loop.state = "paused"; loop.reason = "The implementer is unavailable."; save(); render(); return;
+    }
+    loop.maxRounds = Number(snapshot.max_rounds) || loop.maxRounds + 1;
+    loop.maxTurns = Number(snapshot.max_turns) || loop.maxTurns + 2;
+    loop.round = Number(snapshot.round) || loop.round + 1;
+    loop.state = "running"; loop.phase = "implementing"; loop.current = implementer.name; loop.reason = "";
+    delete loop.finishedAt; save(); render(); launch(c, [implementer], null, null, {loopTurn:true});
+  } catch (error) { toast("Could not update Loop Engineering: " + (error.message || error)); }
+  finally { approveButton.disabled = declineButton.disabled = false; }
+}
+$("engineeringloopapprove").onclick = () => decideEngineeringLoopRound(true);
+$("engineeringloopdecline").onclick = () => decideEngineeringLoopRound(false);
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
   let msg = "Enter sends · Shift+Enter new line · @ mentions · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
@@ -1599,10 +1704,13 @@ if (window.ResizeObserver) {
     const m = $("msgs");
     document.documentElement.style.setProperty("--sb", (m.offsetWidth - m.clientWidth) + "px");
   }).observe($("msgs"));
-  // How far down the footer the "To:" row starts: the footer's fade is solid from there. The input grows with its text.
+  // Keep the message padding aligned with the overlaid composer as its input grows.
   new ResizeObserver(() => {
-    const bar = $("composer").querySelector(".toolbar");
-    if (bar) document.documentElement.style.setProperty("--solid", Math.round(bar.getBoundingClientRect().top - $("composer").getBoundingClientRect().top) + "px");
+    const composer = $("composer"), bar = composer.querySelector(".toolbar");
+    if (!bar) return;
+    const solid = Math.round(bar.getBoundingClientRect().top - composer.getBoundingClientRect().top);
+    document.documentElement.style.setProperty("--solid", solid + "px");
+    document.documentElement.style.setProperty("--composer-space", Math.max(0, Math.round(composer.getBoundingClientRect().height - solid)) + "px");
   }).observe($("composer"));
 }
 $("msgs").addEventListener("scroll", () => { if (nearEnd()) $("jump").classList.remove("show"); });
@@ -1665,7 +1773,25 @@ function bootstrapPrompt(c, job) {
     ? job.text + "\n\n" + context
     : context + "New messages to answer:\n\n" + job.text;
 }
-function systemFor(c, p) {
+function loopDirective(text) {
+  const match = text.match(/<!--\s*aic-loop\s+({[\s\S]*?})\s*-->/i);
+  if (!match) return { directive: null, text };
+  try {
+    return { directive: JSON.parse(match[1]), text: (text.slice(0, match.index) + text.slice(match.index + match[0].length)).trimEnd() };
+  } catch { return { directive: null, text } }
+}
+function loopSystem(c, p, loop) {
+  const candidates = active(c).filter((participant) => participant.name !== p.name)
+    .map((participant) => `${participant.name}${participant.role ? ` (${participant.role})` : ""}`).join(", ");
+  if (loop.phase === "reviewing") {
+    return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the reviewer. Review the implementer's work and finish with exactly one machine-readable directive: <!-- aic-loop {"verdict":"approved"} --> when it is ready, or <!-- aic-loop {"verdict":"changes_requested","target":"${loop.implementer}"} --> when changes are needed. Do not omit the directive.`;
+  }
+  const target = loop.reviewer
+    ? `Send review to ${loop.reviewer}.`
+    : `Choose the most appropriate reviewer from the participants by role; if no role distinguishes them, choose any available participant. Candidates: ${candidates || "none"}.`;
+  return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the implementer. Complete the requested work, explain what changed, and hand it off for review. ${target} Finish with exactly one machine-readable directive: <!-- aic-loop {"action":"review","target":"PARTICIPANT_NAME"} -->. Do not omit the directive.`;
+}
+function systemFor(c, p, loop = null) {
   const others = active(c).filter((q) => q !== p).map((q) => q.name);
   let s = others.length
     ? `You are "${p.name}" in a group chat with the user and: ${others.join(", ")}. Messages from others arrive prefixed with [name]. Reply only as yourself, without prefixing your own name.`
@@ -1685,6 +1811,7 @@ function systemFor(c, p) {
     s += " Keep tool context compact: return names and selected fields instead of complete tool definitions, cap broad search output, and summarize large findings before continuing."
       + " Read each file or line range once unless it changed; after truncated output, continue at the first unread line without overlap.";
   }
+  if (loop) s += "\n\n" + loopSystem(c, p, loop);
   return s;
 }
 
@@ -1713,7 +1840,7 @@ async function launch(c, targets, userText, to, opts = {}) {
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
     const runId = globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
-    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}) };
+    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}), ...(opts.loopTurn && c.engineeringLoop ? {loop_id:c.engineeringLoop.id} : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -1771,15 +1898,29 @@ function applyRunEvent(c, p, entry, ev, paint) {
   }
   if (ev.type === "session") { p.session = ev.id; delete p.freshContext; }
   else if (ev.type === "execution") { entry.execution_id = ev.id; if (ev.task_id) entry.task_id = ev.task_id; }
+  else if (ev.type === "waiting" && ev.reason === "worktree_lock") {
+    if (ev.waiting === false) delete entry.waiting;
+    else entry.waiting = { reason: ev.reason, holder: ev.holder || "", text: ev.text || "" };
+    entry.activity = ""; renderSidebar(); renderComposer(); paint();
+  }
   else if (ev.type === "activity") {
+    const wasWaiting = !!entry.waiting;
+    delete entry.waiting;
+    if (wasWaiting) { renderSidebar(); renderComposer(); }
     entry.activity = ev.text.split(meta.repo + "/").join("");
     entry.stream_gap = true;
     if (entry.actions.length < 500) entry.actions.push(entry.activity);
     paint();
   } else if (ev.type === "delta") {
+    const wasWaiting = !!entry.waiting;
+    delete entry.waiting;
+    if (wasWaiting) { renderSidebar(); renderComposer(); }
     if (entry.stream_gap && entry.text && !/\s$/.test(entry.text)) entry.text += "\n\n";
     entry.stream_gap = false; entry.text += ev.text; paint();
   } else if (ev.type === "done") {
+    const wasWaiting = !!entry.waiting;
+    delete entry.waiting;
+    if (wasWaiting) { renderSidebar(); renderComposer(); }
     if (ev.usage) entry.usage = ev.usage;
     if (!ev.ok) {
       entry.error = true; entry.soft = !!ev.stopped; entry.text = ev.error || "agent failed";
@@ -1795,6 +1936,39 @@ const waitFor = (ms, signal) => new Promise((resolve, reject) => {
   const timer = setTimeout(resolve, ms);
   signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); }, {once:true});
 });
+
+// The durable run can receive its first event before a streaming response's
+// first chunk reaches the browser. Briefly poll that durable copy so a lock
+// wait is visible immediately instead of only after a page reload. Once the
+// agent starts (session/activity/output), no startup polling is needed.
+async function pollRunStartup(c, p, entry, paint, signal) {
+  const deadline = Date.now() + 10000;
+  await waitFor(200, signal);
+  while (!signal.aborted && entry.pending && Date.now() < deadline) {
+    try {
+      const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '?after=' + (entry.event_seq || 0), {signal});
+      // Creating a durable run happens after checkout/configuration preflight,
+      // so an early 404 means "not created yet", not "missing forever".
+      if (!response.ok) {
+        const transient = response.status === 404 || response.status === 408
+          || response.status === 425 || response.status === 429 || response.status >= 500;
+        if (!transient) return;
+      }
+      else {
+        const snapshot = await response.json();
+        let startupFinished = ['completed','failed','stopped','interrupted'].includes(snapshot.state);
+        for (const event of snapshot.events || []) {
+          applyRunEvent(c, p, entry, event, paint);
+          if (event.type === 'waiting' || ['session','activity','delta','done'].includes(event.type)) startupFinished = true;
+        }
+        if (startupFinished) return;
+      }
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+    }
+    await waitFor(Math.min(250, Math.max(0, deadline - Date.now())), signal);
+  }
+}
 
 async function reconnectRun(c, p, entry, paint, signal) {
   let delay = 250;
@@ -1826,8 +2000,13 @@ async function reconnectRun(c, p, entry, paint, signal) {
 }
 
 function finishRunUI(c, p, entry, key) {
+  let loopDirectiveValue = null;
+  if (entry.loop_id && !entry.error && !entry.loopProcessed) {
+    const parsed = loopDirective(entry.text || "");
+    entry.text = parsed.text; loopDirectiveValue = parsed.directive; entry.loopProcessed = true;
+  }
   entry.pending = false; entry.activity = ""; entry.reconnecting = false; entry.dur = Date.now() - entry.t0;
-  delete entry.stream_gap; delete entry.run_done;
+  delete entry.stream_gap; delete entry.run_done; delete entry.waiting;
   running.delete(key);
   c.updated = Date.now(); save();
   if (cur() === c) {
@@ -1840,6 +2019,56 @@ function finishRunUI(c, p, entry, key) {
   if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
   if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
   else announce(`${p.name} finished.`);
+  if (entry.loop_id) queueMicrotask(() => advanceEngineeringLoop(c, p, entry, loopDirectiveValue));
+}
+
+function advanceEngineeringLoop(c, p, entry, directive) {
+  const loop = c.engineeringLoop;
+  if (!loop || loop.id !== entry.loop_id || loop.state !== "running" || loop.current !== p.name) return;
+  loop.turns = (loop.turns || 0) + 1;
+  if (entry.error) {
+    loop.state = "paused"; loop.reason = `${p.name} failed. Retry or stop the loop.`; save(); render(); return;
+  }
+  if (loop.phase === "implementing") {
+    if (loop.turns >= loop.maxTurns) {
+      loop.state = "limit_reached"; loop.reason = "Turn limit reached."; loop.finishedAt = Date.now(); save(); render(); return;
+    }
+    if (directive?.action !== "review" || !directive.target) {
+      loop.state = "paused"; loop.reason = `${p.name} did not provide a valid handoff.`; save(); render(); return;
+    }
+    if (directive.target === p.name) {
+      loop.state = "paused"; loop.reason = "The implementer cannot review their own work."; save(); render(); return;
+    }
+    if (loop.reviewer && directive.target !== loop.reviewer) {
+      loop.state = "paused"; loop.reason = `${p.name} changed the selected reviewer.`; save(); render(); return;
+    }
+    const target = active(c).find((participant) => participant.name === directive.target);
+    if (!target) {
+      loop.state = "paused"; loop.reason = "The requested reviewer is unavailable."; save(); render(); return;
+    }
+    loop.reviewer ||= target.name; loop.phase = "reviewing"; loop.current = target.name;
+    save(); render(); launch(c, [target], null, null, {loopTurn:true}); return;
+  }
+  if (directive?.verdict === "approved") {
+    loop.state = "approved"; loop.finishedAt = Date.now(); save(); render(); toast(`Loop Engineering approved by ${p.name}.`); return;
+  }
+  if (directive?.verdict !== "changes_requested") {
+    loop.state = "paused"; loop.reason = `${p.name} did not provide a structured verdict.`; save(); render(); return;
+  }
+  if (directive.target !== loop.implementer) {
+    loop.state = "paused"; loop.reason = `${p.name} returned changes to an invalid participant.`; save(); render(); return;
+  }
+  if (loop.round >= loop.maxRounds || loop.turns >= loop.maxTurns) {
+    loop.state = "awaiting_round_approval";
+    loop.reason = "The configured round limit was reached without approval.\nContinue for one more round?";
+    save(); render(); return;
+  }
+  const implementer = active(c).find((participant) => participant.name === loop.implementer);
+  if (!implementer) {
+    loop.state = "paused"; loop.reason = "The implementer is unavailable."; save(); render(); return;
+  }
+  loop.round += 1; loop.phase = "implementing"; loop.current = implementer.name;
+  save(); render(); launch(c, [implementer], null, null, {loopTurn:true});
 }
 
 function resumePendingRuns() {
@@ -1879,13 +2108,19 @@ async function turn(c, { p, text: prompt, entry, planRun }) {
   };
   const fail = (msg, soft) => { entry.error = true; entry.soft = !!soft; entry.text = msg; p.seen = entry.seen0; };
   const ctl = running.get(key);
+  const startupCtl = new AbortController();
+  ctl.signal.addEventListener('abort', () => startupCtl.abort(), {once:true});
+  if (entry.run_id) pollRunStartup(c, p, entry, paint, startupCtl.signal).catch(error => {
+    if (error.name !== 'AbortError') console.warn('Could not observe chat startup state', error);
+  });
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        checkout: c.checkout || null, git_context: c.gitCurrent || c.gitOrigin || null, agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p), write: planRun ? planRun.intent === 'execute' && !!p.write : !!p.write,
+        checkout: c.checkout || null, git_context: c.gitCurrent || c.gitOrigin || null, agent: entry.agent, conversation_id: c.id, prompt, session_id: p.session, system: systemFor(c, p, entry.loop_id === c.engineeringLoop?.id ? c.engineeringLoop : null), write: planRun ? planRun.intent === 'execute' && !!p.write : !!p.write,
         ...(planRun || {}), participant: p.name, run_id: entry.run_id,
+        ...(entry.loop_id && c.engineeringLoop ? {engineering_loop: {...c.engineeringLoop}} : {}),
         model: p.model || null, effort: p.effort || null,
       }),
       signal: ctl.signal,
@@ -1916,6 +2151,7 @@ async function turn(c, { p, text: prompt, entry, planRun }) {
       catch (reconnectError) { if (reconnectError.name === 'AbortError') { if (!entry.text) fail('Stopped.', true); else entry.stopped = true; } else fail(reconnectError.message || String(reconnectError), true); }
     } else fail(String(err.message || err), !!err.terminal);
   } finally {
+    startupCtl.abort();
     finishRunUI(c, p, entry, key);
   }
 }
@@ -1943,6 +2179,11 @@ function insertPasteMarker(c, marker, block) {
   input.value = head + replacement;
   input.setSelectionRange(caret, caret);
   if (block) blocksFor(c).push(block);
+  hist.idx = -1; onInput();
+}
+function insertPlainText(text) {
+  const input = $("input");
+  input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
   hist.idx = -1; onInput();
 }
 function expandPastedText(c, displayText) {
@@ -1980,8 +2221,50 @@ function pasteFromTransfer(event, transfer) {
     return;
   }
   const normalized = text.replace(/\r\n?/g, "\n");
-  const lines = normalized.split("\n").length, marker = pasteMarker(lines);
+  const lines = normalized.split("\n").length;
+  if (lines <= 2) { insertPlainText(normalized); return; }
+  const marker = pasteMarker(lines);
   insertPasteMarker(c, marker, { id: crypto.randomUUID(), marker, text: normalized, lines });
+}
+function pastedMarkerAt(value, start, end) {
+  const re = new RegExp(PASTE_MARKER_SOURCE, "g");
+  let match;
+  while ((match = re.exec(value))) {
+    const markerEnd = match.index + match[0].length;
+    if (start < markerEnd && end > match.index) return { match, markerEnd };
+  }
+  return null;
+}
+function deletePastedMarker(event) {
+  if (!event.inputType?.startsWith("delete")) return;
+  const input = $("input"), c = cur();
+  if (!c) return;
+  let start = input.selectionStart, end = input.selectionEnd;
+  if (start === end) {
+    if (event.inputType === "deleteContentBackward") start = Math.max(0, start - 1);
+    else if (event.inputType === "deleteContentForward") end = Math.min(input.value.length, end + 1);
+    else return;
+  }
+  const found = pastedMarkerAt(input.value, start, end);
+  if (!found) return;
+  event.preventDefault();
+  const markerStart = found.match.index;
+  const blockStart = found.markerEnd < input.value.length && input.value[found.markerEnd] === "\n"
+    ? markerStart : Math.max(0, markerStart - (input.value[markerStart - 1] === "\n" ? 1 : 0));
+  const blockEnd = found.markerEnd + (input.value[found.markerEnd] === "\n" ? 1 : 0);
+  const deleteStart = Math.min(start, blockStart), deleteEnd = Math.max(end, blockEnd);
+  const sameMarkersBefore = [...input.value.slice(0, markerStart).matchAll(new RegExp(PASTE_MARKER_SOURCE, "g"))]
+    .filter(match => match[0] === found.match[0]).length;
+  const available = blocksFor(c);
+  let matchingBlock = 0, blockIndex = -1;
+  for (let index = 0; index < available.length; index++) {
+    if (available[index].marker !== found.match[0]) continue;
+    if (matchingBlock++ === sameMarkersBefore) { blockIndex = index; break; }
+  }
+  if (blockIndex >= 0) available.splice(blockIndex, 1);
+  input.value = input.value.slice(0, deleteStart) + input.value.slice(deleteEnd);
+  input.setSelectionRange(deleteStart, deleteStart);
+  hist.idx = -1; onInput();
 }
 function normalizeMarkerLine(input) {
   const start = input.selectionStart;
@@ -1997,6 +2280,35 @@ function normalizeMarkerLine(input) {
   input.setSelectionRange(caret, caret);
 }
 function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; delete draftPastes[c.id]; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
+async function startEngineeringLoop(c, text) {
+  if (["running", "paused"].includes(c.engineeringLoop?.state)) { toast("Stop the current Loop Engineering before starting another."); return; }
+  let rest = text.replace(/^\/loop\b/i, "").trim(), names = [];
+  while (names.length < 2) {
+    const match = rest.match(/^@([\w-]+)(?:\s+|$)/);
+    if (!match) break;
+    names.push(match[1]); rest = rest.slice(match[0].length).trim();
+  }
+  if (!rest) { toast("Add an objective after /loop."); return; }
+  const participants = active(c);
+  if (participants.length < 2) { toast("Loop Engineering needs at least two active participants."); return; }
+  const explicit = names.map((name) => participants.find((participant) => participant.name === name));
+  const missing = names.filter((_, index) => !explicit[index]);
+  if (missing.length) { toast("Unknown or unavailable participant: " + missing.join(", ")); return; }
+  if (explicit.length === 2 && explicit[0] === explicit[1]) { toast("Implementer and reviewer must be different participants."); return; }
+  const selected = recipients(c);
+  const implementer = explicit[0] || selected.find((participant) => participant.write) || selected[0] || participants.find((participant) => participant.write) || participants[0];
+  const reviewer = explicit[1] || null;
+  if (!(await prepareSend(c, [implementer]))) return;
+  const maxRounds = Math.max(1, Math.min(20, Number(loopMaxRounds) || 3));
+  c.engineeringLoop = {
+    id: globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)),
+    state: "running", phase: "implementing", round: 1, turns: 0,
+    maxRounds, maxTurns: maxRounds * 2, implementer: implementer.name,
+    reviewer: reviewer?.name || null, current: implementer.name, objective: rest, startedAt: Date.now(),
+  };
+  clearInput(c);
+  launch(c, [implementer], text, [implementer.name], {preflightDone:true, loopTurn:true});
+}
 let sendPending = false;
 $("form").onsubmit = async (e) => {
   e.preventDefault();
@@ -2009,6 +2321,10 @@ $("form").onsubmit = async (e) => {
   // a reflex Enter on the next message can't throw the replies away.
   if (busy(c)) { if (e.submitter === $("send")) stopAll(c); else renderHint(); return; }
   const text = $("input").value.trim();
+  if (/^\/loop\b/i.test(text)) {
+    await startEngineeringLoop(c, text);
+    return;
+  }
   if (text === "/fork") {
     clearInput(c);
     forkConversation(c);
@@ -2052,18 +2368,36 @@ $("form").onsubmit = async (e) => {
   } finally { sendPending = false; }
 };
 
-// Autocomplete for the mention chain and a "/skill" right after it.
+// Autocomplete for mentions anywhere in the draft and a "/skill" right after
+// a leading mention chain.
 let acItems = [], acSel = 0;
-const MENTION_Q = /^((?:@[\w-]+\s+)*)@([\w-]*)$/;
+const MENTION_Q = /(^|[^\w-])@([\w-]*)$/;
 const SKILL_Q = /^((?:@[\w-]+\s+)*)\/([\w:.-]*)$/;
+let escapedMention = null;
 function acClose() { acItems = []; $("ac").classList.remove("open"); $("input").removeAttribute("aria-activedescendant"); }
+function mentionQuery(before) {
+  const match = before.match(MENTION_Q);
+  if (!match) return null;
+  const start = match.index + match[1].length;
+  return { start, token: before.slice(start), query: match[2] };
+}
+function mentionNames(text) {
+  const names = [], re = /(^|[^\w-])@([\w-]+)/g;
+  let match;
+  while ((match = re.exec(text))) names.push(match[2]);
+  return names;
+}
 function acUpdate() {
   const c = cur(), i = $("input"), before = i.value.slice(0, i.selectionStart);
+  const mention = mentionQuery(before);
+  if (escapedMention && (!mention || mention.start !== escapedMention.start || !mention.token.startsWith(escapedMention.token))) {
+    escapedMention = null;
+  }
   let m;
   acItems = [];
-  if (c && (m = before.match(MENTION_Q))) {
-    const used = m[1].trim().split(/\s+/).filter(Boolean).map((n) => n.slice(1));
-    const q = m[2].toLowerCase();
+  if (c && mention && !escapedMention) {
+    const used = mentionNames(before.slice(0, mention.start));
+    const q = mention.query.toLowerCase();
     const everyone = active(c).length > 1 && !used.includes("all") && !c.participants.some((p) => p.name === "all") && "all".startsWith(q)
       ? [{ type: "@", value: "all", label: "@all", sub: "Everyone in this conversation" }] : [];
     acItems = [...everyone, ...active(c).filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
@@ -2074,7 +2408,8 @@ function acUpdate() {
     const fork = { type: "/", value: "fork", label: "/fork", sub: "Create a conversation branch", off: busy(c) ? "wait for replies to finish" : "" };
     const fresh = { type: "/", value: "fresh", label: "/fresh", sub: "Restart selected agents without replaying visible history", off: busy(c) ? "wait for replies to finish" : "" };
     const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
-    acItems = [fork, fresh, clear, ...skills.filter((s) => s.name.toLowerCase().includes(q))
+    const loop = { type: "/", value: "loop", label: "/loop", arg: "[@implementer] [@reviewer] <objective>", sub: "Iterate implementation and review until approval" };
+    acItems = [fork, fresh, clear, loop, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint, sub: s.description,
         off: skillProblem(s.name, recipients(c)),
@@ -2103,7 +2438,7 @@ function acPick(idx) {
   const before = i.value.slice(0, i.selectionStart).replace(re, it.type + it.value + " ");
   i.value = before + i.value.slice(i.selectionStart);
   i.selectionStart = i.selectionEnd = before.length;
-  acSel = 0; onInput();
+  acSel = 0; escapedMention = null; onInput();
 }
 // Shell-style history: with the caret at the very start, Up recalls earlier messages (oldest last) and Down
 // comes back toward the newest, ending on whatever was being typed. Typing anything ends the browsing.
@@ -2145,7 +2480,13 @@ $("input").onkeydown = (e) => {
       acSel = (acSel + (e.key === "ArrowDown" ? 1 : acItems.length - 1)) % acItems.length; acUpdate(); return;
     }
     if (e.key === "Tab" || e.key === "Enter") { e.preventDefault(); acPick(acSel); return; }
-    if (e.key === "Escape") { e.stopPropagation(); acClose(); return; }
+  }
+  if (e.key === "Escape") {
+    const before = $("input").value.slice(0, $("input").selectionStart), mention = mentionQuery(before);
+    if (mention) {
+      escapedMention = { start: mention.start, token: mention.token };
+      e.stopPropagation(); acClose(); return;
+    }
   }
   if (historyKey(e)) { e.preventDefault(); return; }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); $("form").requestSubmit(); }
@@ -2172,6 +2513,7 @@ function onInput() {
   if (c) { drafts[c.id] = $("input").value; saveDraftsSoon(); syncPillsFromText(c); renderComposer(); }
 }
 $("input").oninput = () => { hist.idx = -1; onInput(); };
+$("input").onbeforeinput = deletePastedMarker;
 $("input").onpaste = event => pasteFromTransfer(event, event.clipboardData);
 $("input").ondragover = event => { event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "copy"; };
 $("input").ondrop = event => pasteFromTransfer(event, event.dataTransfer);
@@ -2401,6 +2743,9 @@ async function openConfig() {
     renderAgentVisibility();
     $("cpermission").value = config.permission_mode;
     $("cskippermissions").checked = !!config.skip_permissions;
+    $("cserializewriters").checked = config.serialize_worktree_writes !== false;
+    loopMaxRounds = Number(config.loop_max_rounds) || 3;
+    $("clooprounds").value = String(loopMaxRounds);
     $("csandbox").value = config.sandbox;
     $("csandboximage").value = config.sandbox_image;
     $("cdialog").showModal();
@@ -2431,6 +2776,8 @@ $("cform").onsubmit = async (e) => {
     confirm_default: $("cdefault").value !== settingsDraft.defaultAgent,
     permission_mode: $("cpermission").value,
     skip_permissions: $("cskippermissions").checked,
+    serialize_worktree_writes: $("cserializewriters").checked,
+    loop_max_rounds: Math.max(1, Math.min(20, Number($("clooprounds").value) || 3)),
     sandbox: $("csandbox").value,
     sandbox_image: $("csandboximage").value.trim(),
   };
@@ -2443,6 +2790,7 @@ $("cform").onsubmit = async (e) => {
     meta.default = config.default_agent;
     meta.agents = config.agents;
     meta.sandboxed = config.sandbox !== "none";
+    loopMaxRounds = Number(config.loop_max_rounds) || Number($("clooprounds").value) || 3;
     state.hiddenAgents = hiddenAgents.filter(name => name !== config.default_agent);
     save(); updateAgentOptions();
     $("cdialog").close();
@@ -2537,6 +2885,10 @@ document.addEventListener("keydown", (e) => {
   } catch (err) {
     $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
   }
+  try {
+    const config = await (await fetch("/api/config")).json();
+    loopMaxRounds = Number(config.loop_max_rounds) || loopMaxRounds;
+  } catch {}
   try {
     const res = await fetch("/api/chat/state");
     if (!res.ok) throw new Error(await res.text());
@@ -2899,7 +3251,34 @@ function readinessCommand(parent, text) {
   if (!text) return;
   const row = el('div', 'readycommand'); const code = el('code', '', text);
   const copy = el('button', '', 'Copy'); copy.type = 'button';
-  copy.onclick = () => copyText(text, copy); row.append(code, copy); parent.appendChild(row);
+  copy.onclick = () => copyText(text, copy);
+  const run = el('button', 'readyrun', 'Run'); run.type = 'button'; run.disabled = true;
+  run.dataset.command = text;
+  const runnable = text === 'aic sandbox build' || text.startsWith('aic agent test ');
+  run.disabled = !runnable;
+  run.title = runnable ? 'Run this recovery action' : 'This action requires an interactive terminal.';
+  run.onclick = async () => {
+    if (!runnable || run.disabled) return;
+    run.disabled = true; run.textContent = 'Running…';
+    $('readyerror').hidden = true;
+    try {
+      const response = await fetch('/api/diagnostics/run', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({command:text, checkout:cur()?.checkout || null}),
+      });
+      if (!response.ok) {
+        let message = await response.text();
+        try { message = JSON.parse(message).error || message; } catch {}
+        throw new Error(message || 'Environment action failed.');
+      }
+      await refreshReadiness(cur(), {full:true, catalog:true});
+      renderReadiness();
+    } catch (error) {
+      $('readyerror').textContent = error.message; $('readyerror').hidden = false;
+      run.disabled = false; run.textContent = 'Retry';
+    }
+  };
+  row.append(code, copy, run); parent.appendChild(row);
 }
 function readinessDot(state) {
   const dot = el('span', 'readinessdot'), label = cap(state || 'unknown');

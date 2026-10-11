@@ -96,7 +96,7 @@ git_diff_exclude_patterns = []
 git_diff_include_patterns = []
 ```
 
-The menu is organized by section (Workflow, Permissions, Sandbox, Chat), lets you pick agents from a list, marks with `•` the values that differ from the default, and summarizes what changed before saving.
+The menu is organized by section (Permissions, Sandbox, Chat), marks with `•` the values that differ from the default, and summarizes what changed before saving. Workflow settings remain available through `aic config get` and `aic config set`, but are temporarily hidden from the interactive menu.
 
 Older config files with these keys at the top level (`executor`, `sandbox`, `sandbox_image`, ...) are still read; `aic config` saves the new layout.
 

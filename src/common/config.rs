@@ -144,11 +144,25 @@ impl Default for SandboxConfig {
 }
 
 /// Settings of the web chat (`aic chat`).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChatConfig {
     /// Explicit agent preference for new chats. Empty requires a user choice.
     pub default_agent: String,
+    /// Serialize writers from different conversations that share a worktree.
+    pub serialize_worktree_writes: bool,
+    /// Maximum implementation/review rounds allowed by Loop Engineering.
+    pub loop_max_rounds: u32,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        ChatConfig {
+            default_agent: String::new(),
+            serialize_worktree_writes: true,
+            loop_max_rounds: 3,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -524,5 +538,19 @@ mod tests {
         assert_eq!(config.chat_default_agent(), "codex");
         config.chat.default_agent = "not-configured".into();
         assert_eq!(config.chat_default_agent(), "not-configured");
+    }
+
+    #[test]
+    fn worktree_writer_serialization_is_safe_by_default() {
+        assert!(Config::default().chat.serialize_worktree_writes);
+        assert_eq!(Config::default().chat.loop_max_rounds, 3);
+        let older = Config::from_toml("[chat]\ndefault_agent = 'codex'").unwrap();
+        assert!(older.chat.serialize_worktree_writes);
+        assert_eq!(older.chat.loop_max_rounds, 3);
+        let opted_out = Config::from_toml(
+            "[chat]\ndefault_agent = 'codex'\nserialize_worktree_writes = false",
+        )
+        .unwrap();
+        assert!(!opted_out.chat.serialize_worktree_writes);
     }
 }

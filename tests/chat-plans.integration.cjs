@@ -106,6 +106,136 @@ setTimeout(()=>{send({type:'item.completed',item:{type:'agent_message',text:'Rep
  }finally{await f.close();}
 });
 
+test('Loop Engineering persists and validates implementer-to-reviewer transitions',options,async()=>{
+ const {execFileSync}=require('node:child_process');
+ const f=await fixture();try{
+  const cli=path.join(f.root,'codex');
+  fs.writeFileSync(cli,`#!${process.execPath}
+const args=process.argv.slice(2).join(' ');const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
+if(args.includes('single word READY')){send({type:'item.completed',item:{type:'agent_message',text:'READY'}});send({type:'turn.completed'});process.exit(0);}
+send({type:'thread.started',thread_id:'loop-session'});
+const text=args.includes('You are the reviewer')
+  ?(args.includes('Request changes')?'Changes. <!-- aic-loop {"verdict":"changes_requested","target":"Impl"} -->':'Approved. <!-- aic-loop {"verdict":"approved"} -->')
+  :'Implemented. <!-- aic-loop {"action":"review","target":"Review"} -->';
+send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.completed'});
+`,{mode:0o755});
+  execFileSync(path.resolve(process.env.AIC_TEST_BINARY),['agent','test','codex','--yes'],{cwd:f.root,env:{...process.env,AIC_CONFIG_DIR:path.join(f.root,'config'),AIC_IN_SANDBOX:'1'}});
+  const conversation={id:'loop-chat',title:'Loop',participants:[
+    {name:'Impl',agent:'codex',write:true,session:'',seen:0},
+    {name:'Review',agent:'codex',write:false,session:'',seen:0,role:'Reviewer'},
+  ],log:[],round:0,checkout:null,updated:Date.now()};
+  await send(f,'/api/chat/state',{state:{convs:[conversation],current:'loop-chat'},drafts:{}});
+  const initial={id:'loop-http',state:'running',phase:'implementing',round:1,turns:0,maxRounds:2,maxTurns:4,implementer:'Impl',reviewer:null,current:'Impl',objective:'Build the feature'};
+  const implemented=await send(f,'/api/chat',{run_id:'loop-http-1',conversation_id:'loop-chat',participant:'Impl',agent:'codex',prompt:'Start the loop',write:true,engineering_loop:initial});
+  assert.match(implemented,/aic-loop/);
+  let snapshot=await send(f,'/api/chat/loops/loop-http');
+  assert.equal(snapshot.state,'running');assert.equal(snapshot.phase,'reviewing');assert.equal(snapshot.turns,1);assert.equal(snapshot.current,'Review');
+  const review={...initial,phase:'reviewing',turns:1,reviewer:'Review',current:'Review'};
+  const reviewed=await send(f,'/api/chat',{run_id:'loop-http-2',conversation_id:'loop-chat',participant:'Review',agent:'codex',session_id:'loop-session',prompt:'Review the implementation',write:false,engineering_loop:review});
+  assert.match(reviewed,/approved/);
+  snapshot=await send(f,'/api/chat/loops/loop-http');
+  assert.equal(snapshot.state,'approved');assert.equal(snapshot.turns,2);assert.ok(snapshot.finished_at);
+  const replay=await send(f,'/api/chat',{run_id:'loop-http-3',conversation_id:'loop-chat',participant:'Review',agent:'codex',prompt:'Run again',write:false,engineering_loop:review},409);
+  assert.match(replay,/state changed|not running/);
+
+  const limited={...initial,id:'loop-round-http',maxRounds:1,maxTurns:2};
+  await send(f,'/api/chat',{run_id:'loop-round-http-1',conversation_id:'loop-chat',participant:'Impl',agent:'codex',prompt:'Start limited loop',write:true,engineering_loop:limited});
+  await send(f,'/api/chat',{run_id:'loop-round-http-2',conversation_id:'loop-chat',participant:'Review',agent:'codex',session_id:'loop-session',prompt:'Request changes',write:false,
+    engineering_loop:{...limited,phase:'reviewing',turns:1,reviewer:'Review',current:'Review'}});
+  snapshot=await send(f,'/api/chat/loops/loop-round-http');assert.equal(snapshot.state,'awaiting_round_approval');
+  await send(f,'/api/chat/loops/loop-round-http/round',{conversation_id:'other',decision:'approve'},409);
+  const extra=await send(f,'/api/chat/loops/loop-round-http/round',{conversation_id:'loop-chat',decision:'approve'});
+  assert.equal(extra.state,'running');assert.equal(extra.round,2);assert.equal(extra.max_rounds,2);assert.equal(extra.max_turns,4);
+ }finally{await f.close();}
+});
+
+test('worktree writer lock groups one conversation while queuing other conversations and allowing readers',options,async()=>{
+ const {execFileSync}=require('node:child_process');
+ const f=await fixture();try{
+  const cli=path.join(f.root,'codex');
+  fs.writeFileSync(cli,`#!${process.execPath}
+const fs=require('fs'),path=require('path');const root=__dirname,args=process.argv.slice(2).join(' ');
+const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
+if(args.includes('single word READY')){send({type:'item.completed',item:{type:'agent_message',text:'READY'}});send({type:'turn.completed'});process.exit(0);}
+const finish=text=>{send({type:'thread.started',thread_id:'lock-session'});send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.completed'});};
+if(args.includes('hold writer')){fs.writeFileSync(path.join(root,'writer-one-started'),'yes');const timer=setInterval(()=>{if(fs.existsSync(path.join(root,'release-writer'))){clearInterval(timer);finish('First writer done');}},20);}
+else if(args.includes('second writer')){fs.writeFileSync(path.join(root,'writer-two-started'),'yes');finish('Second writer done');}
+else if(args.includes('forced writer')){fs.writeFileSync(path.join(root,'forced-writer-started'),'yes');finish('Forced writer done');}
+else if(args.includes('peer writer')){fs.writeFileSync(path.join(root,'peer-writer-started'),'yes');finish('Peer writer done');}
+else if(args.includes('cancelled writer')){fs.writeFileSync(path.join(root,'cancelled-writer-started'),'yes');finish('Cancelled writer should not start');}
+else if(args.includes('read while locked')){fs.writeFileSync(path.join(root,'reader-started'),'yes');finish('Reader done');}
+else finish('Fixture reply');
+`,{mode:0o755});
+  execFileSync(path.resolve(process.env.AIC_TEST_BINARY),['agent','test','codex','--yes'],{cwd:f.root,env:{...process.env,AIC_CONFIG_DIR:path.join(f.root,'config'),AIC_IN_SANDBOX:'1'}});
+  const post=body=>fetch(f.base+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  const waitRunEvent=async(id,predicate)=>{
+    for(let i=0;i<100;i++){
+      const response=await fetch(f.base+'/api/chat/runs/'+id);
+      if(response.ok){const snapshot=await response.json();if(snapshot.events.some(predicate))return snapshot;}
+      await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    throw new Error('run event did not arrive for '+id);
+  };
+  const first=await post({run_id:'writer-one',conversation_id:'one',participant:'Writer-One',agent:'codex',prompt:'hold writer',write:true});
+  assert.equal(first.status,200);
+  for(let i=0;i<100&&!fs.existsSync(path.join(f.root,'writer-one-started'));i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.ok(fs.existsSync(path.join(f.root,'writer-one-started')));
+  const lockPath=path.join(f.root,'.aic/chat/worktree-write.lock');
+  assert.equal(JSON.parse(fs.readFileSync(lockPath,'utf8')).owners[0].participant,'Writer-One');
+  const holderForce=await fetch(f.base+'/api/chat/runs/writer-one/force',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(holderForce.status,409,'a run already executing cannot be forced');
+
+  const peer=await post({run_id:'writer-peer',conversation_id:'one',participant:'Writer-Peer',agent:'codex',prompt:'peer writer',write:true});
+  assert.match(await peer.text(),/Peer writer done/);
+  assert.ok(fs.existsSync(path.join(f.root,'peer-writer-started')),'writers in the same conversation run together');
+  assert.equal(fs.existsSync(path.join(f.root,'release-writer')),false,'the first writer is still holding its lease');
+
+  let openTimer;
+  const secondResponse=await Promise.race([
+    post({run_id:'writer-two',conversation_id:'two',participant:'Writer-Two',agent:'codex',prompt:'second writer',write:true}),
+    new Promise((_,reject)=>{openTimer=setTimeout(()=>reject(new Error('queued writer stream did not open')),2000);}),
+  ]);
+  clearTimeout(openTimer);
+  assert.equal(secondResponse.status,200);
+  const secondText=secondResponse.text();
+  const queued=await waitRunEvent('writer-two',event=>event.type==='waiting');
+  const waiting=queued.events.find(event=>event.type==='waiting'&&event.waiting!==false);
+  assert.equal(waiting.reason,'worktree_lock');assert.equal(waiting.holder,'Writer-One');
+  assert.equal(fs.existsSync(path.join(f.root,'writer-two-started')),false);
+
+  const forcedText=post({run_id:'writer-forced',conversation_id:'forced',participant:'Writer-Forced',agent:'codex',prompt:'forced writer',write:true}).then(async response=>{
+    assert.equal(response.status,200);return response.text();
+  });
+  await waitRunEvent('writer-forced',event=>event.type==='waiting'&&event.waiting!==false);
+  const force=await fetch(f.base+'/api/chat/runs/writer-forced/force',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(force.status,202);assert.equal((await force.json()).forced,true);
+  assert.match(await forcedText,/Forced writer done/);
+  assert.ok(fs.existsSync(path.join(f.root,'forced-writer-started')),'a forced writer starts before the holder releases');
+  assert.equal(JSON.parse(fs.readFileSync(lockPath,'utf8')).owners[0].participant,'Writer-One','forcing a waiter does not alter the holder lease');
+  assert.equal(fs.existsSync(path.join(f.root,'writer-two-started')),false,'other queued writers remain serialized');
+
+  const cancelledText=post({run_id:'writer-cancelled',conversation_id:'four',participant:'Writer-Cancelled',agent:'codex',prompt:'cancelled writer',write:true}).then(response=>response.text());
+  await waitRunEvent('writer-cancelled',event=>event.type==='waiting');
+  const stopped=await fetch(f.base+'/api/chat/runs/writer-cancelled/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(stopped.status,202);assert.match(await cancelledText,/Stopped/);
+  assert.equal(fs.existsSync(path.join(f.root,'cancelled-writer-started')),false,'a queued writer can be stopped before it starts');
+
+  const reader=await post({run_id:'reader',conversation_id:'three',participant:'Reader',agent:'codex',prompt:'read while locked',write:false});
+  assert.match(await reader.text(),/Reader done/);
+  assert.ok(fs.existsSync(path.join(f.root,'reader-started')),'read-only run starts while a writer holds the lock');
+  assert.equal(fs.existsSync(path.join(f.root,'writer-two-started')),false);
+
+  const holderStopped=await fetch(f.base+'/api/chat/runs/writer-one/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  assert.equal(holderStopped.status,202);
+  assert.match(await first.text(),/Stopped/);
+  const second=await secondText;assert.match(second,/Second writer done/);
+  assert.ok(fs.existsSync(path.join(f.root,'writer-two-started')),'cancelling the holder releases the next queued writer');
+  assert.match(second,/"waiting":false/);
+  for(let i=0;i<50&&fs.existsSync(lockPath);i++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(fs.existsSync(lockPath),false,'the writer removes its worktree flag when it finishes');
+ }finally{await f.close();}
+});
+
 test('plan APIs reject cross-origin, traversal, unknown participants and raw checkout changes',options,async()=>{
  const f=await fixture();
  try {

@@ -75,10 +75,13 @@ test('explicit participant choice, targeted sends, keyboard recovery, draft and 
     await page.locator('#send').click(); await page.waitForSelector('#readydialog[open]');
     assert.equal(await page.locator('#input').inputValue(), draft);
     await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Last test: never'));
+    assert.deepEqual(await page.locator('#readyrows .readycommand').first().locator('button').allTextContents(), ['Copy', 'Run']);
+    assert.equal(await page.locator('#readyrows .readycommand').first().locator('button.readyrun').isEnabled(), true);
     await page.locator('#readyrows button').filter({ hasText: 'Copy' }).first().click();
     assert.match(await page.evaluate(() => navigator.clipboard.readText()), /aic/);
-    testAgent(f); await page.locator('#readyrefresh').click();
+    await page.locator('#readyrows button.readyrun').filter({ hasText: 'Run' }).first().click();
     await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Ready_host'));
+    assert.ok(requests.includes('/api/diagnostics/run'));
     await page.locator('#readyclose').focus(); await page.keyboard.press('Enter');
     assert.equal(await page.locator('#input').inputValue(), draft);
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'initial'], { cwd: f.root });
@@ -280,6 +283,8 @@ test('Configuration stages visibility: Cancel/Esc and failed Save discard or ret
     assert.deepEqual(await hidden(), []);
     await open(); assert.equal(await box('Claude').isChecked(), true);
     assert.equal(await page.locator('#cpermission').inputValue(), 'acceptEdits');
+    assert.equal(await page.locator('#cserializewriters').isChecked(), true);
+    assert.equal(await page.locator('#clooprounds').inputValue(), '3');
     assert.notEqual(await page.locator('#csandboximage').inputValue(), 'unsaved-image');
     await box('Claude').uncheck(); await page.keyboard.press('Escape');
     assert.deepEqual(await hidden(), []);
@@ -349,6 +354,13 @@ test('pasted text stays movable, rejects media and expands from the sent message
     browser = await chromium.launch({headless:true}); const page = await browser.newPage();
     const errors = []; page.on('pageerror', error => errors.push(error.message));
     await page.goto(f.base); await page.waitForSelector('#chips .chip');
+    await page.locator('#input').evaluate(node => {
+      const oneLine = new DataTransfer(); oneLine.setData('text/plain', 'one line');
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData:oneLine, bubbles:true, cancelable:true}));
+      const twoLines = new DataTransfer(); twoLines.setData('text/plain', '\nand two lines');
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData:twoLines, bubbles:true, cancelable:true}));
+    });
+    assert.equal(await page.locator('#input').inputValue(), 'One line\nand two lines');
     await page.locator('#input').fill('Existing text');
     await page.locator('#input').evaluate(node => {
       node.setSelectionRange(4, 4);
@@ -357,6 +369,14 @@ test('pasted text stays movable, rejects media and expands from the sent message
     });
     const marker = '[Pasted Text · +3 lines]';
     assert.equal(await page.locator('#input').inputValue(), marker + '\nExisting text');
+    await page.locator('#input').evaluate((node, end) => node.setSelectionRange(end, end), marker.length);
+    await page.locator('#input').press('Backspace');
+    assert.equal(await page.locator('#input').inputValue(), 'Existing text', 'deleting the closing bracket removes the whole pasted block');
+    await page.locator('#input').evaluate(node => {
+      node.setSelectionRange(0, 0);
+      const data = new DataTransfer(); data.setData('text/plain', 'alpha\nbeta\ngamma');
+      node.dispatchEvent(new ClipboardEvent('paste', {clipboardData:data, bubbles:true, cancelable:true}));
+    });
     await page.locator('#input').fill('Before\n' + marker + '\nAfter');
     await page.waitForTimeout(500); await page.reload(); await page.waitForSelector('#chips .chip');
     assert.equal(await page.locator('#input').inputValue(), 'Before\n' + marker + '\nAfter', 'paste metadata survives reload');

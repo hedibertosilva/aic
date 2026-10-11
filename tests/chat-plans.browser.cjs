@@ -12,7 +12,7 @@ const makePlan = (id, checkout='/repo') => ({slug:id,title:'Plan '+id,checkout,v
   content:'Objective: implement '+id+'\nAcceptance: tests pass',tasks:[{id:'T001',title:'Implement change',status:'pending',checked:false,cancelled:false,latest_execution:null}],executions:[]});
 
 async function fixture({linked=false, history=false, old=false, team=false}={}) {
-  const c={id:'source',title:'Original',participants:[participant('Dev'),...(team?[participant('Reviewer')]:[])],
+  const c={id:'source',title:'Original',participants:[participant('Dev'),...(team?[participant('Reviewer'),participant('Other')]:[])],
     log:history?[{from:'you',text:'Old objective',round:1,t0:1},{from:'Dev',text:'Previous answer',round:1,t0:2}]:[],
     round:history?1:0,updated:Date.now(),checkout:'/repo',keepEmpty:true};
   const bindings=new Map([['source',{conversation_id:'source',checkout:'/repo',plan_slug:linked?'alpha':null,version:linked?1:0,selections:{},origin:null}]]);
@@ -37,12 +37,16 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
         if(body){if((body.revision!=null&&body.revision!==f.revision)||(f.managed&&body.revision==null))return send(res,409,'Snapshot changed');f.saved=clone(body);for(const item of f.saved.state.convs){if(bindings.has(item.id))item.plan_binding=clone(bindings.get(item.id));}f.revision++;return send(res,200,{revision:f.revision});}
         return send(res,200,{...f.saved,revision:f.revision});
       }
-      const runRoute=url.pathname.match(/^\/api\/chat\/runs\/([^/]+)(?:\/(stop))?$/);
+      const runRoute=url.pathname.match(/^\/api\/chat\/runs\/([^/]+)(?:\/(stop|force))?$/);
       if(runRoute){
         const run=f.runs.get(runRoute[1]);if(!run)return send(res,404,'run not found');
         if(runRoute[2]==='stop'){run.state='stopped';run.events.push({type:'done',ok:false,error:'Stopped.',stopped:true,seq:run.events.length+1});return send(res,202,{id:runRoute[1],state:'stopping'});}
+        if(runRoute[2]==='force')return send(res,202,{id:runRoute[1],state:'forcing'});
         const after=Number(url.searchParams.get('after')||0);return send(res,200,{id:runRoute[1],state:run.state,events:run.events.filter(event=>event.seq>after)});
       }
+      if(/^\/api\/chat\/loops\/[^/]+\/stop$/.test(url.pathname))return send(res,202,{state:'stopped'});
+      if(/^\/api\/chat\/loops\/[^/]+\/round$/.test(url.pathname))return send(res,202,body.decision==='approve'
+        ?{state:'running',round:2,max_rounds:2,max_turns:4}:{state:'declined',reason:'Another round was declined by the user.'});
       if(url.pathname==='/api/plans'){
         if(body){const plan=makePlan(body.slug,body.checkout);plan.title=body.title;plan.content=body.content;plan.tasks=[];plans.set(plan.slug,plan);return send(res,200,plan);}
         return send(res,200,{plans:[...plans.values()].filter(p=>p.checkout===url.searchParams.get('checkout'))});
@@ -93,6 +97,19 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
       if(url.pathname==='/api/chat'){
         f.used.add(body.conversation_id);
         const events=[{type:'session',id:'new-native-session'}];
+        if(body.prompt.includes('lock-wait')){
+          const waiting={type:'waiting',reason:'worktree_lock',holder:'Writer',seq:1};
+          const run={state:'running',events:[waiting]};
+          const publish=()=>{
+            f.runs.set(body.run_id,run);
+            if(!body.prompt.includes('buffered'))res.write(JSON.stringify(waiting)+'\n');
+            setTimeout(()=>{const tail=[{type:'waiting',reason:'worktree_lock',waiting:false,seq:2},{type:'delta',text:'Lock acquired',seq:3},{type:'done',ok:true,text:'Lock acquired',seq:4}];run.events.push(...tail);run.state='completed';res.end(tail.map(event=>JSON.stringify(event)+'\n').join(''));},700);
+          };
+          res.writeHead(200,{'Content-Type':'application/x-ndjson'});
+          if(body.prompt.includes('buffered'))res.flushHeaders();
+          if(body.prompt.includes('delayed'))setTimeout(publish,700);else publish();
+          return;
+        }
         if(body.task_id&&body.write){
           const plan=plans.get(bindings.get(body.conversation_id).plan_slug),execution={id:'exec-'+(plan.executions.length+1),task_id:body.task_id,participant:body.participant,conversation_id:body.conversation_id,state:'validation_pending',branch:'main',checkout:body.checkout,started_at:new Date().toISOString(),files:['src/example.rs'],validation:''};
           plan.executions.push(execution);const task=plan.tasks.find(t=>t.id===body.task_id);task.status='validation_pending';task.latest_execution=execution.id;plan.version++;
@@ -104,7 +121,18 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
           setTimeout(()=>{run.events.push({type:'delta',text:' and two',seq:2},{type:'done',ok:true,text:'Part one and two',seq:3});run.state='completed';res.end(run.events.slice(1).map(event=>JSON.stringify(event)+'\n').join(''));},700);
           return;
         }
-        events.push({type:'delta',text:'Fixture reply'},{type:'done',ok:true,text:'Fixture reply'});
+        let reply='Fixture reply';
+        if(body.engineering_loop?.phase==='implementing'){
+          if(body.engineering_loop.objective==='Implement the responsive header')reply='Implemented. <!-- aic-loop {"action":"review","target":"Reviewer"} -->';
+          if(body.engineering_loop.objective==='Change reviewer')reply='Implemented. <!-- aic-loop {"action":"review","target":"Other"} -->';
+          if(body.engineering_loop.objective.startsWith('Review '))reply='Implemented. <!-- aic-loop {"action":"review","target":"Reviewer"} -->';
+        }
+        if(body.engineering_loop?.phase==='reviewing'){
+          if(body.engineering_loop.objective==='Review without target')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested"} -->';
+          if(body.engineering_loop.objective==='Review wrong target')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested","target":"Other"} -->';
+          if(body.engineering_loop.objective==='Review at limit')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested","target":"Dev"} -->';
+        }
+        events.push({type:'delta',text:reply},{type:'done',ok:true,text:reply});
         if(body.run_id){events.forEach((event,index)=>event.seq=index+1);f.runs.set(body.run_id,{state:'completed',events:clone(events)});}
         res.writeHead(200,{'Content-Type':'application/x-ndjson'});return res.end(events.map(e=>JSON.stringify(e)+'\n').join(''));
       }
@@ -302,6 +330,116 @@ test('refresh reconnects to an in-flight run and replays only missing events',op
     const posts=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
     assert.equal(posts.length,1,'reload must reconnect instead of starting another provider turn');
     assert.ok(t.f.requests.some(request=>request.method==='GET'&&request.path==='/api/chat/runs/'+runId));
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('a writing participant shows and clears the worktree lock wait notice',options,async()=>{
+  const t=await setup();try{
+    await t.page.locator('#input').fill('lock-wait buffered delayed');await t.page.locator('#send').click();
+    await t.page.locator('#composerlock').waitFor();
+    const waitingConversation=await t.page.evaluate(()=>cur().id);
+    const runId=await t.page.evaluate(()=>cur().log.find(entry=>entry.pending)?.run_id);
+    assert.equal(await t.page.locator('.card .locknotice, .card .lockbadge').count(),0);
+    assert.equal(await t.page.locator('.conv.active .lockworking').innerText(),'waiting for Writer');
+    assert.match(await t.page.locator('#composerlock').innerText(),/Dev in “New conversation” is waiting for Writer.*only one conversation can execute writes/s);
+    await t.page.evaluate(()=>{
+      const c={id:crypto.randomUUID(),title:'Foreground chat',participants:[],log:[],round:0,updated:Date.now(),sendTo:null,checkout:null};
+      state.convs.unshift(c);switchTo(c.id);
+    });
+    assert.equal(await t.page.locator('#composerlock').isHidden(),true,'a background wait stays scoped to its conversation');
+    assert.equal(await t.page.locator('.conv .lockworking').count(),1,'the sidebar still identifies the waiting conversation');
+    await t.page.evaluate(id=>switchTo(id),waitingConversation);
+    assert.equal(await t.page.locator('#composerlock').isVisible(),true);
+    assert.match(await t.page.locator('#composerlock').innerText(),/New conversation/);
+    assert.ok(t.f.requests.filter(request=>request.method==='GET'&&request.path==='/api/chat/runs/'+runId).length>=2,'startup polling retries after the run initially returns 404');
+    await t.page.locator('#composerlockforce').click();
+    assert.equal(await t.page.locator('#composerlock').isHidden(),true);
+    assert.equal(await t.page.locator('.conv .lockworking').count(),0);
+    assert.ok(t.f.requests.some(request=>request.method==='POST'&&request.path.endsWith('/force')));
+    await t.page.waitForFunction(()=>state.convs.some(c=>c.log.some(entry=>!entry.pending&&entry.text==='Lock acquired')));
+    assert.equal(await t.page.locator('.conv .lockworking').count(),0);
+    assert.equal(await t.page.locator('#composerlock').isHidden(),true);
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering selects a reviewer by role, persists progress and stops explicitly',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.locator('#input').fill('/loop Implement the responsive header');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>state.convs.some(c=>c.engineeringLoop?.state==='paused'&&c.engineeringLoop.turns===2));
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.implementer,'Dev');assert.equal(loop.reviewer,'Reviewer');assert.equal(loop.round,1);
+    assert.match(await t.page.locator('#engineeringloopstatus').innerText(),/Round 1\/3 · Paused · Reviewer/);
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat').map(request=>request.body);
+    assert.equal(turns.length,2);assert.equal(turns[0].participant,'Dev');assert.equal(turns[1].participant,'Reviewer');
+    assert.equal(turns[0].engineering_loop.id,loop.id);assert.match(turns[1].system,/structured verdict/);
+    await t.page.locator('#engineeringloopstop').click();
+    assert.equal(await t.page.locator('#engineeringloop').isHidden(),true);
+    assert.ok(t.f.requests.some(request=>request.method==='POST'&&request.path.endsWith('/stop')&&request.path.includes('/api/chat/loops/')));
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering pauses instead of choosing a reviewer when the handoff is missing',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.locator('#input').fill('/loop Missing handoff');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.turns,1);assert.equal(loop.phase,'implementing');assert.equal(loop.reviewer,null);
+    assert.match(loop.reason,/valid handoff/);
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
+    assert.equal(turns.length,1);assert.equal(turns[0].body.participant,'Dev');
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering rejects replacing an explicitly selected reviewer',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.locator('#input').fill('/loop @Dev @Reviewer Change reviewer');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.turns,1);assert.equal(loop.phase,'implementing');assert.equal(loop.reviewer,'Reviewer');
+    assert.match(loop.reason,/changed the selected reviewer/);
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
+    assert.equal(turns.length,1);assert.equal(turns[0].body.participant,'Dev');
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+for(const [objective,label] of [['Review without target','missing'],['Review wrong target','incorrect']]){
+  test(`Loop Engineering pauses when changes_requested has a ${label} target`,options,async()=>{
+    const t=await setup({team:true});try{
+      await t.page.locator('#input').fill(`/loop @Dev @Reviewer ${objective}`);await t.page.locator('#send').click();
+      await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+      const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+      assert.equal(loop.turns,2);assert.equal(loop.round,1);assert.equal(loop.phase,'reviewing');
+      assert.match(loop.reason,/invalid participant/);
+      const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
+      assert.deepEqual(turns.map(request=>request.body.participant),['Dev','Reviewer']);
+      assert.deepEqual(t.errors,[]);
+    }finally{await t.close();}
+  });
+}
+
+test('Loop Engineering asks before each round beyond the configured maximum',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.evaluate(()=>{loopMaxRounds=1});
+    await t.page.locator('#input').fill('/loop @Dev @Reviewer Review at limit');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='awaiting_round_approval');
+    assert.match(await t.page.locator('#engineeringloopstatus').innerText(),/Waiting for your decision/);
+    assert.equal(await t.page.locator('#engineeringloopapprove').isVisible(),true);
+    assert.equal(await t.page.locator('#engineeringloopdecline').isVisible(),true);
+    await t.page.locator('#engineeringloopapprove').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='awaiting_round_approval'&&cur().engineeringLoop.round===2);
+    let decisions=t.f.requests.filter(request=>request.method==='POST'&&request.path.endsWith('/round'));
+    assert.equal(decisions.length,1);assert.equal(decisions[0].body.decision,'approve');
+    assert.deepEqual(t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat').map(request=>request.body.participant),['Dev','Reviewer','Dev','Reviewer']);
+    await t.page.locator('#engineeringloopdecline').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='declined');
+    decisions=t.f.requests.filter(request=>request.method==='POST'&&request.path.endsWith('/round'));
+    assert.equal(decisions.length,2);assert.equal(decisions[1].body.decision,'decline');
+    assert.equal(await t.page.locator('#engineeringloop').isHidden(),true);
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });

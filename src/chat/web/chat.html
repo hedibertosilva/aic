@@ -12,10 +12,12 @@
 <aside aria-label="Conversations">
   <header>
     <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
-    <button id="new" class="primary" title="New conversation (Ctrl+Shift+O)"></button>
+    <button id="new" class="icon" title="New conversation (Ctrl+Shift+O)"></button>
     <input id="importfile" type="file" accept=".json,.md,application/json,text/markdown" hidden>
-    <input type="search" id="search" placeholder="Search" aria-label="Search" autocomplete="off">
   </header>
+  <div id="searchbar">
+    <input type="search" id="search" placeholder="Search" aria-label="Search" autocomplete="off">
+  </div>
   <nav id="list"></nav>
   <footer id="repobar">
     <div class="repoinfo">
@@ -32,9 +34,9 @@
     <span id="chips"></span>
     <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
     <button id="readybtn" class="environmentbtn" type="button">Environment</button>
-    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
     <button id="themebtn" class="icon" type="button"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
+    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
     <section id="quotas" aria-labelledby="quotatitle" hidden>
       <header><div class="quotatitles"><strong id="quotatitle">Usage limits</strong><span id="quotasubtitle">Provider limits and conversation usage</span></div><span class="grow"></span>
         <button id="quotarefresh" class="icon" type="button" aria-label="Refresh usage limits" title="Refresh usage limits"></button>
@@ -53,8 +55,7 @@
         <header><div class="contextpopovertitles"><strong>Advanced</strong><span>Conversation-specific settings</span></div><button id="advancedclose" class="icon" type="button" aria-label="Close Advanced" title="Close Advanced"></button></header>
         <div class="contextpopoverbody">
           <section class="contextpopovercard">
-            <strong>This conversation only</strong>
-            <p class="note">Change its working checkout. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
+            <p class="note">Change its working checkout for this conversation only. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
             <button id="worktreebtn" type="button">Change Checkout</button>
           </section>
         </div>
@@ -83,6 +84,18 @@
   <footer id="composer">
     <button id="jump" type="button"></button>
     <div id="ac" role="listbox"></div>
+    <div id="engineeringloop" role="status" hidden>
+      <div class="engineeringloopcopy"><strong>Loop Engineering</strong><span id="engineeringloopstatus"></span></div>
+      <div id="engineeringloopdecision" class="engineeringloopdecision" hidden>
+        <button id="engineeringloopdecline" type="button">End Loop</button>
+        <button id="engineeringloopapprove" type="button" class="primary">Continue</button>
+      </div>
+      <button id="engineeringloopstop" type="button">Stop Loop Engineering</button>
+    </div>
+    <div id="composerlock" role="status" hidden>
+      <span id="composerlocktext"></span>
+      <button id="composerlockforce" type="button">Force Execution</button>
+    </div>
     <form id="form">
       <textarea id="input" rows="2" aria-label="Message" placeholder="Write your message…" autofocus></textarea>
       <div class="toolbar">
@@ -249,10 +262,11 @@
             <label class="configfield configimage">Sandbox image<input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"><span class="fieldhint">Container image used when sandboxing is enabled.</span></label>
           </div>
           <label class="check configcheck"><input type="checkbox" id="cskippermissions"><span class="checkcopy"><strong>Approve tool requests automatically</strong><small>Applies to headless runs. Enable only for repositories you trust.</small></span></label>
+          <label class="check configcheck"><input type="checkbox" id="cserializewriters"><span class="checkcopy"><strong>Serialize writers across conversations</strong><small>For safety, only one conversation can write to a worktree at a time. Writers in the same conversation can still run together.</small></span></label>
+          <label class="configfield configlooprounds">Maximum Loop Engineering rounds<input type="number" id="clooprounds" min="1" max="20" step="1" required><span class="fieldhint">Global safety ceiling. Individual loops may finish earlier.</span></label>
         </div>
       </section>
 
-      <div class="configworkflow" role="note"><strong>Workflow settings</strong><span>Executor, reviewer, rounds, and base branch are managed by <code>aic workflow</code>. Edit them with <code>aic config</code>.</span></div>
     </div>
 
     <div class="configfooter">
@@ -271,7 +285,7 @@
   <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
   <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Terminal checks</strong><span>Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</span></div>
+  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Recovery actions</strong><span>Run starts supported checks and sandbox preparation here. Interactive login actions still run in the terminal; Copy keeps the command handy.</span></div>
     <p class="note err" id="readyerror" hidden></p>
     <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
   </div>
