@@ -1,7 +1,7 @@
 # Onboarding implementation decisions
 
 Canonical slug: `aic-chat-onboarding`, as explicitly requested by the user with
-`/aic-plan aic-chat-onboarding`. References to `aic-chat-improvements` in the PM
+`/plan aic-chat-onboarding`. References to `aic-chat-improvements` in the PM
 review refer to an earlier proposal; this work retains the user's actual slug.
 
 First release targets: Linux x86_64 and arm64, native static musl artifacts.

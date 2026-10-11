@@ -2736,12 +2736,12 @@ done
 
     #[test]
     fn skill_frontmatter_with_list_tools() {
-        let text = "---\nname: aic-plan\ndescription: \"AIC: Scaffold a plan\"\nargument-hint: \"<slug> [title]\"\nallowed-tools:\n  - Bash\n  - Read\n  - Edit\n---\n\nbody";
+        let text = "---\nname: plan\ndescription: \"Scaffold a plan\"\nargument-hint: \"<slug> [title]\"\nallowed-tools:\n  - Bash\n  - Read\n  - Edit\n---\n\nbody";
         assert_eq!(
             parse_skill(text, "dir"),
             Some(Skill {
-                name: "aic-plan".into(),
-                description: "AIC: Scaffold a plan".into(),
+                name: "plan".into(),
+                description: "Scaffold a plan".into(),
                 argument_hint: "<slug> [title]".into(),
                 requires_write: true,
             })

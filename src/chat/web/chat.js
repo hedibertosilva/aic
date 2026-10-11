@@ -204,7 +204,9 @@ window.addEventListener("pagehide", () => {
 });
 
 const cur = () => state.convs.find((c) => c.id === state.current);
-const hasInteraction = (c) => !!c.keepEmpty || !!c.planBinding?.plan_id || (Array.isArray(c.log) && c.log.length > 0);
+const hasInteraction = (c) => !!c.keepEmpty || !!c.planBinding?.plan_id
+  || (Array.isArray(c.participants) && c.participants.length > 0)
+  || (Array.isArray(c.log) && c.log.length > 0);
 function pruneEmptyConversations() {
   const empty = new Set(state.convs.filter((c) => !hasInteraction(c)).map((c) => c.id));
   if (!empty.size) return false;
@@ -1069,7 +1071,7 @@ function renderBar() {
   notice.hidden = !unavailable.length;
   notice.textContent = unavailable.length ? "Unavailable agents: " + unavailable.map((p) => p.name).join(", ") + ". Edit their participant settings to choose an available agent and activate them." : "";
   const add = $("addbtn");
-  add.hidden = !!c && c.participants.length >= MAX_PARTICIPANTS;
+  add.hidden = !meta.agents.length || !c?.participants.length || c.participants.length >= MAX_PARTICIPANTS;
   add.disabled = !c || !meta.agents.length;
 
   const lay = $("layout"); lay.textContent = "";
@@ -1804,7 +1806,7 @@ function systemFor(c, p, loop = null) {
     s += '\nThis is a discussion turn. Discuss or review without editing files or updating plan records.';
   }
   if (kindOf(p) !== "agy" && skills.length) {
-    s += " A user message that starts with /name (for example /aic-plan my-plan) asks you to run the skill `name` with the rest of that line as its arguments."
+    s += " A user message that starts with /name (for example /plan my-plan) asks you to run the skill `name` with the rest of that line as its arguments."
       + " If a skill asks you to interview the user, ask your questions as plain replies in this chat; there is no question tool here.";
   }
   if (kindOf(p) === "codex") {
@@ -1928,6 +1930,7 @@ function applyRunEvent(c, p, entry, ev, paint) {
       if (ev.stopped) entry.stopped = true;
     } else if (!entry.text) entry.text = ev.text;
     entry.run_done = true;
+    paint();
   }
   saveSoon();
 }
@@ -2078,10 +2081,17 @@ function resumePendingRuns() {
     const key = runKey(c, p);
     if (running.has(key)) continue;
     const ctl = new AbortController(); running.set(key, ctl);
-    let queued = false;
+    let queued = false, stickToEnd = false;
     const paint = () => {
+      if (cur() === c) stickToEnd = nearEnd();
       if (queued) return; queued = true;
-      requestAnimationFrame(() => { queued = false; if (cur() === c) paintCard(c, entry); });
+      requestAnimationFrame(() => {
+        queued = false;
+        if (cur() !== c) { stickToEnd = false; return; }
+        paintCard(c, entry);
+        if (stickToEnd) toEnd(); else $("jump").classList.add("show");
+        stickToEnd = false;
+      });
     };
     reconnectRun(c, p, entry, paint, ctl.signal)
       .catch(error => {
@@ -2096,14 +2106,16 @@ function resumePendingRuns() {
 async function turn(c, { p, text: prompt, entry, planRun }) {
   const key = runKey(c, p);
   let queued = false;
+  let stickToEnd = false;
   const paint = () => {
+    if (cur() === c) stickToEnd = nearEnd();
     if (queued) return; queued = true;
     requestAnimationFrame(() => {
       queued = false;
       if (cur() !== c) return; // still streaming into a conversation that isn't on screen
-      const stick = nearEnd();
       paintCard(c, entry);
-      if (stick) toEnd(); else $("jump").classList.add("show");
+      if (stickToEnd) toEnd(); else $("jump").classList.add("show");
+      stickToEnd = false;
     });
   };
   const fail = (msg, soft) => { entry.error = true; entry.soft = !!soft; entry.text = msg; p.seen = entry.seen0; };
@@ -2411,9 +2423,9 @@ function acUpdate() {
     const loop = { type: "/", value: "loop", label: "/loop", arg: "[@implementer] [@reviewer] <objective>", sub: "Iterate implementation and review until approval" };
     acItems = [fork, fresh, clear, loop, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
-      .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint, sub: s.description,
+      .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint,
         off: skillProblem(s.name, recipients(c)),
-        sub: s.description + " · Claude/Codex · one recipient" + (s.requires_write ? " · edit access required" : " · read access") }))]
+        sub: s.description + " · one recipient" + (s.requires_write ? " · edit access required" : " · read access") }))]
       .filter((item) => item.value.toLowerCase().includes(q));
   }
   acSel = Math.min(acSel, Math.max(acItems.length - 1, 0));
@@ -2593,7 +2605,7 @@ function updateDialog() {
   fetchModels(agent).then((live) => { if ($("pagent").value === agent) suggest(live); });
   const w = $("pwritewarn");
   w.hidden = access() !== "write";
-  w.replaceChildren(icon("alert"), el("span", "", `Can create, change and delete files in ${meta.repo || "this repository"}, following the permission mode in your config.`));
+  w.textContent = `Can create, change and delete files in ${meta.repo || "this repository"}, following the permission mode in your config.`;
   const hues = $("phues"); hues.textContent = "";
   const options = PALETTE.includes(dlgHue) ? PALETTE : [...PALETTE, dlgHue];
   const taken = new Set(c ? c.participants.filter((q) => q !== editing).map(hueOf) : []);
@@ -2658,7 +2670,8 @@ $("premove").onclick = () => {
   if (busy(c)) return dialogError("Wait for the replies to finish.");
   if (c.participants.length < 2) return dialogError("A conversation needs at least one participant.");
   $("perror").hidden = true;
-  $("pconfirmtext").replaceChildren(icon("alert"), el("span", "", `Remove ${p.name}? They leave this conversation, but the existing messages stay.`));
+  $("pconfirmtitle").textContent = `Remove ${p.name}?`;
+  $("pconfirmmessage").textContent = "They leave this conversation, but the existing messages stay.";
   askRemove(true);
   $("pkeep").focus();
 };
@@ -3122,7 +3135,7 @@ async function openPlanDialog(c = cur(), {targetCheckout = null} = {}) {
     editor.plans = listing.plans;
     const select = $('existingplan'); select.replaceChildren();
     const placeholder = el('option', '', listing.plans.length ? 'Choose a plan' : 'No plans in this checkout'); placeholder.value = ''; select.append(placeholder);
-    for (const plan of listing.plans) { const option = el('option', '', plan.title + ' · ' + plan.slug); option.value = plan.slug; select.append(option); }
+    for (const plan of listing.plans) { const option = el('option', '', plan.title); option.value = plan.slug; select.append(option); }
     select.value = targetCheckout ? '' : c.planBinding?.plan_id || '';
     editor.loading = false; updatePlanChoice();
   } catch (error) {
@@ -3198,7 +3211,7 @@ $('planform').onsubmit = async event => {
       }));
       id = created.id;
       // A failed subsequent link can be retried without creating a duplicate.
-      const option = el('option', '', created.title + ' · ' + created.slug); option.value = id; $('existingplan').append(option);
+      const option = el('option', '', created.title); option.value = id; $('existingplan').append(option);
       $('planchoice').value = 'existing'; $('existingplan').value = id;
     }
     const result = await planRequest(conversationPlanRoute(editor.c, editor.targetCheckout ? 'checkout' : 'plan'), {

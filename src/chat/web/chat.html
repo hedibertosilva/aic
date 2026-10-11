@@ -32,7 +32,7 @@
   <div id="bar">
     <button id="menu" class="icon" aria-label="Conversations"></button>
     <span id="chips"></span>
-    <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
+    <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant" hidden></button>
     <button id="readybtn" class="environmentbtn" type="button">Environment</button>
     <button id="themebtn" class="icon" type="button"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
@@ -149,7 +149,7 @@
               <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
               <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
             </div>
-            <p class="note warn" id="pwritewarn" role="note" hidden></p>
+            <div class="configscope participantwriteeffect" id="pwritewarn" role="note" hidden></div>
           </fieldset>
         </div>
       </section>
@@ -164,7 +164,10 @@
         <button type="submit" id="psave" class="primary">Save</button>
       </div>
       <div id="pconfirm" hidden>
-        <p class="note warn" id="pconfirmtext"></p>
+        <div class="configscope deletewarning" id="pconfirmtext" role="note">
+          <strong id="pconfirmtitle"></strong>
+          <span id="pconfirmmessage"></span>
+        </div>
         <div class="buttons">
           <span class="grow"></span>
           <button type="button" id="pkeep">Cancel</button>
@@ -285,7 +288,7 @@
   <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
   <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Recovery actions</strong><span>Run starts supported checks and sandbox preparation here. Interactive login actions still run in the terminal; Copy keeps the command handy.</span></div>
+  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Recovery Actions</strong><span>Run starts supported checks and sandbox preparation here. <br/> Interactive login actions still run in the terminal; Copy keeps the command handy.</span></div>
     <p class="note err" id="readyerror" hidden></p>
     <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
   </div>
