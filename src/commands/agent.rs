@@ -9,26 +9,28 @@ use crate::config::Config;
 use crate::sandbox::Sandbox;
 
 /// `aic agent list`: the configured agents, whether their binary is found,
-/// and which ones are the default executor/reviewer.
+/// and which one is the default for new chats.
 pub fn list(config: &Config) -> Result<()> {
     let mut names: Vec<&String> = config.agents.keys().collect();
     names.sort();
     let width = names.iter().map(|n| n.len()).max().unwrap_or(0).max("NAME".len());
-    println!("{:<width$}  {:<9}  {:<8}  {:<10}  BINARY", "NAME", "ROLE", "MODEL", "EFFORT");
+    println!(
+        "{:<width$}  {:<7}  {:<8}  {:<10}  BINARY",
+        "NAME", "DEFAULT", "MODEL", "EFFORT"
+    );
     for name in names {
         let agent = &config.agents[name];
-        let role = match (*name == config.workflow.executor, *name == config.workflow.reviewer) {
-            (true, true) => "exec,rev",
-            (true, false) => "executor",
-            (false, true) => "reviewer",
-            _ => "-",
+        let default = if *name == config.chat_default_agent() {
+            "chat"
+        } else {
+            "-"
         };
         let found = match resolve_binary(&agent.binary) {
             Some(path) => path.display().to_string(),
             None => format!("{} (not found)", agent.binary),
         };
         println!(
-            "{name:<width$}  {role:<9}  {:<8}  {:<10}  {found}",
+            "{name:<width$}  {default:<7}  {:<8}  {:<10}  {found}",
             or_dash(&agent.model),
             or_dash(&agent.effort),
         );

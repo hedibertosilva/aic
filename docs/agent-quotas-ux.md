@@ -1,174 +1,155 @@
-# Usage limits — especificação de UX
+# Usage limits — UX specification
 
-Escopo aprovado por Evandro e pelo usuário: chat web, interface em inglês,
-aviso fixo em ≥80%, sem bloquear seleção, salvamento ou envio. “Send to…”
-fica fora da v1. Descoberta técnica: [agent-quotas-spike.md](agent-quotas-spike.md).
+Approved scope: web chat, English interface, persistent warning at ≥80%, with
+selection, saving and sending never blocked. “Send to…” is out of scope for v1.
+Technical discovery: agent-quotas-spike.md.
 
-## Entregas
+## Deliverables
 
-1. **Fase 1:** consumo por conversa/agente no SQLite, agente gravado por
-   turno, parser Codex corrigido, cota de Codex, Claude (`/usage`) e agy
-   (`/usage`, por grupo de modelos), cache em memória no servidor, painel,
-   badges e nota no seletor. Claude e agy entraram na fase 1 depois que o
-   `/usage` de ambos foi validado (ver o spike).
-2. **Fase 2:** cartão de falha classificado (cota × rate limit), após a ordem
-   dos eventos e uma falha real de limite serem capturadas.
-3. **Fase 3:** *(absorvida na fase 1 para o agy.)*
+1. **Phase 1:** per-conversation/agent usage in SQLite, agent recorded per turn,
+   corrected Codex parser, Codex/Claude/agy quota readings, server memory cache,
+   panel, badges and selector notes.
+2. **Phase 2:** classified failure card (quota vs. rate limit), after event
+   ordering and a real limit failure are captured.
+3. **Phase 3:** *(absorbed into phase 1 for agy.)*
 
-Um agente cuja leitura falhe, ou cuja conta não tenha janelas, usa os estados
-explícitos e o consumo observado. No agy, o painel e os alertas usam as janelas
-do grupo que governa o modelo do participante; modelo não reconhecido mantém
-todas as janelas.
+An agent whose reading fails, or whose account has no windows, uses explicit
+states and observed usage. For agy, the panel and alerts use the model group
+that governs the participant's model; an unrecognized model keeps all windows.
 
-## Pontos de acesso
+## Access points
 
-- Botão de medidor ao lado de Configuration, abrindo o painel **Usage limits**.
-  Lista todos os agentes configurados, mesmo os ausentes da conversa.
-  Indicador visual de aviso/esgotamento e nome acessível equivalente.
-- Chips de participantes herdam o estado do agente: badge **Near limit**
-  ou percentual a partir de 80%; **Exhausted** quando esgotado.
-  Participantes que compartilham agente compartilham a leitura de cota.
-- Pills **To:** recebem ícone de alerta, tooltip e descrição acessível.
-- Diálogo de participante: nota abaixo do select Agent. Opções recebem
-  sufixo curto apenas em aviso/esgotamento. Save permanece habilitado.
+- A meter button beside Configuration opens **Usage limits**. It lists every
+  configured agent, including agents absent from the conversation.
+- Participant chips inherit the agent state: **Near limit** or a percentage at
+  80%+, and **Exhausted** at 100%+. Participants sharing an agent share its
+  quota reading.
+- **To:** pills receive an alert icon, tooltip and accessible description.
+- The participant dialog shows a note below Agent. Options receive a short
+  warning/exhausted suffix; Save remains enabled.
 
-## Estrutura de cada agente
+## Agent row structure
 
-Cada linha tem três níveis com peso visual equivalente:
+Each row has three equally important levels:
 
-1. Nome do agente, resumo da janela mais crítica e controle de detalhes.
-2. Barra/reset quando disponíveis; texto explicativo nos demais casos.
-3. **This conversation:** consumo observado, mesmo quando há cota.
+1. Agent name, most critical window summary and details control.
+2. Bar/reset when available; explanatory text otherwise.
+3. **This conversation:** observed usage, even when quota is available.
 
-Detalhes expandem todas as janelas/buckets, fonte, última leitura e última
-tentativa quando houve erro. A janela mais crítica é a de maior estado
-de alerta e, dentro dele, maior percentual. Uma cota compartilhada não
-pode ser apresentada como cotas independentes por participante/modelo.
+Details expand all windows/buckets, source, last reading and last attempt when
+an error occurred. The most critical window has the highest alert state and,
+within that state, the highest percentage. Shared quota must not be presented
+as independent quotas per participant or model.
 
-## Estados
+## States
 
-| Estado | Conteúdo | Tratamento |
+| State | Content | Treatment |
 | --- | --- | --- |
-| Normal | `34% · 5h` e reset | Barra neutra |
-| ≥80% | `⚠ Near limit 86% · wk` | Barra/badge com `--warn` |
-| ≥100% | `Exhausted` e reset | Barra/badge com `--err` |
-| Antes da primeira leitura | `No quota reading yet` | Sem barra; some assim que a leitura termina |
-| Indisponível | `Quota not available` e motivo | Sem barra nem trilho |
-| Primeira leitura | `Checking…` | Indicador por agente |
-| Aviso sem percentual | `Near limit (reported by provider)` | Sem número nem barra |
-| Rejeição sem percentual | `Exhausted` | Sem percentual fabricado |
-| Erro com leitura anterior | Valor anterior, erro e Retry | Barra com opacidade 0,5; fetched_at preservado |
-| Erro sem leitura anterior | `Couldn't read quota` e Retry | Sem barra |
-| Janela vencida | Valor anterior e `Reset at…` | Dado desatualizado; consulta automática; nunca zerar localmente |
+| Normal | 34% · 5h and reset | Neutral bar |
+| ≥80% | Near limit 86% · wk | warn bar/badge |
+| ≥100% | Exhausted and reset | err bar/badge |
+| Before first reading | No quota reading yet | No bar; disappears after reading |
+| Unavailable | Quota not available and reason | No bar or track |
+| First reading | Checking… | Per-agent indicator |
+| Warning without percentage | Near limit (reported by provider) | No number or bar |
+| Rejection without percentage | Exhausted | Do not invent a percentage |
+| Error with previous reading | Previous value, error and Retry | 50% opacity bar; preserve fetched_at |
+| Error without previous reading | Couldn't read quota and Retry | No bar |
+| Expired window | Previous value and Reset at… | Stale data; query automatically; never reset locally |
 
-Erro de leitura e dado vencido não apagam os dados anteriores. Fonte e
-horário são por agente; um horário geral não deve sugerir que todos foram
-atualizados. Leituras com mais de 15 minutos recebem indicação de idade.
+Reading errors and stale data do not erase previous values. Source and time are
+per agent; a global timestamp must not imply that all agents were refreshed.
+Readings older than 15 minutes show their age.
 
-## Reset e idioma
+## Reset and language
 
-O contrato web usa instantes UTC; o navegador apresenta no fuso local.
-Para reset futuro em menos de 24h: `resets in 3h 10m (17:40)`.
-Para intervalos maiores: dia/data e horário. Sem reset:
-`reset time unknown`. Abreviações: 300 minutos → `5h`; 10080 → `wk`;
-outra duração mantém o rótulo informado pelo adapter.
+The web contract uses UTC instants; the browser displays local time. For a reset
+under 24 hours away: “resets in 3h 10m (17:40)”. For longer intervals, show
+date and time. Without a reset: “reset time unknown”. Abbreviations: 300 minutes
+→ 5h; 10080 → wk; other durations keep the adapter's label.
 
-Não prometer que a próxima resposta fornecerá cota. No diálogo de agente
-esgotado, usar `Replies may fail`, pois o limite pode afetar um bucket.
+Do not promise that the next response will provide quota. In an exhausted-agent
+dialog, use “Replies may fail”, because the limit may affect only one bucket.
 
-## Consumo
+## Usage
 
-Consumo mede execuções desta conversa no aic, não uso total da conta.
-Um contador por conversa/agente e referências de contadores cumulativos
-ficam no SQLite existente; não há ledger de turnos.
+Usage measures executions in this aic conversation, not total account usage.
+Per-conversation/agent counters and cumulative counter references live in the
+existing SQLite database; there is no turn ledger.
 
-- Campo ausente: `in n/a`, `out n/a` ou `cost n/a`; não fabricar zero.
-- Totais parciais: prefixo `≥` nos campos com cobertura incompleta e
-  indicação de quantas respostas não informaram uso.
-- Nenhuma execução contabilizada: `No usage yet in this conversation`.
-- Histórico anterior sem agente registrado: nota única no painel,
-  fora dos totais de cada agente.
-- Apagar/regenerar resposta não devolve tokens. Copiar/importar histórico
-  não cobra as execuções antigas na nova conversa.
-- Tooltip: `Spent by aic in this conversation, including regenerated and deleted replies`.
-- Se a primeira leitura cumulativa de uma sessão antiga não permite
-  separar o gasto atual, iniciar baseline e tratar esse turno como parcial.
+- Missing fields remain n/a; never invent zero.
+- Partial totals use a ≥ prefix where coverage is incomplete and indicate how
+  many replies did not report usage.
+- No executions: “No usage yet in this conversation”.
+- Older history without a recorded agent gets one panel note, outside per-agent
+  totals.
+- Deleting/regenerating a reply does not return tokens. Copying/importing
+  history does not charge its old executions to the new conversation.
+- If an old session's first cumulative reading cannot isolate current spend,
+  establish a baseline and treat that turn as partial.
 
-## Atualização e cache
+## Refresh and cache
 
-O painel abre imediatamente; leituras rodam em paralelo ao uso do chat.
-Refresh manual atualiza os adapters habilitados, com indicador por linha.
-O botão de refresh fica desabilitado enquanto houver leitura em andamento.
-Ao fim de cada turno, atualizar apenas o agente daquela execução, sem
-animação adicional. Pedidos concorrentes do mesmo agente são deduplicados
-no servidor, inclusive entre abas.
+The panel opens immediately; readings run in parallel with chat use. Manual
+Refresh updates enabled adapters with a per-row indicator. Refresh is disabled
+while a reading is in progress. At the end of a turn, refresh only that agent,
+without extra animation. Concurrent requests for one agent are deduplicated,
+including across tabs.
 
-O servidor guarda a última leitura por agente em memória: reload da página
-recupera valor e horário anteriores. Cache não sobrevive a reinício do
-servidor na v1. Mudança de configuração relevante invalida a leitura.
-Leitura vencida tem retentativa limitada; falha não bloqueia o envio.
+The server keeps the last reading per agent in memory: page reloads recover the
+value and timestamp. The cache does not survive a server restart in v1. Relevant
+configuration changes invalidate it. Stale readings get limited retries; a
+reading failure never blocks sending.
 
-## Falhas de turno — fase 2
+## Turn failures — phase 2
 
-Cartão especial somente com classificação confirmada por campo estruturado:
+A special card is used only with a structured classification:
 
-| Tipo | Título | Ação | Efeito |
+| Type | Title | Action | Effect |
 | --- | --- | --- | --- |
-| quota | `<Agent> usage limit reached` | Change agent… e retry existente | Marca apenas bucket confirmado como esgotado |
-| rate_limit | `<Agent> is rate limited` | Try again; Change agent… secundário | Não marca cota esgotada |
-| Autenticação/rede/ambíguo | Erro normal | Retry existente | Não altera cota |
+| quota | Agent usage limit reached | Change agent and retry | Marks only the confirmed bucket exhausted |
+| rate_limit | Agent is rate limited | Try again; secondary Change agent | Does not mark quota exhausted |
+| Authentication/network/ambiguous | Normal error | Existing retry | Does not change quota |
 
-Reset aparece apenas se informado; caso contrário, `Reset time not reported
-by <Agent>`. Erro original permanece em Details. Change agent… reutiliza
-o diálogo do participante, com foco no select Agent.
-Na fase 1, erros continuam no cartão normal, preservando o motivo do Codex.
+Show reset only when reported; otherwise say “Reset time not reported by the
+agent”. Keep the original error in Details. Change agent reuses the participant
+dialog and focuses Agent. In phase 1, failures remain normal cards and preserve
+the Codex reason.
 
-## Acessibilidade e responsividade
+## Accessibility and responsiveness
 
-- Usar tokens existentes, com texto/ícone além da cor.
-- Barra somente com percentual conhecido; `role=meter`, nome, limites,
-  valor e `aria-valuetext` incluindo janela/reset.
-- Aviso/esgotamento anunciado uma vez por mudança de estado.
-- Painel pode ser fechado por botão, clique externo ou Escape, com
-  retorno de foco ao botão quando fechado por teclado.
-- Em telas ≤700px, painel ocupa a largura disponível do chat.
-- Indicadores respeitam `prefers-reduced-motion`.
+- Use existing tokens, with text/icon in addition to color.
+- Show a bar only for a known percentage; include the window/reset in the
+  accessible value.
+- Announce warning/exhaustion once per state change.
+- The panel can close by button, outside click or Escape, returning focus to the
+  button when closed by keyboard.
+- At ≤700px, the panel uses the available chat width.
+- Indicators respect prefers-reduced-motion.
 
-## Aceite da fase 1
+## Phase 1 acceptance
 
-Com Claude, Codex e Gemini configurados, todos aparecem no painel. Codex
-exibe as janelas quando disponíveis; Claude/Gemini exibem consumo e estado
-explícito. Valores ausentes não aparecem como 0% ou $0.00. Reload preserva
-a leitura em cache enquanto o servidor continua ativo. Contagem permanece
-correta ao trocar agente, regenerar/apagar resposta e copiar histórico.
+With Claude, Codex and Gemini configured, all appear in the panel. Codex shows
+windows when available; Claude/Gemini show usage and an explicit state. Missing
+values never appear as 0% or $0.00. Reload preserves the cached reading while
+the server remains active. Counts remain correct when changing agents,
+regenerating/deleting replies and copying history.
 
-## Validação da entrega
+## Delivery validation
 
-A fase 1 passou em 91 testes Rust, 17 testes JavaScript e verificações de
-integração HTTP e Chromium. O teste HTTP usa CLIs controladas para conferir
-normalização do Codex, isolamento entre conversas, falha sem Usage,
-preservação da última leitura e persistência após reinício do servidor.
-O navegador verifica os três agentes, cache após reload, 80%/100%, seletor,
-envio, regeneração/exclusão, painel estreito e falha de leitura.
+Phase 1 passed 91 Rust tests, 17 JavaScript tests and HTTP/Chromium integration
+checks. HTTP tests use controlled CLIs to verify Codex normalization, conversation
+isolation, missing Usage, previous-reading preservation and persistence after a
+server restart. Browser tests cover all three agents, reload cache, 80%/100%,
+selector, sending, regeneration/deletion, narrow panels and read failures.
 
-O adapter de produção também fez uma consulta autenticada ao Codex
-0.160.0 neste sandbox Debian trixie, sem prompt nem geração. Retornou
-janelas de 300 e 10080 minutos, com percentual e reset, em cerca de 4,3 s.
-Dois turnos reais na mesma sessão confirmaram que `turn.completed` do
-`exec resume` é cumulativo; a fase 1 normaliza o segundo evento pelo
-baseline persistido da sessão antes de somá-lo à conversa.
-Não havia login Claude/agy; suas cotas e falhas reais seguem sem validação.
-Não foi possível testar a criação de um container Docker/Podman a partir
-deste ambiente; os argumentos do sandbox foram verificados nos testes Rust.
+To repeat the checks:
 
-Para repetir as verificações (ajustar o caminho do binário se necessário):
-
-```sh
+~~~sh
 cargo test
 cargo build
 AIC_TEST_BINARY="$PWD/target/debug/aic" node --test tests/*.cjs
-```
+~~~
 
-O teste de navegador é opcional quando Playwright/Chromium não estão
-instalados; para executá-lo, instalar essas ferramentas e apontar
-`AIC_PLAYWRIGHT_MODULE` para o módulo quando estiver fora do repositório.
+Browser tests are optional when Playwright/Chromium are unavailable; install
+them and set AIC_PLAYWRIGHT_MODULE when the module is outside the repository.

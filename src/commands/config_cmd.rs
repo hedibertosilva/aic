@@ -8,11 +8,6 @@ use crate::config::{Config, Mode, SandboxKind};
 
 /// Config keys `aic config set` accepts, as `section.key`.
 const KEYS: &[&str] = &[
-    "workflow.executor",
-    "workflow.reviewer",
-    "workflow.mode",
-    "workflow.max_rounds",
-    "workflow.default_base_branch",
     "permissions.mode",
     "permissions.skip",
     "sandbox.runtime",
@@ -38,22 +33,28 @@ fn canonical_key(key: &str) -> &str {
     }
 }
 
-/// Prints the *effective* config: global, with the current repo's
-/// `.aic/config.toml` override (if any) applied on top — matching what
-/// every other command actually resolves and uses.
+/// Prints the public part of the *effective* config: global, with the current
+/// repo's `.aic/config.toml` override (if any) applied on top.
 pub fn show(repo_root: &Path) -> Result<()> {
     let config = Config::load_merged(repo_root)?;
     if crate::config::in_sandbox() {
         println!("# running inside the aic sandbox: agents run directly ([sandbox] runtime = \"none\")\n");
     }
-    println!("{}", toml::to_string_pretty(&config)?);
+    let mut public = toml::Value::try_from(&config)?;
+    if let Some(table) = public.as_table_mut() {
+        table.remove("workflow");
+    }
+    println!("{}", toml::to_string_pretty(&public)?);
     Ok(())
 }
 
-/// Sets one key of the global config. Takes `section.key` (see `KEYS`);
-/// the old flat names (`mode`, `sandbox_image`, ...) still work.
+/// Sets one public key of the global config. Takes `section.key` (see `KEYS`);
+/// legacy flat names for public keys such as `sandbox_image` still work.
 pub fn set(key: &str, value: &str) -> Result<()> {
     let key = canonical_key(key);
+    if !KEYS.contains(&key) {
+        bail!("unknown config key '{key}' ({})", KEYS.join(", "));
+    }
     let mut config = Config::load_global()?;
     match key {
         "workflow.executor" => config.workflow.executor = value.to_string(),
@@ -162,7 +163,7 @@ fn shown(key: &str, raw: &str) -> String {
         "permissions.skip" | "sandbox.bind_agents" => (if raw == "true" { "[x]" } else { "[ ]" }).to_string(),
         _ if raw.is_empty() => match key {
             "workflow.default_base_branch" => "(auto-detect)",
-            "chat.default_agent" => "(workflow executor)",
+            "chat.default_agent" => "(choose in chat)",
             _ => "(none)",
         }
         .to_string(),
@@ -347,7 +348,7 @@ fn choose_agent(prompt: &str, config: &Config, current: &str, allow_empty: bool)
     let mut items: Vec<String> = Vec::new();
     let mut values: Vec<String> = Vec::new();
     if allow_empty {
-        items.push("(workflow executor)".to_string());
+        items.push("(choose in chat)".to_string());
         values.push(String::new());
     }
     for name in names {
@@ -557,7 +558,7 @@ mod tests {
         assert_eq!(shown("permissions.skip", "true"), "[x]");
         assert_eq!(shown("sandbox.bind_agents", "false"), "[ ]");
         assert_eq!(shown("workflow.default_base_branch", ""), "(auto-detect)");
-        assert_eq!(shown("chat.default_agent", ""), "(workflow executor)");
+        assert_eq!(shown("chat.default_agent", ""), "(choose in chat)");
         assert_eq!(shown("sandbox.mounts", ""), "(none)");
         assert_eq!(shown("workflow.executor", "claude"), "claude");
     }

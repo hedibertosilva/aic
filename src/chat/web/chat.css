@@ -946,7 +946,16 @@ main { background: transparent; }
 .pill { min-height: 28px; padding: 3px 9px 3px 7px; background: var(--panel); border-color: transparent; border-radius: var(--radius); }
 .pill:hover { background: var(--accent-soft); }
 .send { width: 40px; height: 36px; min-height: 36px; border-radius: var(--radius); box-shadow: var(--shadow-sm); }
-.hint { margin-top: 7px; font-size: 11px; }
+.hint {
+  margin-top: 7px;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  padding: 3px 8px;
+  background: color-mix(in srgb, var(--panel) 50%, transparent);
+  border-radius: 0;
+  font-size: 11px;
+}
 #ac { border-radius: var(--radius); box-shadow: var(--shadow); }
 #ac .opt { border-radius: var(--radius); }
 

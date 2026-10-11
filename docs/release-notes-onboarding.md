@@ -3,7 +3,7 @@
 - Linux x86_64 and arm64 static musl release artifacts with SHA-256 checksums.
 - `aic setup`, consented `aic agent test` and read-only `aic doctor --json`.
 - Contextual readiness and recovery before chat sends, without automatic paid tests.
-- Explicit chat default: empty no longer inherits the workflow executor; no fallback
+- Explicit chat default: empty no longer inherits another configured default; no fallback
   to Claude or the first configured agent. Existing conversations retain sessions
   and participants. New chats without a ready default offer participant creation
   and import through the existing cards, without opening a dialog automatically.
