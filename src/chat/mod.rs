@@ -2,6 +2,7 @@
 //! consumption tracking. The page lives in `web/`.
 
 pub mod consumption;
+pub mod plans;
 pub mod quotas;
 pub mod server;
 pub mod store;

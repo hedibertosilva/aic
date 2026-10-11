@@ -80,6 +80,11 @@ pub struct RunSpec {
     pub agent: String,
     /// Agent argv, after the binary name.
     pub args: Vec<String>,
+    /// Environment entries supplied only for this invocation.
+    pub env: Vec<(String, String)>,
+    /// Share the host network so this invocation can reach a service bound
+    /// to the host loopback interface.
+    pub host_network: bool,
     /// Container name, so the caller can `<runtime> kill` it: killing the
     /// `run` client alone leaves the container running.
     pub name: Option<String>,
@@ -226,7 +231,7 @@ impl Sandbox {
 
     fn build_run_args(&self, spec: &RunSpec, host_network: bool) -> Vec<String> {
         let mut args: Vec<String> = vec!["run".into(), "--rm".into()];
-        if host_network {
+        if host_network || spec.host_network {
             args.push("--network".into());
             args.push("host".into());
         }
@@ -308,6 +313,12 @@ impl Sandbox {
             args.push("-e".into());
             args.push(name.clone());
         }
+        // Per-run values come last so a configured pass-through with the
+        // same name cannot replace a server-owned value.
+        for (name, value) in &spec.env {
+            args.push("-e".into());
+            args.push(format!("{name}={value}"));
+        }
 
         args.push("-w".into());
         args.push(path_str(&spec.workdir));
@@ -382,6 +393,8 @@ fn login_spec(repo_root: &Path, agent: &str) -> RunSpec {
         interactive: true,
         agent: agent.to_string(),
         args: Vec::new(),
+        env: Vec::new(),
+        host_network: false,
         name: None,
     }
 }
@@ -419,6 +432,8 @@ mod tests {
             interactive,
             agent: "claude".into(),
             args: vec!["-p".into(), "hi".into()],
+            env: Vec::new(),
+            host_network: false,
             name: None,
         }
     }

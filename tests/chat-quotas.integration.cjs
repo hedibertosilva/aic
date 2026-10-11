@@ -63,7 +63,21 @@ process.stderr.write('fixture process failed after start\\n');process.exit(1);
   async function snapshot(conversation='conversation'){return (await request('/api/quotas?conversation='+encodeURIComponent(conversation))).json();}
   async function settled(){for(let i=0;i<500;i++){const s=await snapshot();if(!s.agents.some(q=>q.reading))return s;await delay(30);}throw new Error('Quota read never settled');}
   await start();
-  return {root,base,start,stop,request,snapshot,settled,close:async()=>{await stop();fs.rmSync(root,{recursive:true,force:true});}};
+  async function close() {
+    // Let quota helpers finish before stopping their owner. A helper may still
+    // append a fixture file after the server's process has exited.
+    if (server?.exitCode === null) { try { await settled(); } catch {} }
+    await stop();
+    for (let attempt=0;;attempt++) {
+      try { fs.rmSync(root,{recursive:true,force:true}); return; }
+      catch (err) {
+        if (err.code!=='ENOTEMPTY' || attempt===4) throw err;
+        // Retry the entire traversal, so newly created files are enumerated.
+        await delay(50);
+      }
+    }
+  }
+  return {root,base,start,stop,request,snapshot,settled,close};
 }
 
 if(require.main===module) test('quota cache and durable conversation counters work through the HTTP server', {skip:!process.env.AIC_TEST_BINARY}, async()=>{

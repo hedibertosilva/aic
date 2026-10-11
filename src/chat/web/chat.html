@@ -5,21 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>aic chat</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script>try{const theme=localStorage.getItem("aic-chat-theme");if(theme==="light"||theme==="dark")document.documentElement.dataset.theme=theme}catch{}</script>
 <link rel="stylesheet" href="/chat.css">
 </head>
 <body>
 <aside aria-label="Conversations">
   <header>
     <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
-    <button id="new" class="primary" title="New conversation (Ctrl+Shift+O)"></button>
+    <button id="new" class="icon" title="New conversation (Ctrl+Shift+O)"></button>
     <input id="importfile" type="file" accept=".json,.md,application/json,text/markdown" hidden>
-    <input type="search" id="search" placeholder="Search conversations" aria-label="Search conversations" autocomplete="off">
   </header>
+  <div id="searchbar">
+    <input type="search" id="search" placeholder="Search" aria-label="Search" autocomplete="off">
+  </div>
   <nav id="list"></nav>
   <footer id="repobar">
     <div class="repoinfo">
       <div id="reponame"></div>
-      <span id="repobranch"></span>
       <span id="repo"></span>
     </div>
     <button id="copyrepo" class="icon" aria-label="Copy repository path" title="Copy repository path"></button>
@@ -30,12 +32,13 @@
   <div id="bar">
     <button id="menu" class="icon" aria-label="Conversations"></button>
     <span id="chips"></span>
-    <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant"></button>
-    <button id="readybtn" type="button">Environment</button>
-    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
+    <button id="addbtn" class="icon" aria-label="Add participant" title="Add participant" hidden></button>
+    <button id="readybtn" class="environmentbtn" type="button">Environment</button>
+    <button id="themebtn" class="icon" type="button"></button>
     <button id="quotabtn" class="icon" aria-label="Usage limits" title="Usage limits" aria-expanded="false" aria-controls="quotas"></button>
+    <button id="configbtn" class="icon" aria-label="Chat configuration" title="Chat configuration"></button>
     <section id="quotas" aria-labelledby="quotatitle" hidden>
-      <header><strong id="quotatitle">Usage limits</strong><span class="grow"></span>
+      <header><div class="quotatitles"><strong id="quotatitle">Usage limits</strong><span id="quotasubtitle">Provider limits and conversation usage</span></div><span class="grow"></span>
         <button id="quotarefresh" class="icon" type="button" aria-label="Refresh usage limits" title="Refresh usage limits"></button>
         <button id="quotaclose" class="icon" type="button" aria-label="Close usage limits" title="Close usage limits"></button>
       </header>
@@ -43,7 +46,36 @@
       <p id="quotaunknown" class="note" hidden>Earlier replies in this conversation weren't attributed to an agent and are not included in these totals.</p>
     </section>
   </div>
-  <div id="contextbar" aria-label="Current repository context"><strong id="contextrepo"></strong><span id="contextbranch"></span><span id="contextcheckout"></span></div>
+  <div id="contextbar" aria-label="Current conversation context">
+    <span class="contextitem branchcontext"><span id="branchicon" class="contexticon"></span><span id="contextbranch"></span></span>
+    <button id="planlink" class="contextitem" type="button"><span id="planicon" class="contexticon"></span><span id="planlabel">Free conversation</span></button>
+    <details id="conversationadvanced">
+      <summary><span id="advancedicon" class="contexticon"></span><span class="contextsummarylabel">Advanced</span></summary>
+      <div class="conversationoptions contextpopover">
+        <header><div class="contextpopovertitles"><strong>Advanced</strong><span>Conversation-specific settings</span></div><button id="advancedclose" class="icon" type="button" aria-label="Close Advanced" title="Close Advanced"></button></header>
+        <div class="contextpopoverbody">
+          <section class="contextpopovercard">
+            <p class="note">Change its working checkout for this conversation only. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
+            <button id="worktreebtn" type="button">Change Checkout</button>
+          </section>
+        </div>
+      </div>
+    </details>
+    <details id="planorigin" hidden>
+      <summary><span id="historyicon" class="contexticon"></span><span class="contextsummarylabel">Fork history</span></summary>
+      <div class="forkoptions contextpopover">
+        <header><div class="contextpopovertitles"><strong>Fork history</strong><span>Origin of this conversation</span></div><button id="historyclose" class="icon" type="button" aria-label="Close Fork history" title="Close Fork history"></button></header>
+        <div class="contextpopoverbody">
+          <dl class="contextpopovercard">
+            <div><dt>Conversation</dt><dd id="forkconversation"></dd></div>
+            <div><dt>Previous plan</dt><dd id="forkplan"></dd></div>
+            <div><dt>Inherited history</dt><dd id="forkmessages"></dd></div>
+          </dl>
+          <p class="note">New messages use the current conversation context.</p>
+        </div>
+      </div>
+    </details>
+  </div>
   <div id="banner" role="alert" hidden></div>
   <div id="view">
     <div id="layout" role="group" aria-label="Reply layout"></div>
@@ -52,6 +84,18 @@
   <footer id="composer">
     <button id="jump" type="button"></button>
     <div id="ac" role="listbox"></div>
+    <div id="engineeringloop" role="status" hidden>
+      <div class="engineeringloopcopy"><strong>Loop Engineering</strong><span id="engineeringloopstatus"></span></div>
+      <div id="engineeringloopdecision" class="engineeringloopdecision" hidden>
+        <button id="engineeringloopdecline" type="button">End Loop</button>
+        <button id="engineeringloopapprove" type="button" class="primary">Continue</button>
+      </div>
+      <button id="engineeringloopstop" type="button">Stop Loop Engineering</button>
+    </div>
+    <div id="composerlock" role="status" hidden>
+      <span id="composerlocktext"></span>
+      <button id="composerlockforce" type="button">Force Execution</button>
+    </div>
     <form id="form">
       <textarea id="input" rows="2" aria-label="Message" placeholder="Write your message…" autofocus></textarea>
       <div class="toolbar">
@@ -66,128 +110,270 @@
 
 <dialog id="pdialog" aria-labelledby="ptitle">
   <form id="pform" method="dialog">
-    <div class="phead">
-      <h2 id="ptitle">Add participant</h2>
-      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="lbl">Active</span><span class="knob"></span></button>
+    <div class="phead participanthead">
+      <div><h2 id="ptitle">Add Participant</h2><p>Identity, model and permissions for this conversation.</p></div>
+      <button type="button" id="ptoggle" role="switch" aria-checked="true" hidden><span class="track" aria-hidden="true"><span class="knob"></span></span><span class="lbl">Active</span></button>
     </div>
-    <div class="grid2">
-      <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
-      <label>Agent <select id="pagent"></select></label>
-      <label>Model <select id="pmodel"></select></label>
-      <label>Effort <select id="peffort"></select></label>
+
+    <div class="participantbody">
+      <div class="participantenvironment" role="note"><div><strong>Environment</strong><span>Review agent readiness and recovery commands for this checkout.</span></div><button type="button" id="penvironment" class="environmentbtn">Environment</button></div>
+      <section class="participantsection" aria-labelledby="pidentitytitle">
+        <h3 id="pidentitytitle">Identity and model</h3>
+        <div class="participantcard">
+          <div class="grid2">
+            <label>Name <input type="text" id="pname" placeholder="Claude-b" autocomplete="off" spellcheck="false"></label>
+            <label>Agent <select id="pagent"></select></label>
+            <label>Model <select id="pmodel"></select></label>
+            <label>Effort <select id="peffort"></select></label>
+          </div>
+        </div>
+      </section>
+
+      <section class="participantsection" aria-labelledby="pprofiletitle">
+        <h3 id="pprofiletitle">Profile and instructions</h3>
+        <div class="participantcard participantprofile">
+          <fieldset class="colours">
+            <legend>Colour</legend>
+            <span id="phues" role="radiogroup" aria-label="Colour"></span>
+          </fieldset>
+          <label>Role / instructions <textarea id="prole" rows="5" placeholder="Describe expected behavior, scope and constraints (Optional)" autocomplete="off"></textarea></label>
+        </div>
+      </section>
+
+      <section class="participantsection" aria-labelledby="paccesstitle">
+        <h3 id="paccesstitle">Repository access</h3>
+        <div class="participantcard participantaccess">
+          <fieldset>
+            <legend class="sr-only">File access</legend>
+            <div class="seg" role="radiogroup" aria-label="File access">
+              <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
+              <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
+            </div>
+            <div class="configscope participantwriteeffect" id="pwritewarn" role="note" hidden></div>
+          </fieldset>
+        </div>
+      </section>
     </div>
-    <p class="note" id="pquota"></p>
-    <p class="note" id="preadiness"></p>
-    <p class="note">A participant is an agent instance in this conversation. Its role and file access do not change the global agent configuration.</p>
-    <p class="note warn" id="pagentwarn" hidden>The new agent receives this conversation's visible history in its first prompt.</p>
-    <fieldset class="colours">
-      <legend>Colour</legend>
-      <span id="phues" role="radiogroup" aria-label="Colour"></span>
-    </fieldset>
-    <label>Role / instructions <input type="text" id="prole" placeholder="E.g. strict code reviewer (optional)" autocomplete="off"></label>
-    <fieldset>
-      <legend>File access</legend>
-      <div class="seg" role="radiogroup" aria-label="File access">
-        <label><input type="radio" name="paccess" value="read" checked><span>Read only</span></label>
-        <label><input type="radio" name="paccess" value="write"><span>Can edit</span></label>
-      </div>
-      <p class="note warn" id="pwritewarn" hidden></p>
-    </fieldset>
-    <p class="note err" id="perror" hidden></p>
-    <button type="button" id="penvironment">View environment and recovery commands</button>
-    <div class="buttons" id="pbuttons">
-      <button type="button" id="premove" class="danger" hidden>Remove</button>
-      <span class="grow"></span>
-      <button type="button" id="pcancel">Cancel</button>
-      <button type="submit" id="psave" class="primary">Save</button>
-    </div>
-    <div id="pconfirm" hidden>
-      <p class="note warn" id="pconfirmtext"></p>
-      <div class="buttons">
+
+    <div class="participantfooter">
+      <p class="note err" id="perror" role="alert" hidden></p>
+      <div class="buttons" id="pbuttons">
+        <button type="button" id="premove" class="danger" hidden>Remove</button>
         <span class="grow"></span>
-        <button type="button" id="pkeep">Cancel</button>
-        <button type="button" id="pdoremove" class="danger">Remove</button>
+        <button type="button" id="pcancel">Cancel</button>
+        <button type="submit" id="psave" class="primary">Save</button>
+      </div>
+      <div id="pconfirm" hidden>
+        <div class="configscope deletewarning" id="pconfirmtext" role="note">
+          <strong id="pconfirmtitle"></strong>
+          <span id="pconfirmmessage"></span>
+        </div>
+        <div class="buttons">
+          <span class="grow"></span>
+          <button type="button" id="pkeep">Cancel</button>
+          <button type="button" id="pdoremove" class="danger">Remove</button>
+        </div>
       </div>
     </div>
   </form>
 </dialog>
 
-<dialog id="ddialog" aria-labelledby="dtitle">
+<dialog id="ddialog" aria-labelledby="dtitle" aria-describedby="ddescription">
   <div id="dform">
-    <h2 id="dtitle">Delete conversation?</h2>
-    <p id="dtext"></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="dcancel" autofocus>Cancel</button>
-      <button type="button" id="ddelete" class="danger">Delete</button>
+    <div class="confighead">
+      <div><h2 id="dtitle">Delete conversation?</h2><p id="ddescription">This removes its messages and participant setup.</p></div>
+    </div>
+    <div class="configbody">
+      <div class="configscope deletewarning" role="note">
+        <strong id="dtext"></strong>
+        <span>You can undo this action immediately after deleting.</span>
+      </div>
+    </div>
+    <div class="configfooter">
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="dcancel" autofocus>Cancel</button>
+        <button type="button" id="ddelete" class="danger">Delete</button>
+      </div>
     </div>
   </div>
 </dialog>
 
-<dialog id="rdialog" aria-labelledby="rtitle">
+<dialog id="rdialog" aria-labelledby="rtitle" aria-describedby="rdescription">
   <form id="rform" method="dialog">
-    <h2 id="rtitle">Rename conversation</h2>
-    <label>Title <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35"></label>
-    <div id="rcount" aria-live="polite"></div>
-    <div class="rgen">
-      <label>Generate with <select id="rwho"></select></label>
-      <button type="button" id="rgen">Generate title</button>
+    <div class="confighead">
+      <div><h2 id="rtitle">Rename conversation</h2><p id="rdescription">Use a short title that is easy to find in the sidebar.</p></div>
     </div>
-    <p class="note err" id="rerror" hidden></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="rcancel">Cancel</button>
-      <button type="submit" id="rsave" class="primary">Save</button>
+    <div class="configbody">
+      <section class="configsection" aria-labelledby="rnametitle">
+        <h3 id="rnametitle">Title</h3>
+        <div class="configcard renamecard">
+          <div class="configfield">
+            <label for="rinput">Conversation title</label>
+            <div class="renameinputrow">
+              <input type="text" id="rinput" autocomplete="off" spellcheck="false" maxlength="35">
+              <div id="rcount" aria-live="polite"></div>
+            </div>
+            <span class="fieldhint">Keep it concise so it remains readable in the sidebar.</span>
+          </div>
+        </div>
+      </section>
+      <div class="configscope renamegenerator" role="group" aria-labelledby="renameassistanttitle">
+        <div class="renameassistantcopy"><strong id="renameassistanttitle">Suggestion</strong><span>Use this conversation's messages to create a title.</span></div>
+        <div class="rgen">
+          <label for="rwho">Use <select id="rwho"></select></label>
+          <button type="button" id="rgen">Generate</button>
+        </div>
+      </div>
+      <p class="note err" id="rerror" role="alert" hidden></p>
+    </div>
+    <div class="configfooter">
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="rcancel">Cancel</button>
+        <button type="submit" id="rsave" class="primary">Save</button>
+      </div>
     </div>
   </form>
 </dialog>
 
 <dialog id="cdialog" aria-labelledby="ctitle">
   <form id="cform" method="dialog">
-    <h2 id="ctitle">Configuration</h2>
-    <div class="grid2">
-      <label>Default agent for new chats <select id="cdefault"></select></label>
-      <label>Permission mode <select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select></label>
-      <label>Sandbox <select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select></label>
-      <label>Sandbox image <input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"></label>
+    <div class="confighead">
+      <div><h2 id="ctitle">Configuration</h2><p>Defaults for agents, permissions, and sandboxed runs.</p></div>
     </div>
-    <label class="check"><input type="checkbox" id="cskippermissions"> Automatically approve tool permissions in headless runs</label>
-    <p class="note">Plan and review settings (executor, reviewer, rounds, base branch) belong to <code>aic workflow</code>: edit them with <code>aic config</code>.</p>
-    <p class="note">Saved to your global aic configuration. A repository-level override can still take precedence.</p>
-    <label class="check"><input type="checkbox" id="cconfirmdefault"> Confirm changing the default agent for new chats</label>
-    <fieldset id="agentvisibility"><legend>Agents shown in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The effective default agent always stays visible. Hiding an agent keeps its configuration and existing participants.</p></fieldset>
-    <details id="cadvanced"><summary>Advanced</summary><p class="note">Changing the working checkout restarts participant sessions and keeps visible history.</p><button id="worktreebtn" type="button">Change working checkout…</button></details>
-    <p class="note warn" id="cwarn" hidden></p>
-    <p class="note err" id="cerror" hidden></p>
-    <div class="buttons">
-      <span class="grow"></span>
-      <button type="button" id="ccancel">Cancel</button>
-      <button type="submit" id="csave" class="primary">Save</button>
+
+    <div class="configbody">
+      <div class="configscope" role="note"><strong>Applies globally</strong><span>Saved to your aic configuration on this machine. Repository settings can override these defaults.</span></div>
+
+      <section class="configsection" aria-labelledby="cagentstitle">
+        <h3 id="cagentstitle">Agents</h3>
+        <div class="configcard configagents">
+          <div class="configdefault">
+            <label class="configfield">Default agent<select id="cdefault"></select><span class="fieldhint">Used for new chats; leave empty to choose each time.</span></label>
+          </div>
+          <fieldset id="agentvisibility"><legend>Visible in participant selectors</legend><div id="agentvisibilityrows"></div><p class="note">The current and selected defaults always remain visible. Hiding an agent affects future choices only; its setup and existing participants stay unchanged.</p></fieldset>
+        </div>
+      </section>
+
+      <section class="configsection" aria-labelledby="cruntimetitle">
+        <h3 id="cruntimetitle">Execution</h3>
+        <div class="configcard configruntime">
+          <div class="grid2">
+            <label class="configfield">Permission mode<select id="cpermission"><option value="acceptEdits">Accept edits</option><option value="plan">Plan only</option></select><span class="fieldhint">Default file access for headless agent runs.</span></label>
+            <label class="configfield">Sandbox runtime<select id="csandbox"><option value="docker">Docker</option><option value="podman">Podman</option><option value="none">None</option></select><span class="fieldhint">Runtime used to isolate repository access.</span></label>
+            <label class="configfield configimage">Sandbox image<input type="text" id="csandboximage" required autocomplete="off" spellcheck="false"><span class="fieldhint">Container image used when sandboxing is enabled.</span></label>
+          </div>
+          <label class="check configcheck"><input type="checkbox" id="cskippermissions"><span class="checkcopy"><strong>Approve tool requests automatically</strong><small>Applies to headless runs. Enable only for repositories you trust.</small></span></label>
+          <label class="check configcheck"><input type="checkbox" id="cserializewriters"><span class="checkcopy"><strong>Serialize writers across conversations</strong><small>For safety, only one conversation can write to a worktree at a time. Writers in the same conversation can still run together.</small></span></label>
+          <label class="configfield configlooprounds">Maximum Loop Engineering rounds<input type="number" id="clooprounds" min="1" max="20" step="1" required><span class="fieldhint">Global safety ceiling. Individual loops may finish earlier.</span></label>
+        </div>
+      </section>
+
+    </div>
+
+    <div class="configfooter">
+      <p class="note warn" id="cwarn" hidden></p>
+      <p class="note err" id="cerror" role="alert" hidden></p>
+      <div class="buttons">
+        <span class="grow"></span>
+        <button type="button" id="ccancel">Cancel</button>
+        <button type="submit" id="csave" class="primary">Save</button>
+      </div>
     </div>
   </form>
 </dialog>
 
 <dialog id="readydialog" aria-labelledby="readytitle">
-  <h2 id="readytitle">Your environment</h2>
-  <p id="readyreason" role="status"></p>
+  <div class="readyhead"><div><h2 id="readytitle">Your environment</h2><p>Repository, runtime and agent readiness for this checkout.</p></div><span id="readystate">Checking…</span></div>
+  <p id="readyreason" class="readyreason" role="status"></p>
   <div id="readyrows"></div>
-  <p class="note">Login, sandbox preparation and paid agent tests run in the terminal. Refresh reads their results without making a provider call.</p>
-  <p class="note err" id="readyerror" hidden></p>
-  <div class="buttons"><button id="readyrefresh" type="button">Refresh environment</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
+  <div class="readyfooter"><div class="configworkflow readyobservation" role="note"><strong>Recovery Actions</strong><span>Run starts supported checks and sandbox preparation here. <br/> Interactive login actions still run in the terminal; Copy keeps the command handy.</span></div>
+    <p class="note err" id="readyerror" hidden></p>
+    <div class="buttons"><button id="readyrefresh" type="button">Refresh</button><span class="grow"></span><button id="readyclose" type="button">Close</button></div>
+  </div>
 </dialog>
-<dialog id="worktreedialog" aria-labelledby="worktreetitle">
-  <h2 id="worktreetitle">Working checkout for this conversation</h2>
-  <p>Select a registered worktree. Visible history stays; native participant sessions restart. Readiness must be verified in the selected checkout.</p>
-  <label>Checkout <select id="worktreeselect"></select></label>
-  <p class="note err" id="worktreeerror" hidden></p>
-  <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><button id="worktreeconfirm" type="button">Confirm checkout and restart sessions</button></div>
+<dialog id="worktreedialog" aria-labelledby="worktreetitle" aria-describedby="worktreedescription">
+  <div class="confighead">
+    <div><h2 id="worktreetitle">Working checkout</h2><p id="worktreedescription">Choose where this conversation's agents read and edit repository files.</p></div>
+  </div>
+
+  <div class="configbody worktreebody">
+    <section class="configsection" aria-labelledby="worktreesectiontitle">
+      <h3 id="worktreesectiontitle">This conversation</h3>
+      <div class="configcard worktreecard">
+        <label class="configfield">Registered checkout<select id="worktreeselect"></select><span class="fieldhint">Only worktrees registered for this repository are available.</span></label>
+      </div>
+    </section>
+
+    <div class="configscope worktreeimpact" role="note"><strong>What changes</strong><span>Visible history and participants stay. Agent sessions restart, and readiness is checked again in the selected checkout.</span></div>
+    <p class="note err" id="worktreeerror" role="alert" hidden></p>
+  </div>
+
+  <div class="configfooter worktreefooter">
+    <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><span class="grow"></span><button id="worktreeconfirm" type="button" class="primary">Change Checkout</button></div>
+  </div>
 </dialog>
-<dialog id="branchdialog" aria-labelledby="branchtitle">
-  <h2 id="branchtitle">Git context changed</h2>
-  <p id="branchtext"></p>
-  <p>This conversation keeps its history and participant sessions. The next sends will use the files in the current branch.</p>
-  <details><summary>Details</summary><pre id="branchdetails"></pre></details>
-  <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create new chat</button><button id="branchcontinue" type="button" class="primary">Continue on this branch</button></div>
+<dialog id="branchdialog" aria-labelledby="branchtitle" aria-describedby="branchdescription">
+  <div class="confighead">
+    <div><h2 id="branchtitle">Git context changed</h2><p id="branchdescription">The repository branch changed outside this conversation.</p></div>
+  </div>
+
+  <div class="configbody branchbody">
+    <p id="branchtext" class="sr-only" role="status"></p>
+    <section class="configsection" aria-labelledby="branchtransitiontitle">
+      <h3 id="branchtransitiontitle">Branch transition</h3>
+      <div id="branchdetails" class="configcard branchcomparison">
+        <div class="branchreference"><span>Origin branch</span><strong id="branchorigin"></strong></div>
+        <div class="branchreference current"><span>Current branch</span><strong id="branchcurrent"></strong></div>
+        <div class="branchcheckout"><span>Checkout</span><code id="branchcheckout"></code></div>
+      </div>
+    </section>
+
+    <div class="configscope branchimpact" role="note"><strong>If you continue</strong><span>This conversation keeps its history and participant sessions. The next sends use files from the current branch.</span></div>
+  </div>
+
+  <div class="configfooter branchfooter">
+    <div class="buttons"><button id="branchcancel" type="button">Cancel</button><button id="branchnew" type="button">Create New Chat</button><span class="grow"></span><button id="branchcontinue" type="button" class="primary">Continue Here</button></div>
+  </div>
+</dialog>
+<dialog id="plandialog" aria-labelledby="plandialogtitle">
+  <form id="planform">
+    <div class="confighead">
+      <div><h2 id="plandialogtitle">Plan for this conversation</h2><p>A plan coordinates work across conversations. <br/>Participant roles and file permissions stay separate.</p></div>
+    </div>
+
+    <div class="configbody planbody">
+      <section class="configsection" aria-labelledby="planmodetitle">
+        <h3 id="planmodetitle">Conversation mode</h3>
+        <div class="configcard planselectioncard">
+          <label class="configfield">Plan setup<select id="planchoice"><option value="free">Free conversation</option><option value="existing">Link an existing plan</option><option value="create">Create a plan</option><option id="planmigrateoption" value="migrate" hidden>Copy plan to this checkout</option></select></label>
+          <label class="configfield" id="existingplanfield" hidden>Plan<select id="existingplan"></select><span class="fieldhint">Plans available in this checkout.</span></label>
+          <label class="configfield" id="migrateplanfield" hidden>Destination slug<input id="migrateplanslug" maxlength="100" pattern="[A-Za-z0-9_-]+"><span class="fieldhint">A unique identifier for the copy in the destination checkout.</span></label>
+        </div>
+      </section>
+
+      <section class="configsection" id="createplanfields" aria-labelledby="newplandetailstitle" hidden>
+        <h3 id="newplandetailstitle">New plan details</h3>
+        <div class="configcard plancreatecard">
+          <div class="grid2">
+            <label class="configfield">Title<input id="newplantitle" maxlength="160"><span class="fieldhint">A clear name for the work.</span></label>
+            <label class="configfield">Slug<input id="newplanslug" maxlength="80" pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="authentication"><span class="fieldhint">Lowercase letters, numbers and hyphens.</span></label>
+          </div>
+          <label class="configfield">Objective and scope<textarea id="newplanobjective" rows="4"></textarea><span class="fieldhint">Describe the outcome and boundaries of the work.</span></label>
+          <label class="configfield">Acceptance criteria<textarea id="newplancriteria" rows="3"></textarea><span class="fieldhint">Optional conditions that define completion.</span></label>
+        </div>
+      </section>
+
+      <div id="plancheckoutnote" class="configscope plancheckoutnote" role="note" hidden></div>
+      <div id="planchangeeffect" class="configscope planchangeeffect" role="note"></div>
+      <p id="planlinkerror" class="note err" role="alert" hidden></p>
+    </div>
+
+    <div class="configfooter planfooter">
+      <div class="buttons"><button id="plancancel" type="button">Cancel</button><span class="grow"></span><button id="planapply" type="submit" class="primary">Apply</button></div>
+    </div>
+  </form>
 </dialog>
 <div id="toast" role="status"><span id="toasttext"></span><button id="undo" type="button">Undo</button></div>
 <div id="announce" class="sr-only" aria-live="polite"></div>

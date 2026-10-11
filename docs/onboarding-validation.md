@@ -1,8 +1,23 @@
 # Onboarding validation
 
 Validation uses isolated temporary Git checkouts/configuration and fixture CLIs.
-Refactoring checks passed: 116 Rust tests and 38 Node/policy/CLI/HTTP/Chromium tests,
+Second-review checks passed: 116 Rust tests and 41 Node/policy/CLI/HTTP/Chromium tests,
 without failures or skips; `git diff --check` passed.
+
+The latest new-chat refinement passed 24 Node policy/import tests and all 8
+onboarding Chromium tests, without skips. New chats wait for Add participant or
+Import conversation card actions, including first load and the keyboard shortcut.
+Coverage includes missing/unavailable defaults, no ready agents, import without
+participant setup, and multiline instructions through save, edit, request payload
+and reload. The second-review configuration and Environment regression tests
+also passed.
+
+For this refinement Cargo was unavailable. Browser requests for HTML/CSS/JS were
+routed to the current `src/chat/web` files, with the existing debug binary serving
+the fixture API. Chromium and its dependencies were provisioned in temporary
+directories. No Rust tests or packaged-binary rebuild are claimed for this round;
+the earlier Rust evidence below belongs to the previous validation. Rebuild and
+restart `aic` to embed the updated web assets in the application binary.
 
 No provider generation, OAuth or quota consumption was performed during automated
 verification. The existing provider quota captures are regression fixtures.
@@ -18,7 +33,13 @@ worktrees, protected default visibility, team configuration through participants
 and skill constraints. Browser tests verify that Environment never changes empty
 or populated conversations, participants, roles, native sessions or drafts. They
 measure dialog padding, viewport bounds and internal scrolling on short mobile
-screens, verify keyboard recovery and keep checkout selection under Advanced.
+screens, verify keyboard recovery and keep checkout selection under the current
+conversation's Git context → Advanced. The second review adds staged visibility
+with Cancel/Esc, rejected and successful Save, persisted reload behavior, direct
+alternative-agent selection and relevant-only Environment status. Optional unused
+agents stay in Environment; quota stays solely in Usage limits. Desktop and mobile
+screenshots were inspected for the conversation disclosure and selection warning;
+the disclosure's mobile bounds were verified within the viewport.
 Integration tests count auth/container invocations: preflight and sends perform
 no auth probes or diagnostic container launches, validate only recipients, and
 reject expired tests, changed binaries/images and unregistered paths. Existing

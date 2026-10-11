@@ -15,6 +15,12 @@ const ChatQuotas = (() => {
     const rank = { out: 3, warn: 2, normal: 1 };
     return [...(q?.windows || [])].sort((a,b) => rank[windowLevel(b)] - rank[windowLevel(a)] || (b.used_pct ?? -1) - (a.used_pct ?? -1))[0];
   }
+  function primary(q) {
+    const rank = { out: 3, warn: 2, normal: 1 };
+    const duration = w => numeric(w.window_minutes) ? w.window_minutes : Number.POSITIVE_INFINITY;
+    return [...(q?.windows || [])].sort((a,b) => duration(a) - duration(b)
+      || rank[windowLevel(b)] - rank[windowLevel(a)] || (b.used_pct ?? -1) - (a.used_pct ?? -1))[0];
+  }
   const level = (q) => critical(q) ? windowLevel(critical(q)) : "normal";
   // Some providers (agy) share a window per model group. A group entry such as
   // "Gemini Pro" applies to a model id when all its words appear in the id.
@@ -49,7 +55,7 @@ const ChatQuotas = (() => {
     return minutes < 1 ? "Updated just now" : `Updated ${minutes} min ago`;
   }
   function summary(q) {
-    const w = critical(q), l = level(q);
+    const w = primary(q), l = w ? windowLevel(w) : "normal";
     if (q?.state === "read_error") return "Couldn't read quota";
     if (!w) return q?.reading ? "Checking…" : q?.reason === "No quota reading yet" ? "No quota reading yet" : "Quota not available";
     if (l === "out") return "Exhausted" + (w.bucket ? " · " + w.bucket : "");
@@ -62,8 +68,10 @@ const ChatQuotas = (() => {
     const u = total.usage || {}, reports = total.reports || {};
     const values = [u.input_tokens, u.cache_read_tokens, u.cache_write_tokens].filter(numeric);
     const input = values.length ? values.reduce((a,b) => a+b,0) : null;
+    const cached = (numeric(u.cache_read_tokens) ? u.cache_read_tokens : 0)
+      + (numeric(u.cache_write_tokens) ? u.cache_write_tokens : 0);
     const lower = (field) => (reports[field] ?? 0) < total.turns ? "≥ " : "";
-    const parts = [input == null ? "in n/a" : lower("input_tokens") + fmt(input) + " in",
+    const parts = [input == null ? "in n/a" : lower("input_tokens") + fmt(input) + " in" + (cached ? ` (${fmt(cached)} cached)` : ""),
       numeric(u.output_tokens) ? lower("output_tokens") + fmt(u.output_tokens) + " out" : "out n/a",
       numeric(u.cost_usd) ? lower("cost_usd") + "$" + u.cost_usd.toFixed(u.cost_usd < 1 ? 4 : 2) : "cost n/a"];
     if (total.missing_usage) parts.push(`${total.missing_usage} ${total.missing_usage === 1 ? "reply didn't" : "replies didn't"} report usage`);
@@ -87,6 +95,6 @@ const ChatQuotas = (() => {
     });
     return true;
   }
-  return { numeric, percent, windowLabel, windowLevel, critical, level, scoped, resetText, updated, summary, consumptionText, stale, expired, shouldRetryExpired };
+  return { numeric, percent, windowLabel, windowLevel, critical, primary, level, scoped, resetText, updated, summary, consumptionText, stale, expired, shouldRetryExpired };
 })();
 if (typeof module !== "undefined") module.exports = ChatQuotas;

@@ -23,7 +23,7 @@ const ChatImport = (() => {
     });
     const log = c.log.map((e) => {
       const out = {};
-      for (const k of ["from", "agent", "model", "to", "text", "round", "t0", "dur", "usage", "actions", "error", "soft", "stopped", "edited"]) {
+      for (const k of ["from", "agent", "model", "to", "text", "round", "t0", "dur", "usage", "actions", "pasted", "error", "soft", "stopped", "edited"]) {
         if (e[k] !== undefined) out[k] = e[k];
       }
       if (e.pending) { out.stopped = true; if (!out.text) { out.error = true; out.text = "interrupted"; } }
@@ -75,6 +75,10 @@ const ChatImport = (() => {
       const to = recipients(e.to); if (to) out.to = to;
       for (const k of ["t0", "dur"]) if (numeric(e[k])) out[k] = e[k];
       for (const k of ["error", "soft", "stopped", "edited"]) if (e[k] === true) out[k] = true;
+      if (Array.isArray(e.pasted)) out.pasted = e.pasted.filter((paste) => object(paste)
+        && Number.isSafeInteger(paste.start) && Number.isSafeInteger(paste.end) && Number.isSafeInteger(paste.lines)
+        && paste.start >= 0 && paste.end >= paste.start && paste.end <= e.text.length && paste.lines > 0)
+        .map(({ start, end, lines }) => ({ start, end, lines }));
       if (e.pending) { out.stopped = true; if (!out.text) { out.error = true; out.text = "interrupted"; } }
       if (strings(e.actions)) out.actions = [...e.actions];
       if (object(e.usage)) out.usage = Object.fromEntries(Object.entries(e.usage).filter(([k, v]) =>

@@ -45,6 +45,10 @@ pub struct RunOpts {
     /// Emit `stream-json` events instead of one JSON envelope. Only
     /// meaningful with `CliAgent::spawn_stream`.
     pub stream: bool,
+    /// Environment entries supplied only to this invocation.
+    pub env: Vec<(String, String)>,
+    /// Let a sandboxed invocation reach services on the host loopback.
+    pub host_network: bool,
 }
 
 /// A streaming run from `CliAgent::spawn_stream`.
@@ -66,6 +70,12 @@ pub struct Killer {
 impl Killer {
     /// For a subprocess placed in its own process group by the caller.
     pub(crate) fn process_group(pgid: u32) -> Self { Self { pgid, container: None } }
+
+    /// Persist only the process/container identity for crash recovery, never
+    /// credentials or prompts. The caller also records the PID start tick.
+    pub(crate) fn recovery_target(&self) -> (u32, Option<(String, String)>) {
+        (self.pgid, self.container.as_ref().map(|(s, name)| (s.kind.label().to_owned(), name.clone())))
+    }
 
     pub fn kill(&self) {
         if let Some((sandbox, name)) = &self.container {
@@ -206,6 +216,7 @@ impl CliAgent {
                 if let Some(cwd) = &opts.cwd {
                     cmd.current_dir(cwd);
                 }
+                cmd.envs(opts.env.iter().map(|(name, value)| (name, value)));
                 cmd
             }
         })
@@ -273,6 +284,7 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
                 workdir: cwd.to_path_buf(), access: Access::ReadOnly,
                 interactive: false, agent: self.binary_stem().to_string(),
                 args: args.iter().map(|a| a.to_string()).collect(), name: container.clone(),
+                env: Vec::new(), host_network: false,
             })?,
             None => { let mut cmd = Command::new(&self.binary); cmd.args(args).current_dir(cwd); cmd }
         };
@@ -325,6 +337,8 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
             interactive: false,
             agent: self.binary_stem().to_string(),
             args: argv.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
+            env: opts.env.clone(),
+            host_network: opts.host_network,
             name,
         };
         sandbox.command(&spec)

@@ -210,14 +210,6 @@ pub fn interactive() -> Result<()> {
         let pending = changes(&original, &config).len();
         let items = vec![
             format!(
-                "{:<11}  executor {} · reviewer {} · {} · {} rounds",
-                "Workflow",
-                config.workflow.executor,
-                config.workflow.reviewer,
-                mode_label(config.workflow.mode),
-                config.workflow.max_rounds
-            ),
-            format!(
                 "{:<11}  {}{}",
                 "Permissions",
                 config.permissions.mode,
@@ -249,11 +241,10 @@ pub fn interactive() -> Result<()> {
             .interact_opt()?;
 
         match selection {
-            Some(0) => workflow_menu(&mut config, &defaults)?,
-            Some(1) => permissions_menu(&mut config, &defaults)?,
-            Some(2) => sandbox_menu(&mut config, &defaults)?,
-            Some(3) => chat_menu(&mut config, &defaults)?,
-            Some(4) => {
+            Some(0) => permissions_menu(&mut config, &defaults)?,
+            Some(1) => sandbox_menu(&mut config, &defaults)?,
+            Some(2) => chat_menu(&mut config, &defaults)?,
+            Some(3) => {
                 save(&config, &original)?;
                 break;
             }
@@ -378,6 +369,7 @@ fn choose_agent(prompt: &str, config: &Config, current: &str, allow_empty: bool)
     Ok(picked.map(|i| values[i].clone()))
 }
 
+#[allow(dead_code)] // Retained while Workflow is hidden from the interactive menu.
 fn workflow_menu(config: &mut Config, defaults: &Config) -> Result<()> {
     let mut note = None;
     loop {

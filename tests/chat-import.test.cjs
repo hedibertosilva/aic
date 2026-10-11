@@ -8,7 +8,7 @@ const source = {
   participants: [{ name: 'Dev', agent: 'codex', model: 'model', role: 'Developer\nwith context', effort: 'high',
     hue: 210, write: true, session: 'private-local-session', seen: 9 }],
   log: [
-    { from: 'you', text: 'hello\n', to: ['Dev'], round: 1, t0: 123 },
+    { from: 'you', text: 'hello\n', to: ['Dev'], round: 1, t0: 123, pasted: [{ start: 0, end: 5, lines: 1 }] },
     { from: 'Dev', text: '## you\n\n```md\n## Dev (Codex, model)\n```\n\n', round: 1, actions: ['Read file'], usage: { cost_usd: 0.1 }, dur: 25 },
     { from: 'you', text: '', round: 2 },
     { from: 'Dev', text: 'error\nsecond line', round: 2, error: true },

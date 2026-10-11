@@ -2,13 +2,14 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const Q = require('../src/chat/web/chat-quotas.js');
 const quota = (...windows) => ({ state: 'available', windows });
-test('alerts use inclusive thresholds and select the most critical window', () => {
+test('alerts use inclusive thresholds while summaries prefer the shortest window', () => {
   assert.equal(Q.level(quota({ used_pct: 79.9 })), 'normal');
   assert.equal(Q.level(quota({ used_pct: 80 })), 'warn');
   assert.equal(Q.level(quota({ used_pct: 100 })), 'out');
   const q = quota({ used_pct: 41, window_minutes: 300 }, { used_pct: 86, window_minutes: 10080 });
   assert.equal(Q.critical(q).window_minutes, 10080);
-  assert.equal(Q.summary(q), '⚠ Near limit 86% · wk');
+  assert.equal(Q.primary(q).window_minutes, 300);
+  assert.equal(Q.summary(q), '41% · 5h');
 });
 test('unknown quotas and provider warnings never fabricate a percentage', () => {
   assert.equal(Q.summary(quota()), 'Quota not available');
