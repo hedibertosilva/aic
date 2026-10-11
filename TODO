@@ -1,8 +1,0 @@
-1. Importar JSON e MD ao criar um novo chat (carrega mensagens e agents)
-2. Revisar planejamento .aic/plans/ai-jail-improvements/PLAN.md
-3. Restruturar a cli (aic workflow dev/plan ??) — feito (aic workflow)
-4. Merge main
-5. Quotas/Limits do Agents
-6. aic init ao executar o aic chat — feito
-7. Testar em outro repo limpo
-8. F5 quebra a resposta

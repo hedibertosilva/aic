@@ -63,7 +63,7 @@ For a manual build, see [building from source](docs/build-from-source.md).
 Run setup inside the checkout you want to use:
 
 ```sh
-cd /caminho/do/seu/repositorio
+cd /path/to/your/repository
 aic setup
 aic
 ```
@@ -78,7 +78,7 @@ To run the steps manually:
 ```sh
 aic init
 aic sandbox build
-aic agent login claude       # ou: gemini, codex
+aic agent login claude       # or: gemini, codex
 aic agent test claude
 aic
 ```
@@ -130,7 +130,7 @@ any part of it.
 ```sh
 aic config show
 aic config set chat.default_agent claude
-aic config set sandbox.runtime docker     # docker, podman ou none
+aic config set sandbox.runtime docker     # docker or podman
 ```
 
 The sandbox mounts the checkout for the agent, keeps reviewers read-only and
