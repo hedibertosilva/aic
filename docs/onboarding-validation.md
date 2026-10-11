@@ -22,7 +22,7 @@ restart `aic` to embed the updated web assets in the application binary.
 No provider generation, OAuth or quota consumption was performed during automated
 verification. The existing provider quota captures are regression fixtures.
 
-Rust unit tests cover configuration migration, no workflow fallback, structured
+Rust unit tests cover configuration migration, no fallback to another command, structured
 provider events, cancellation, bounded processes, credential-free cache, pretty
 Claude auth JSON, Git context and registered worktree validation. Node policy,
 CLI/HTTP and Chromium tests cover explicit selection, no agents ready, consent,

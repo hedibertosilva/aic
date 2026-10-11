@@ -161,9 +161,8 @@ struct EngineeringLoopRoundRequest {
 }
 
 /// The settings the chat dialog edits (`[chat]`, `[permissions]` and
-/// `[sandbox]`; the workflow ones live in `aic config`). They are saved to
-/// the global config; a repository override can still take precedence at
-/// runtime.
+/// `[sandbox]`). They are saved to the global config; a repository override
+/// can still take precedence at runtime.
 #[derive(Deserialize)]
 struct SettingsRequest {
     default_agent: String,

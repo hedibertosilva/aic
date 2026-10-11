@@ -1690,7 +1690,10 @@ function syncPillsFromText(c) {
   else if (c.toFromText) { c.sendTo = null; c.toFromText = false; }
 }
 
-function setTitle() { const c = cur(); document.title = c ? `${c.title} · aic chat` : "aic chat"; }
+function setTitle() {
+  const repo = (meta.repo || "").split(/[\\/]/).filter(Boolean).pop();
+  document.title = repo ? `aic chat · ${repo}` : "aic chat";
+}
 function render(scrollEnd) {
   renderSidebar(); renderBar(); renderLog(); renderComposer(); setTitle();
   renderQuotas(); renderEnvironmentStatus(); renderPlanContext();

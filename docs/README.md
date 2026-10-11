@@ -1,31 +1,31 @@
-# Documentação
+# Documentation
 
-Comece pelo README para uma visão geral e pelo guia de [setup e recuperação](onboarding.md)
-para instalar e iniciar o primeiro chat.
+Start with the README for an overview and the [setup and recovery](onboarding.md)
+guide to install and start your first chat.
 
-## Guias para usuários
+## User guides
 
-- [Setup e recuperação](onboarding.md): instalação, sandbox, diagnóstico e problemas comuns.
-- [Worktrees](worktrees.md): como o chat identifica e seleciona checkouts.
-- [Planos no chat](chat-plans.md): planos, tarefas, execução e validação.
-- [Importação de conversas](chat-import.md): importar e exportar histórico.
-- [Compilação a partir do código-fonte](build-from-source.md): desenvolvimento e instalação manual.
+- [Setup and recovery](onboarding.md): installation, sandbox, diagnosis and common issues.
+- [Worktrees](worktrees.md): how the chat identifies and selects checkouts.
+- [Plans in chat](chat-plans.md): plans, tasks, execution and validation.
+- [Conversation import](chat-import.md): importing and exporting history.
+- [Building from source](build-from-source.md): development and manual installation.
 
-## Referências de implementação
+## Implementation references
 
-Estes documentos descrevem contratos, decisões e validações internas; não são
-necessários para o primeiro uso:
+These documents describe internal contracts, decisions and validation; they are
+not required for first use:
 
-- [Contrato de onboarding](onboarding-contract.md)
-- [Validação de onboarding](onboarding-validation.md)
-- [API de planos no chat](chat-plans-api.md)
-- [Backend de planos no chat](chat-plans-backend.md)
-- [Validação de planos no chat](chat-plans-validation.md)
-- [Especificação de seleção de worktree](worktree-selection-design.md)
-- [Spike de prontidão dos agentes](agent-readiness-spike.md)
-- [Cotas: descoberta técnica](agent-quotas-spike.md)
-- [Cotas: especificação de UX](agent-quotas-ux.md)
-- [Notas de release do onboarding](release-notes-onboarding.md)
+- [Onboarding contract](onboarding-contract.md)
+- [Onboarding validation](onboarding-validation.md)
+- [Chat plans API](chat-plans-api.md)
+- [Chat plans backend](chat-plans-backend.md)
+- [Chat plans validation](chat-plans-validation.md)
+- [Worktree selection design](worktree-selection-design.md)
+- [Agent readiness spike](agent-readiness-spike.md)
+- [Quota discovery spike](agent-quotas-spike.md)
+- [Quota UX specification](agent-quotas-ux.md)
+- [Onboarding release notes](release-notes-onboarding.md)
 
-As referências técnicas podem registrar detalhes de uma versão específica. Para
-o comportamento atual do produto, prefira os guias e o código em `src/`.
+Technical references may record details from a specific version. For current
+product behavior, prefer the guides and the code in `src/`.

@@ -7,7 +7,7 @@ use crate::config::Mode;
 #[command(
     name = "aic",
     version,
-    about = "Local web chat for Claude Code, Gemini (Antigravity CLI) and Codex, plus a plan/dev review workflow. Without a subcommand, starts the chat."
+    about = "Local web chat for working with Claude Code, Gemini (Antigravity CLI) and Codex. Without a subcommand, starts the chat."
 )]
 pub struct Cli {
     /// Start the default chat without launching a browser.
@@ -82,12 +82,6 @@ pub enum Commands {
         #[arg(long)]
         no_open: bool,
     },
-    /// Plan, execute and review a feature with two agents.
-    #[command(visible_alias = "wf")]
-    Workflow {
-        #[command(subcommand)]
-        command: WorkflowCommands,
-    },
     /// List the configured agents, check their quota and log them in.
     #[command(alias = "agents")]
     Agent {
@@ -104,23 +98,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
     },
-    /// Alias of `aic workflow plan`.
-    #[command(hide = true)]
-    Plan {
-        #[command(subcommand)]
-        command: PlanCommands,
-    },
-    /// Alias of `aic workflow dev`.
-    #[command(hide = true)]
-    Dev {
-        #[command(subcommand)]
-        command: DevCommands,
-    },
-    /// Alias of `aic workflow status`.
-    #[command(hide = true)]
-    Status { slug: Option<String> },
 }
 
+// Kept as internal workflow definitions while the workflow implementation is
+// unavailable from the public CLI.
+#[allow(dead_code)]
 #[derive(Subcommand)]
 pub enum WorkflowCommands {
     /// Manage planning proposals (the `.md` discussed before building anything).
@@ -142,6 +124,7 @@ pub enum WorkflowCommands {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Subcommand)]
 pub enum PlanCommands {
     /// Scaffold a new PLAN.md for a feature.
@@ -181,6 +164,7 @@ pub enum PlanCommands {
     },
 }
 
+#[allow(dead_code)]
 #[derive(Subcommand)]
 pub enum DevCommands {
     /// Run the executor agent against the plan.
@@ -289,7 +273,7 @@ pub enum AgentCommands {
         #[arg(long, default_value_t = 45)]
         timeout: u64,
     },
-    /// List the configured agents (binary, model, effort, default roles).
+    /// List the configured agents (binary, model, effort and chat default).
     List,
     /// Read the account quota of each agent (or one) through its CLI.
     ///
@@ -316,16 +300,14 @@ pub enum AgentCommands {
 
 #[derive(Subcommand)]
 pub enum ConfigCommands {
-    /// Print the effective configuration (global + repo override).
+    /// Print the effective public configuration (global + repo override).
     Show,
     /// Set a single key in the global config, as `section.key`.
     ///
-    /// Keys: workflow.executor, workflow.reviewer, workflow.mode
-    /// (manual|auto), workflow.max_rounds, workflow.default_base_branch,
-    /// permissions.mode (acceptEdits|plan), permissions.skip (true|false),
-    /// sandbox.runtime (docker|podman|none), sandbox.image,
-    /// sandbox.bind_agents (true|false), chat.default_agent. The old flat
-    /// names (mode, sandbox_image, ...) still work.
+    /// Keys: permissions.mode (acceptEdits|plan), permissions.skip
+    /// (true|false), sandbox.runtime (docker|podman|none), sandbox.image,
+    /// sandbox.bind_agents (true|false), chat.default_agent. Legacy flat
+    /// names for these public keys still work.
     Set {
         /// Config key to set (see above for the full list).
         key: String,

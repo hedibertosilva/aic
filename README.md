@@ -1,62 +1,66 @@
 # aic
 
-O `aic` é um ambiente local para trabalhar com Claude Code, Gemini (via
-Antigravity CLI, `agy`) e Codex no mesmo repositório. Ele oferece um chat web
-local para comparar respostas e um fluxo de desenvolvimento que separa
-planejamento, implementação e revisão.
+The `aic` is a local environment for working with Claude Code, Gemini (through
+the Antigravity CLI, `agy`) and Codex in the same repository. The product
+centers on a local web chat for bringing agents together, comparing answers,
+creating plans and tracking implementation in one conversation.
 
-Tudo passa pelas CLIs dos provedores. O aic não cria uma conta intermediária,
-não envia o código para um serviço próprio e mantém conversas, planos e estado
-no checkout local.
+Everything goes through the providers' CLIs. aic does not create an intermediary
+account or send code to its own service; conversations, plans and state stay in
+the local checkout.
 
-## Por que usar
+## Why use aic
 
-- Converse com um ou vários agentes na mesma tela e compare perspectivas.
-- Dê um papel claro a cada participante: implementador, revisor, pesquisador
-  ou especialista de domínio.
-- Comece em modo somente leitura e habilite edição apenas para quem precisa.
-- Registre planos, revisões, tarefas e histórico dentro do próprio checkout.
-- Execute agentes em Docker ou Podman para reduzir o alcance de alterações
-  acidentais fora do repositório.
-- Reaproveite sessões, exporte conversas e retome o trabalho sem perder o
-  contexto visível.
+- Talk to one or several agents in the same screen and compare perspectives.
+- Give each participant a clear role: implementer, reviewer, researcher or
+  domain specialist.
+- Start in read-only mode and enable editing only where it is needed.
+- Keep plans, reviews, tasks and history in the checkout itself.
+- Run agents in Docker or Podman to reduce the reach of accidental changes
+  outside the repository.
+- Reuse sessions, export conversations and resume work without losing visible
+  context.
 
-## Requisitos
+## Requirements
 
-- Linux x86_64 ou arm64 para os binários publicados.
-- Git e acesso à rede.
-- Pelo menos uma CLI de agente instalada e autenticada: `claude`, `agy` ou
+- Linux x86_64 or arm64 for published binaries.
+- Git and network access.
+- At least one installed and authenticated agent CLI: `claude`, `agy` or
   `codex`.
-- Docker ou Podman para o sandbox padrão. É possível escolher `none`, mas os
-  agentes serão executados diretamente no host.
+- Docker or Podman for the default sandbox. You can choose `none`, but agents
+  will then run directly on the host.
 
-Rust só é necessário para compilar a partir do código-fonte. macOS, Windows e
-outras arquiteturas não fazem parte do pipeline atual de releases.
+Rust is only required to build from source. macOS, Windows and other
+architectures are not part of the current release pipeline.
 
-## Instalação rápida
+## Installation
 
-Baixe um arquivo da página de [Releases](https://github.com/hedibertosilva/aic/releases),
-verifique o checksum e instale o binário:
+The installer detects Linux x86_64/arm64, downloads the latest release, verifies
+its SHA-256 checksum and installs it in `~/.local/bin`:
 
 ```sh
-version=VERSION
-target=x86_64-unknown-linux-musl # arm64: aarch64-unknown-linux-musl
-archive="aic-$version-$target.tar.gz"
-curl -fLO "https://github.com/hedibertosilva/aic/releases/download/v$version/$archive"
-curl -fLO "https://github.com/hedibertosilva/aic/releases/download/v$version/SHA256SUMS"
-awk -v archive="$archive" '$2 == archive { print }' SHA256SUMS > "$archive.sha256"
-sha256sum -c "$archive.sha256"
-tar -xzf "$archive" aic
-mkdir -p "$HOME/.local/bin"
-install -m 755 aic "$HOME/.local/bin/aic"
+curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Para compilar manualmente, consulte [compilação a partir do código-fonte](docs/build-from-source.md).
+To install a specific version, pass it to the script:
 
-## Primeiro repositório
+```sh
+curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh | sh -s -- 0.1.0
+```
 
-Execute o setup dentro do checkout que será usado:
+Set a different destination with `AIC_INSTALL_DIR`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh |
+  AIC_INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+For a manual build, see [building from source](docs/build-from-source.md).
+
+## First repository
+
+Run setup inside the checkout you want to use:
 
 ```sh
 cd /caminho/do/seu/repositorio
@@ -64,12 +68,12 @@ aic setup
 aic
 ```
 
-O setup verifica o ambiente, prepara o sandbox, encontra as CLIs, orienta o
-login e faz um teste real mínimo antes de permitir a escolha do agente padrão.
-Esse teste pode consumir cota. O processo pode ser interrompido e retomado com
+Setup checks the environment, prepares the sandbox, finds the CLIs, guides
+login and runs a minimal real test before allowing you to choose the default
+agent. This test may consume quota. You can interrupt and resume it with
 `aic setup`.
 
-Se preferir executar as etapas manualmente:
+To run the steps manually:
 
 ```sh
 aic init
@@ -79,98 +83,78 @@ aic agent test claude
 aic
 ```
 
-O `aic` sem subcomando inicia o chat e executa `aic init` automaticamente.
-O servidor escuta em `127.0.0.1:7878` por padrão. Use `aic chat --no-open`
-em uma máquina sem navegador e abra a URL exibida manualmente. Não use
-`--host 0.0.0.0` sem entender que qualquer pessoa com acesso à porta poderá
-operar os agentes e as credenciais montadas.
+Running `aic` without a subcommand starts the chat and runs `aic init`
+automatically. The server listens on `127.0.0.1:7878` by default. Use
+`aic chat --no-open` on a machine without a browser and open the printed URL
+manually. Do not use `--host 0.0.0.0` without understanding that anyone who
+can reach the port can operate the agents and mounted credentials.
 
-## Fluxo recomendado para um novo trabalho
+## Recommended flow for new work
 
-1. Abra o repositório correto e confirme o branch no painel **Git context**.
-2. Crie uma conversa e escolha um agente pronto em **Add participant**.
-3. Comece com uma pergunta de leitura: peça diagnóstico, alternativas e riscos.
-4. Adicione participantes para obter uma segunda opinião; dê a cada um um papel.
-5. Mantenha análise em somente leitura. Habilite **Can edit** apenas para quem
-   implementará e descreva o resultado esperado.
-6. Para uma mudança maior, use **Link or create plan**, registre objetivo e
-   critérios de aceite e discuta antes de executar tarefas.
-7. Revise o diff, rode os testes e valide cada tarefa. A resposta do agente não
-   substitui a validação humana.
-8. Exporte a conversa ou deixe o plano e os registros em `.aic/` para retomar.
+1. Open the correct repository and confirm the branch in **Git context**.
+2. Create a conversation and choose a ready agent in **Add participant**.
+3. Start with a read-only question: ask for diagnosis, alternatives and risks.
+4. Add participants for a second opinion and give each one a role.
+5. Keep analysis read-only. Enable **Can edit** only for the implementer and
+   describe the expected result.
+6. For a larger change, use **Link or create plan**, record the objective and
+   acceptance criteria, and discuss them before executing tasks.
+7. Review the diff, run tests and validate each task. An agent response does
+   not replace human validation.
+8. Export the conversation or leave the plan and records in `.aic/` to resume.
 
-Para um fluxo orientado por arquivos:
+## Participants and skills
 
-```sh
-aic workflow plan new minha-feature --title "Minha feature"
-aic workflow plan review minha-feature
-aic workflow dev execute minha-feature
-aic workflow dev review minha-feature
-aic workflow status minha-feature
-```
+An agent is a configured integration (`claude`, `gemini` or `codex`). A
+participant is an instance of that integration in a conversation, with a name,
+model, effort, role and file access. A conversation supports up to five
+participants.
 
-`plan review` consulta o revisor configurado. `dev execute` implementa um
-plano aprovado. `dev review` analisa o diff; no modo `auto`, o executor pode
-corrigir problemas e repetir o ciclo até o limite configurado. Para uma revisão
-avulsa, omita o slug: `aic workflow dev review`.
+- Use clear names and roles, such as `Implementer` and `Reviewer`.
+- Select recipients in **To:** or use `@name` at the start of a message.
+- Send the same question to several participants to compare answers, then use
+  **Ask them to comment on each other's replies**.
+- Use `/fresh` to restart selected sessions without replaying history;
+  `/clear` clears the conversation; `/fork` creates an alternative branch.
+- Skills appear when you type `/`. Send a skill to exactly one participant.
+  That participant must support skills and have editing enabled when the skill
+  writes files; `agy` cannot run skills.
+- Check a skill's arguments, role and resulting diff before accepting changes.
 
-## Participantes e skills
+## Essential configuration
 
-Um agente é uma integração configurada (`claude`, `gemini` ou `codex`). Um
-participante é uma instância dessa integração dentro de uma conversa, com nome,
-modelo, esforço, papel e acesso a arquivos. Uma conversa suporta até cinco
-participantes.
-
-- Use nomes e papéis objetivos, como `Implementador` e `Revisor`.
-- Selecione destinatários em **To:** ou use `@nome` no início da mensagem.
-- Envie a mesma pergunta a vários participantes para comparar respostas e, ao
-  final, use **Ask them to comment on each other's replies**.
-- Use `/fresh` para reiniciar sessões selecionadas sem replayar o histórico;
-  `/clear` limpa a conversa; `/fork` cria uma direção alternativa.
-- Skills aparecem ao digitar `/`. Envie uma skill para exatamente um
-  participante. Ele precisa aceitar skills e ter edição habilitada quando a
-  skill escrever arquivos; `agy` não executa skills.
-- Confira argumentos, papel e diff produzido por uma skill antes de aceitar
-  alterações.
-
-## Configuração essencial
-
-`aic config` abre o menu interativo. A configuração global fica em
-`~/.config/aic/config.toml`; um `.aic/config.toml` no repositório pode
-sobrescrever qualquer parte dela.
+`aic config` opens the interactive menu. Global configuration is stored in
+`~/.config/aic/config.toml`; a repository `.aic/config.toml` can override
+any part of it.
 
 ```sh
 aic config show
 aic config set chat.default_agent claude
-aic config set workflow.executor claude
-aic config set workflow.reviewer gemini
-aic config set workflow.mode manual       # ou auto
 aic config set sandbox.runtime docker     # docker, podman ou none
 ```
 
-O sandbox monta o checkout para o agente, mantém o revisor em modo somente
-leitura e limita o acesso ao restante do host. A rede e as credenciais
-necessárias continuam disponíveis; revise prompts externos e arquivos antes de
-executar agentes com permissão de escrita.
+The sandbox mounts the checkout for the agent, keeps reviewers read-only and
+limits access to the rest of the host. Network access and required credentials
+remain available; review external prompts and files before running agents with
+write permission.
 
-## Comandos úteis
+## Useful commands
 
 | Comando | Uso |
 | --- | --- |
-| `aic setup` | Preparar ambiente, agentes e agente padrão. |
-| `aic doctor` | Diagnosticar sem gerar resposta do provedor. |
-| `aic agent list` | Listar CLIs, modelos e papéis configurados. |
-| `aic agent status` | Consultar cotas reportadas pelos provedores. |
-| `aic init` | Criar a estrutura local do aic no checkout. |
-| `aic chat` | Iniciar o chat web local. |
-| `aic workflow ...` | Usar plano, execução e revisão. |
-| `aic config ...` | Consultar ou alterar padrões. |
-| `aic sandbox build` | Criar ou atualizar a imagem do sandbox. |
+| `aic setup` | Prepare the environment, agents and default agent. |
+| `aic doctor` | Diagnose without generating a provider response. |
+| `aic agent list` | List configured CLIs, models and roles. |
+| `aic agent status` | Read quota information reported by providers. |
+| `aic init` | Create the local aic structure in the checkout. |
+| `aic chat` | Start the local web chat. |
+| `aic config ...` | View or change defaults. |
+| `aic sandbox build` | Create or update the sandbox image. |
 
-## Documentação
+## Documentation
 
-O [índice de documentação](docs/README.md) separa guias de uso de contratos e
-documentos de implementação. Comece por [setup e recuperação](docs/onboarding.md),
-[worktrees](docs/worktrees.md) e [planos no chat](docs/chat-plans.md).
+The [documentation index](docs/README.md) separates user guides from contracts
+and implementation documents. Start with [setup and recovery](docs/onboarding.md),
+[worktrees](docs/worktrees.md) and [plans in chat](docs/chat-plans.md).
 
-Para desenvolver o próprio aic, veja [compilação a partir do código-fonte](docs/build-from-source.md).
+To develop aic itself, see [building from source](docs/build-from-source.md).

@@ -15,7 +15,6 @@ use anyhow::{Context, Result};
 
 use cli::{
     AgentCommands, Cli, Commands, ConfigCommands, DevCommands, PlanCommands, SandboxCommands,
-    WorkflowCommands,
     DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT,
 };
 
@@ -40,17 +39,6 @@ fn run() -> Result<()> {
         Some(Commands::Chat { host, port, no_open }) => start_chat(&host, port, !no_open),
         Some(Commands::Setup { agent, yes, no_open }) => commands::setup::run(&resolve_repo_root()?, agent, yes, no_open),
         Some(Commands::Doctor { json }) => commands::setup::doctor(&std::env::current_dir()?, json),
-
-        Some(Commands::Workflow { command }) => match command {
-            WorkflowCommands::Plan { command } => plan(command),
-            WorkflowCommands::Dev { command } => dev(command),
-            WorkflowCommands::Status { slug } => status(slug),
-        },
-
-        // Hidden aliases of the `workflow` subcommands.
-        Some(Commands::Plan { command }) => plan(command),
-        Some(Commands::Dev { command }) => dev(command),
-        Some(Commands::Status { slug }) => status(slug),
 
         Some(Commands::Sandbox { command }) => match command {
             SandboxCommands::Build { tag, claude_version } => {
@@ -79,6 +67,7 @@ fn run() -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 fn plan(command: PlanCommands) -> Result<()> {
     match command {
         PlanCommands::New {
@@ -111,6 +100,7 @@ fn plan(command: PlanCommands) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 fn dev(command: DevCommands) -> Result<()> {
     match command {
         DevCommands::Execute {
@@ -187,6 +177,7 @@ fn agent_command(command: AgentCommands) -> Result<()> {
     }
 }
 
+#[allow(dead_code)]
 fn status(slug: Option<String>) -> Result<()> {
     let repo_root = resolve_repo_root()?;
     workflow::status::run(&repo_root, slug)
@@ -205,6 +196,7 @@ fn resolve_repo_root() -> Result<PathBuf> {
     git::repo_root(&cwd).context("not inside a git repository")
 }
 
+#[allow(dead_code)]
 fn resolve_slug(repo_root: &Path, slug: Option<String>) -> Result<String> {
     if let Some(slug) = slug {
         return Ok(slug);

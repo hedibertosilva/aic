@@ -37,5 +37,5 @@ scripts/package-release.sh 0.1.0 x86_64-unknown-linux-musl
 
 Release CI builds and tests each architecture natively, smoke-tests the binary
 in Alpine without Rust and validates checksums before publishing a version tag.
-Tag/version mismatch fails publication. Running the workflow manually builds
-artifacts only; pushing a `vVERSION` tag publishes the release.
+Tag/version mismatch fails publication. Running the release pipeline manually
+builds artifacts only; pushing a `vVERSION` tag publishes the release.
