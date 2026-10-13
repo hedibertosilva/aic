@@ -23,7 +23,7 @@ the local checkout.
 
 ## Requirements
 
-- Linux x86_64 for the current v0.1.1 release.
+- Linux x86_64 or arm64.
 - Git and network access.
 - At least one installed and authenticated agent CLI: `claude`, `agy` or
   `codex`.
@@ -35,8 +35,8 @@ architectures are not part of the current release pipeline.
 
 ## Installation
 
-The installer detects Linux x86_64, downloads the latest release binary and
-installs it in `~/.local/bin`:
+The installer detects Linux x86_64 or arm64, downloads the latest release
+binary and installs it in `~/.local/bin`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh | sh
@@ -46,7 +46,7 @@ export PATH="$HOME/.local/bin:$PATH"
 To install the current release explicitly, pass its tag to the script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh | sh -s -- v0.1.1
+curl -fsSL https://raw.githubusercontent.com/hedibertosilva/aic/main/install.sh | sh -s -- v<VERSION>
 ```
 
 Set a different destination with `AIC_INSTALL_DIR`:
