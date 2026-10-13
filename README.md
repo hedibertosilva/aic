@@ -114,7 +114,8 @@ participants.
 - Select recipients in **To:** or use `@name` at the start of a message.
 - Send the same question to several participants to compare answers, then use
   **Ask them to comment on each other's replies**.
-- Use `/fresh` to restart selected sessions without replaying history;
+- Use `/fresh` to restart selected sessions without replaying history, or
+  `/fresh @name` to reset a participant without changing the **To:** selection;
   `/clear` clears the conversation; `/fork` creates an alternative branch.
 - Skills appear when you type `/`. Send a skill to exactly one participant.
   That participant must support skills and have editing enabled when the skill
@@ -137,6 +138,23 @@ The sandbox mounts the checkout for the agent, keeps reviewers read-only and
 limits access to the rest of the host. Network access and required credentials
 remain available; review external prompts and files before running agents with
 write permission.
+
+On networks that inspect TLS with a private certificate authority, reuse the
+host's trusted CA bundle inside the sandbox. For Debian and Ubuntu hosts, add
+this mount to the global `~/.config/aic/config.toml`:
+
+```toml
+[sandbox]
+mounts = [
+  "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro"
+]
+```
+
+On Fedora and RHEL, the source is commonly
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`; keep the container target
+as `/etc/ssl/certs/ca-certificates.crt`. Mount only a public CA bundle, never a
+client certificate or private key. Restart a running chat server after changing
+the configuration.
 
 ## Useful commands
 

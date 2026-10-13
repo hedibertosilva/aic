@@ -85,6 +85,8 @@ if(require.main===module) test('quota cache and durable conversation counters wo
   try{
     const initial=await f.settled();
     assert.deepEqual(initial.agents.map(q=>q.agent),['claude','codex','gemini']);
+    const selected=await (await fetch(f.base+'/api/quotas?agents='+encodeURIComponent(JSON.stringify(['codex'])))).json();
+    assert.deepEqual(selected.agents.map(q=>q.agent),['codex']);
     const codex=initial.agents.find(q=>q.agent==='codex');
     assert.equal(codex.windows[0].used_pct,34);
     const claudeQuota=initial.agents[0];
@@ -94,6 +96,9 @@ if(require.main===module) test('quota cache and durable conversation counters wo
     const agyQuota=initial.agents[2];
     assert.deepEqual(agyQuota.windows.map(w=>[w.bucket,w.used_pct]),[['Gemini Models',100],['Claude and GPT models',0]]);
     assert.deepEqual(agyQuota.windows[0].models,['Gemini Flash','Gemini Pro']);
+    const visibleReads=fs.readFileSync(path.join(f.root,'reads'),'utf8').trim().split('\n').length;
+    await f.request('/api/quotas/refresh',{agents:['claude']});await f.settled();
+    assert.equal(fs.readFileSync(path.join(f.root,'reads'),'utf8').trim().split('\n').length,visibleReads,'bulk refresh must only read selected agents');
     await f.snapshot();assert.equal(fs.readFileSync(path.join(f.root,'reads'),'utf8').trim().split('\n').length,1);
     const turn=await f.request('/api/chat',{agent:'codex',conversation_id:'conversation',prompt:'hello'});
     const events=(await turn.text()).trim().split('\n').filter(Boolean).map(JSON.parse);

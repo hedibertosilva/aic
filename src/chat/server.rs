@@ -1395,7 +1395,14 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             };
             let config = Config::load_merged(&root)?;
             if root == app.repo_root { *app.config.write().expect("chat config lock poisoned") = config.clone(); }
-            let mut report = diagnostics::snapshot(&root, &config);
+            let selected = match query_agents(request.url(), &config) {
+                Ok(selected) => selected,
+                Err(()) => return respond_text(request, 400, "text/plain", "Select configured agents"),
+            };
+            let mut report = selected.as_deref().map_or_else(
+                || diagnostics::snapshot(&root, &config),
+                |agents| diagnostics::snapshot_agents(&root, &config, agents),
+            );
             // Reuse the existing safe quota cache, without triggering generation.
             let cached = app.quotas.lock().expect("quota cache lock poisoned");
             for agent in &mut report.agents {
@@ -1519,7 +1526,12 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
         }
         (Method::Get, "/api/quotas") => {
             let conversation = query_value(request.url(), "conversation").unwrap_or_default();
-            let statuses = quota_snapshot(app);
+            let config = current_config(app);
+            let selected = match query_agents(request.url(), &config) {
+                Ok(selected) => selected,
+                Err(()) => return respond_text(request, 400, "text/plain", "Select configured agents"),
+            };
+            let statuses = quota_snapshot(app, selected.as_deref());
             let totals = consumption::load(&app.chat_db.lock().expect("chat database lock poisoned"), &conversation)?;
             respond_text(request, 200, "application/json", serde_json::json!({"agents":statuses,"consumption":totals}).to_string())
         }
@@ -1530,15 +1542,29 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
             let mut body = String::new();
             request.as_reader().take(MAX_BODY).read_to_string(&mut body)?;
             #[derive(Deserialize)]
-            struct Refresh { agent: Option<String> }
+            struct Refresh {
+                agent: Option<String>,
+                #[serde(default)]
+                agents: Option<Vec<String>>,
+            }
             let req: Refresh = match serde_json::from_str(&body) {
                 Ok(req) => req,
                 Err(_) => return respond_text(request, 400, "text/plain", "invalid refresh request"),
             };
             let config = current_config(app);
+            if req.agent.is_some() && req.agents.is_some() {
+                return respond_text(request, 400, "text/plain", "select agent or agents, not both");
+            }
             if let Some(agent) = req.agent {
                 if !config.agents.contains_key(&agent) { return respond_text(request, 404, "text/plain", "unknown agent"); }
                 refresh_quota(app, &agent);
+            } else if let Some(mut agents) = req.agents {
+                agents.sort();
+                agents.dedup();
+                if agents.len() > config.agents.len() || agents.iter().any(|agent| !config.agents.contains_key(agent)) {
+                    return respond_text(request, 404, "text/plain", "unknown agent");
+                }
+                for agent in agents { refresh_quota(app, &agent); }
             } else {
                 for agent in config.agents.keys() { refresh_quota(app, agent); }
             }
@@ -1640,14 +1666,30 @@ fn query_value(url: &str, key: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+fn query_agents(url: &str, config: &Config) -> std::result::Result<Option<Vec<String>>, ()> {
+    let Some(value) = query_value(url, "agents") else { return Ok(None) };
+    let mut agents: Vec<String> = serde_json::from_str(&value).map_err(|_| ())?;
+    agents.sort();
+    agents.dedup();
+    if agents.len() > config.agents.len() || agents.iter().any(|agent| !config.agents.contains_key(agent)) {
+        return Err(());
+    }
+    Ok(Some(agents))
+}
+
 fn quota_signature(config: &Config, name: &str) -> String {
     format!("{}:{:?}:{}", config.agents[name].binary, config.sandbox.runtime, config.sandbox.image)
 }
 
 /// Snapshot returns immediately; first reads run independently in worker threads.
-fn quota_snapshot(app: &Arc<App>) -> Vec<quotas::QuotaStatus> {
+fn quota_snapshot(app: &Arc<App>, selected: Option<&[String]>) -> Vec<quotas::QuotaStatus> {
     let config = current_config(app);
-    let mut names: Vec<_> = config.agents.keys().cloned().collect(); names.sort();
+    let mut names: Vec<_> = selected.map_or_else(
+        || config.agents.keys().cloned().collect(),
+        |agents| agents.to_vec(),
+    );
+    names.sort();
+    names.dedup();
     let mut cold = Vec::new();
     {
         let mut cache = app.quotas.lock().expect("quota cache poisoned");
@@ -2503,6 +2545,17 @@ mod tests {
     }
 
     #[test]
+    fn agent_query_filter_is_validated_and_deduplicated() {
+        let config = Config::default();
+        assert_eq!(
+            query_agents("/?agents=%5B%22codex%22%2C%22codex%22%5D", &config).unwrap(),
+            Some(vec!["codex".into()])
+        );
+        assert!(query_agents("/?agents=%5B%22unknown%22%5D", &config).is_err());
+        assert_eq!(query_agents("/", &config).unwrap(), None);
+    }
+
+    #[test]
     fn worktree_write_lock_groups_writers_by_conversation() {
         let dir = tempfile::tempdir().unwrap();
         let first = match try_worktree_write_lock(dir.path(), &write_lock_owner("one", "Writer One", "conversation-a")).unwrap() {
@@ -2888,12 +2941,12 @@ done
         let app = Arc::new(App { repo_root:dir.path().to_path_buf(), config:RwLock::new(config),
             chat_db:Mutex::new(open_chat_db(dir.path()).unwrap()), allowed_hosts:None, api_url:"http://127.0.0.1:7878".into(),
             models:Mutex::default(),quotas:Mutex::default(),active_runs:Mutex::default() });
-        quota_snapshot(&app);
+        quota_snapshot(&app, None);
         refresh_quota(&app,"codex"); // In-flight read must not spawn another process.
         let wait = || {
             let deadline = std::time::Instant::now() + Duration::from_secs(3);
             loop {
-                let q = quota_snapshot(&app).into_iter().find(|q| q.agent=="codex").unwrap();
+                let q = quota_snapshot(&app, None).into_iter().find(|q| q.agent=="codex").unwrap();
                 if !q.reading { return q; }
                 assert!(std::time::Instant::now()<deadline,"quota reader did not finish");
                 thread::sleep(Duration::from_millis(10));
@@ -2904,7 +2957,7 @@ done
         assert_eq!(first.windows[0].used_pct,Some(86.0));
         assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(),1);
         // A page reload reads the same in-memory cache without starting a query.
-        assert_eq!(quota_snapshot(&app).into_iter().find(|q|q.agent=="codex").unwrap().fetched_at,first.fetched_at);
+        assert_eq!(quota_snapshot(&app, None).into_iter().find(|q|q.agent=="codex").unwrap().fetched_at,first.fetched_at);
         std::fs::write(fail,"").unwrap();
         refresh_quota(&app,"codex");
         let failed = wait();
