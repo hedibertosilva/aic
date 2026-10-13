@@ -455,7 +455,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
                 execution: "unknown".into(),
                 quota: "unknown".into(),
                 readiness: "unknown".into(),
-                reason: "Run a real availability test in the configured context".into(),
+                reason: "Run a real availability test".into(),
                 action,
                 tested_at: None,
                 origin: "passive".into(),
@@ -494,7 +494,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
                 .into();
             } else if d.installation == "missing" {
                 d.readiness = "blocked".into();
-                d.reason = "Agent CLI absent in the configured context".into();
+                d.reason = "Agent CLI not available".into();
                 d.action = if context == "sandbox" {
                     "aic sandbox build".into()
                 } else {
@@ -764,7 +764,7 @@ pub fn test_agent(
             }
             .into();
             d.readiness = "ready".into();
-            d.reason = "Real response confirmed in the configured context".into();
+            d.reason = "Real response confirmed".into();
             d.action = String::new();
         }
         Err(e) => apply_failure(&mut d, &e.to_string()),
@@ -811,7 +811,7 @@ mod tests {
             execution: "ready_host".into(),
             quota: "available".into(),
             readiness: "ready".into(),
-            reason: "Real response confirmed in the configured context".into(),
+            reason: "Real response confirmed".into(),
             action: String::new(),
             tested_at: Some(1),
             origin: "agent_test".into(),

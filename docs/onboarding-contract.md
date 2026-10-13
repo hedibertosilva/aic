@@ -13,7 +13,7 @@ Shared diagnostic schema version 1 contains environment, Git context, default
 agent and sorted agent records. Each agent independently reports configuration,
 installation, authentication, execution, quota and derived readiness, plus safe
 reason/action codes, last-test UTC timestamp, verification origin and context.
-Only successful real execution in the configured context establishes readiness.
+Only successful real execution in the active environment establishes readiness.
 Unknown authentication must stay unknown; quota errors never imply logout.
 
 Last tests live in `.aic/diagnostics/tests.json`, local to the checkout, written

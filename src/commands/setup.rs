@@ -9,6 +9,33 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
+    for row in rows {
+        for (index, value) in row.iter().enumerate() {
+            widths[index] = widths[index].max(value.len());
+        }
+    }
+
+    let print_row = |row: Vec<String>| {
+        print!("  ");
+        for (index, value) in row.iter().enumerate() {
+            if index + 1 == row.len() {
+                print!("{value}");
+            } else {
+                print!("{value:<width$}  ", width = widths[index]);
+            }
+        }
+        println!();
+    };
+
+    print_row(headers.iter().map(|header| (*header).to_string()).collect());
+    print_row(widths.iter().map(|width| "─".repeat(*width)).collect());
+    for row in rows {
+        print_row(row.clone());
+    }
+}
+
 pub fn doctor(root: &Path, json: bool) -> Result<()> {
     let config = Config::load_merged(root)?;
     let report = diagnostics::snapshot(root, &config);
@@ -165,7 +192,7 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
         println!("Repository: {}", root.display());
         if !no_open && io::stdin().is_terminal() {
             let action = Select::new()
-                .with_prompt("Select an action")
+                .with_prompt("Actions")
                 .items(["[Open first chat]", "[Close setup]"])
                 .default(0)
                 .interact()?;
@@ -189,14 +216,15 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
         ][stage];
         println!("\nStep {} of 4 · {title}", stage + 1);
         println!("{}", "─".repeat(56));
+        println!();
         let choices: Vec<String> = match stage {
             0 => vec![
                 "[Continue]".into(),
-                "[Choose runtime]".into(),
                 "[Save and exit]".into(),
             ],
             1 => vec![
                 "[Continue]".into(),
+                "[Choose runtime]".into(),
                 "[Build sandbox]".into(),
                 "[Go back]".into(),
                 "[Save and exit]".into(),
@@ -204,7 +232,12 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
             2 => {
                 let mut c = vec!["[Continue with ready agents]".into()];
                 for a in &report.agents {
-                    c.push(format!("{} · {} · {}", a.agent, a.readiness, a.reason));
+                    let action = if a.readiness == "ready" {
+                        format!("[View {} status]", a.agent)
+                    } else {
+                        format!("[Check {}]", a.agent)
+                    };
+                    c.push(action);
                 }
                 c.extend(["[Go back]".into(), "[Save and exit]".into()]);
                 c
@@ -224,11 +257,15 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
         match stage {
             0 => {
                 println!("Status: Ready");
-                println!("Repository: {}", root.display());
-                println!("System: {} {}", report.system, report.architecture);
+                println!("\nEnvironment:");
+                let mut rows = vec![
+                    vec!["Repository".into(), root.display().to_string()],
+                    vec!["System".into(), format!("{} {}", report.system, report.architecture)],
+                ];
                 if let Some(git) = &report.git {
-                    println!("Git checkout: {}", git.label);
+                    rows.push(vec!["Git checkout".into(), git.label.clone()]);
                 }
+                print_table(&["Key", "Value"], &rows);
                 println!("\nYour repository and system are ready.");
             }
             1 => {
@@ -244,8 +281,15 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                     println!("\nAgents will run directly on the host.");
                 } else if report.image.state == "ready" {
                     println!("\nAgents will run inside the configured sandbox.");
-                    println!("Runtime: {}", config.sandbox.runtime.label());
-                    println!("Image: {}", config.sandbox.image);
+                    println!("\nSandbox:");
+                    print_table(
+                        &["Key", "Value"],
+                        &[
+                            vec!["Runtime".into(), config.sandbox.runtime.label().into()],
+                            vec!["Image".into(), config.sandbox.image.clone()],
+                            vec!["Isolation".into(), "enabled".into()],
+                        ],
+                    );
                 } else {
                     println!("\nThe sandbox image has not been built yet.");
                     println!("\nWhy this matters:");
@@ -256,11 +300,20 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                 let ready = report.agents.iter().filter(|a| a.readiness == "ready").count();
                 let status = if ready > 0 { "Ready" } else { "Action required" };
                 println!("Status: {status}");
-                println!("\naic needs at least one ready agent before you can start a chat.");
-                println!("\nConfigured agents:");
-                for a in &report.agents {
-                    println!("  {} · {} · {}", a.agent, a.readiness, a.reason);
+                if ready > 0 {
+                    println!("\nAt least one agent is ready to start a chat.");
+                } else {
+                    println!("\naic needs at least one ready agent before you can start a chat.");
                 }
+                println!("\nConfigured agents:");
+                print_table(
+                    &["Agent", "Status", "Details"],
+                    &report
+                        .agents
+                        .iter()
+                        .map(|a| vec![a.agent.clone(), a.readiness.clone(), a.reason.clone()])
+                        .collect::<Vec<_>>(),
+                );
             }
             3 => {
                 let ready = report.agents.iter().filter(|a| a.readiness == "ready").count();
@@ -274,8 +327,9 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
             }
             _ => unreachable!(),
         }
+        println!();
         let Some(choice) = Select::new()
-            .with_prompt("Select an action (Esc saves and exits)")
+            .with_prompt("Actions")
             .items(&choices)
             .default(0)
             .interact_opt()?
@@ -283,6 +337,7 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
             println!("Setup saved. Resume later with aic setup.");
             return Ok(());
         };
+        println!();
         if choices[choice] == "[Save and exit]" {
             println!("Setup saved. Resume later with aic setup.");
             return Ok(());
@@ -293,30 +348,33 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
         }
         match stage {
             0 => {
+                stage += 1;
+            }
+            1 => {
                 if choice == 1 {
                     let rt = Select::new()
-                        .with_prompt("Runtime (none runs directly on your host)")
-                        .items(["docker", "podman", "none"])
+                        .with_prompt("Actions")
+                        .items(["[Docker]", "[Podman]", "[Host — Less isolation]"])
                         .interact()?;
                     crate::commands::config_cmd::set(
                         "sandbox.runtime",
                         ["docker", "podman", "none"][rt],
                     )?;
-                } else {
-                    stage += 1;
-                }
-            }
-            1 => {
-                if choice == 1 {
+                } else if choice == 2 {
                     if config.sandbox.runtime == SandboxKind::None {
                         println!("Host execution does not require an image");
+                        stage += 1;
                     } else if report.image.state == "ready" {
                         println!("Image already prepared; no build repeated");
+                        stage += 1;
                     } else if let Err(e) = crate::commands::sandbox::build(&config, None, None) {
                         println!("\nStatus: Action required");
                         println!("The sandbox could not be prepared.");
                         println!("\nReason: {e}");
                         println!("\nYou can retry, choose host execution or save setup for later.");
+                    } else {
+                        println!("Sandbox ready.");
+                        stage += 1;
                     }
                 } else if report.runtime.state == "ready"
                     && matches!(report.image.state.as_str(), "ready" | "not_required")
@@ -377,12 +435,18 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                     println!("{}", "─".repeat(56));
                     println!("Status: Ready");
                     println!("\nYour first aic chat is ready.");
-                    println!("\nDefault agent: {}", a.agent);
-                    println!("Sandbox: {}", config.sandbox.runtime.label());
-                    println!("Repository: {}", root.display());
+                    println!("\nConfiguration:");
+                    print_table(
+                        &["Key", "Value"],
+                        &[
+                            vec!["Default agent".into(), a.agent.clone()],
+                            vec!["Sandbox".into(), config.sandbox.runtime.label().into()],
+                            vec!["Repository".into(), root.display().to_string()],
+                        ],
+                    );
                     if !no_open {
                         let action = Select::new()
-                            .with_prompt("Select an action")
+                            .with_prompt("Actions")
                             .items(["[Open first chat]", "[Close setup]"])
                             .default(0)
                             .interact()?;
