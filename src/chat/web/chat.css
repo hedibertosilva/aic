@@ -87,7 +87,10 @@ aside > header { padding: 12px; display: grid; grid-template-columns: 1fr auto; 
 .conv:hover, .conv:focus-within { background: color-mix(in srgb, var(--fg) 6%, transparent); }
 .conv.active { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
 .conv .open { flex: 1; min-width: 0; text-align: left; border: 0; background: none; padding: 7px 4px 7px 10px; display: block; }
-.conv .title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv .titleline { display: flex; align-items: center; min-width: 0; gap: 5px; }
+.conv .title { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conv .pinmark { color: var(--muted); flex: none; }
+.conv .pinmark svg.i { width: 13px; height: 13px; fill: currentColor; stroke-width: 1.5; }
 .conv.active .title { font-weight: 600; }
 .conv .sub { display: flex; gap: 3px; align-items: center; color: var(--muted); font-size: 12px; min-height: 16px; }
 .conv .sub .dot { width: 7px; height: 7px; }
@@ -345,6 +348,8 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 #engineeringloopstatus { min-width: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; white-space: pre-line; }
 .engineeringloopdecision { display: flex; align-items: center; gap: 6px; flex: none; }
 .engineeringloopdecision[hidden] { display: none; }
+.engineeringloopdecision label { color: var(--muted); font-size: 12px; }
+.engineeringloopdecision select { min-width: 130px; min-height: 28px; padding: 2px 24px 2px 7px; font-size: 12px; }
 .engineeringloopdecision button { min-height: 28px; padding: 3px 8px; font-size: 12px; }
 #engineeringloopstop, #engineeringloopdecline { min-height: 28px; padding: 3px 8px; flex: none; color: var(--err); background: transparent; border-color: color-mix(in srgb, var(--err) 34%, var(--line)); font-size: 12px; }
 #engineeringloopstop:hover:not(:disabled), #engineeringloopdecline:hover:not(:disabled) { color: var(--card); background: var(--err); border-color: var(--err); }
@@ -460,6 +465,10 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
   .user { max-width: 92%; }
   #msgs { padding: 12px 12px calc(var(--solid, 110px) + 12px); }
   #composer { --side: 8px; padding-top: calc(6px + var(--lead)); padding-bottom: 8px; }
+  #engineeringloop { flex-wrap: wrap; }
+  .engineeringloopcopy { flex-basis: 100%; }
+  .engineeringloopdecision { flex: 1 1 auto; }
+  .engineeringloopdecision select { min-width: 0; flex: 1; }
   .hint { display: none; }
   .grid2 { grid-template-columns: 1fr; }
 }

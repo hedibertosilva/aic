@@ -141,23 +141,34 @@ struct ChatRequest {
 #[serde(rename_all = "camelCase")]
 struct EngineeringLoopRequest {
     id: String,
+    #[serde(default = "default_engineering_loop_mode")]
+    mode: String,
     state: String,
     phase: String,
     round: u32,
     turns: u32,
     max_rounds: u32,
     max_turns: u32,
-    implementer: String,
+    #[serde(default)]
+    implementer: Option<String>,
     #[serde(default)]
     reviewer: Option<String>,
     current: String,
     objective: String,
 }
 
+fn default_engineering_loop_mode() -> String { "standard".into() }
+
 #[derive(Deserialize)]
 struct EngineeringLoopRoundRequest {
     conversation_id: String,
     decision: String,
+}
+
+#[derive(Deserialize)]
+struct EngineeringLoopImplementerRequest {
+    conversation_id: String,
+    participant: String,
 }
 
 /// The settings the chat dialog edits (`[chat]`, `[permissions]` and
@@ -464,6 +475,7 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
              turns INTEGER NOT NULL,
              max_rounds INTEGER NOT NULL,
              max_turns INTEGER NOT NULL,
+             mode TEXT NOT NULL DEFAULT 'standard',
              implementer TEXT NOT NULL,
              reviewer TEXT,
              current_participant TEXT NOT NULL,
@@ -480,6 +492,10 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
     // `ADD COLUMN IF NOT EXISTS`, so a duplicate-column error is harmless.
     let _ = db.execute(
         "ALTER TABLE chat_runs ADD COLUMN force_write INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = db.execute(
+        "ALTER TABLE chat_engineering_loops ADD COLUMN mode TEXT NOT NULL DEFAULT 'standard'",
         [],
     );
     let _ = db.execute(
@@ -646,7 +662,8 @@ struct EngineeringLoopRecord {
     turns: u32,
     max_rounds: u32,
     max_turns: u32,
-    implementer: String,
+    mode: String,
+    implementer: Option<String>,
     reviewer: Option<String>,
     current_participant: String,
     current_run_id: Option<String>,
@@ -656,17 +673,20 @@ struct EngineeringLoopRecord {
 fn engineering_loop_record(db: &Connection, id: &str) -> Result<Option<EngineeringLoopRecord>> {
     db.query_row(
         "SELECT conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
-                implementer,reviewer,current_participant,current_run_id,objective
+                mode,implementer,reviewer,current_participant,current_run_id,objective
          FROM chat_engineering_loops WHERE id=?1",
         [id],
         |row| Ok(EngineeringLoopRecord {
             conversation_id: row.get(0)?, checkout: row.get(1)?, state: row.get(2)?,
             phase: row.get(3)?, round: row.get(4)?, turns: row.get(5)?,
-            max_rounds: row.get(6)?, max_turns: row.get(7)?, implementer: row.get(8)?,
-            reviewer: row.get(9)?, current_participant: row.get(10)?,
-            current_run_id: row.get(11)?, objective: row.get(12)?,
+            max_rounds: row.get(6)?, max_turns: row.get(7)?, mode: row.get(8)?,
+            implementer: Some(row.get::<_,String>(9)?), reviewer: row.get(10)?,
+            current_participant: row.get(11)?, current_run_id: row.get(12)?, objective: row.get(13)?,
         }),
-    ).optional().map_err(Into::into)
+    ).optional().map(|record| record.map(|mut record| {
+        if record.implementer.as_deref() == Some("") { record.implementer = None; }
+        record
+    })).map_err(Into::into)
 }
 
 fn conversation_participant(db: &Connection, conversation: &str, name: &str) -> Result<Option<(bool, bool)>> {
@@ -693,6 +713,9 @@ fn begin_engineering_loop_turn(
     max_rounds: u32,
 ) -> Result<()> {
     if !valid_run_id(&request.id) { bail!("invalid Loop Engineering id") }
+    if !matches!(request.mode.as_str(), "standard" | "review_first") {
+        bail!("invalid Loop Engineering mode")
+    }
     if request.state != "running" { bail!("Loop Engineering is not running") }
     if !matches!(request.phase.as_str(), "implementing" | "reviewing") {
         bail!("invalid Loop Engineering phase")
@@ -705,7 +728,8 @@ fn begin_engineering_loop_turn(
         bail!("Loop Engineering limits are invalid")
     }
     if request.current != participant { bail!("participant is not the current Loop Engineering actor") }
-    if request.implementer == request.reviewer.as_deref().unwrap_or("") {
+    let reviewer = request.reviewer.as_deref().context("Loop Engineering reviewer is required")?;
+    if request.implementer.as_deref() == Some(reviewer) {
         bail!("implementer and reviewer must be different")
     }
 
@@ -717,29 +741,40 @@ fn begin_engineering_loop_turn(
     if request.phase == "implementing" && !writable {
         bail!("Loop Engineering implementer must have write permission")
     }
-    if let Some(reviewer) = &request.reviewer {
-        let Some((active, _)) = conversation_participant(&db, conversation, reviewer)? else {
-            bail!("Loop Engineering reviewer is not in this conversation")
+    if request.phase == "implementing" && request.implementer.as_deref() != Some(participant) {
+        bail!("Loop Engineering implementer is not the current participant")
+    }
+    let Some((active, _)) = conversation_participant(&db, conversation, reviewer)? else {
+        bail!("Loop Engineering reviewer is not in this conversation")
+    };
+    if !active { bail!("Loop Engineering reviewer is inactive") }
+    if let Some(implementer) = request.implementer.as_deref() {
+        let Some((active, writable)) = conversation_participant(&db, conversation, implementer)? else {
+            bail!("Loop Engineering implementer is not in this conversation")
         };
-        if !active { bail!("Loop Engineering reviewer is inactive") }
+        if !active || !writable { bail!("Loop Engineering implementer must be active with write permission") }
     }
 
     match engineering_loop_record(&db, &request.id)? {
         None => {
-            if request.max_rounds > 20 || request.max_rounds > max_rounds
-                || request.phase != "implementing" || request.round != 1 || request.turns != 0
-                || request.current != request.implementer
-            {
-                bail!("new Loop Engineering must start with its implementer")
+            let valid_start = request.round == 1 && request.turns == 0 && match request.mode.as_str() {
+                "standard" => request.phase == "implementing"
+                    && request.implementer.as_deref() == Some(request.current.as_str()),
+                "review_first" => request.phase == "reviewing" && request.current == reviewer,
+                _ => false,
+            };
+            if request.max_rounds > 20 || request.max_rounds > max_rounds || !valid_start {
+                bail!("invalid initial Loop Engineering state")
             }
             db.execute(
                 "INSERT INTO chat_engineering_loops(
                     id,conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
-                    implementer,reviewer,current_participant,current_run_id,objective,created_at,updated_at
-                 ) VALUES (?1,?2,?3,'running',?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?14)",
+                    mode,implementer,reviewer,current_participant,current_run_id,objective,created_at,updated_at
+                 ) VALUES (?1,?2,?3,'running',?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?15)",
                 params![request.id,conversation,checkout.to_string_lossy(),request.phase,request.round,
-                    request.turns,request.max_rounds,request.max_turns,request.implementer,
-                    request.reviewer,request.current,run_id,request.objective,now_millis()],
+                    request.turns,request.max_rounds,request.max_turns,request.mode,
+                    request.implementer.as_deref().unwrap_or(""),request.reviewer,request.current,
+                    run_id,request.objective,now_millis()],
             )?;
         }
         Some(record) => {
@@ -749,6 +784,7 @@ fn begin_engineering_loop_turn(
                 || record.current_run_id.is_some() || record.phase != request.phase
                 || record.round != request.round || record.turns != request.turns
                 || record.max_rounds != request.max_rounds || record.max_turns != request.max_turns
+                || record.mode != request.mode
                 || record.implementer != request.implementer || record.reviewer != request.reviewer
                 || record.current_participant != request.current
             {
@@ -784,21 +820,21 @@ fn engineering_loop_system(request: &EngineeringLoopRequest) -> String {
         request.id, request.round, request.max_rounds, request.objective
     );
     if request.phase == "reviewing" {
+        let routing = request.implementer.as_deref().map_or_else(
+            || "If changes are requested, the loop waits for the user to select a writable implementer.".to_string(),
+            |implementer| format!("The backend always returns requested changes to {implementer}."),
+        );
         return format!(
             "{header}\nYou are the reviewer. Review the implementer's work and end your response with exactly one directive: \
              <!-- aic-loop {{\"verdict\":\"approved\"}} --> or \
-             <!-- aic-loop {{\"verdict\":\"changes_requested\",\"target\":\"{}\"}} -->.",
-            request.implementer,
+             <!-- aic-loop {{\"verdict\":\"changes_requested\"}} -->. \
+             {routing}"
         );
     }
-    let reviewer = request.reviewer.as_deref().map_or_else(
-        || "Choose another active participant as reviewer and put that exact participant name in PARTICIPANT_NAME.".to_string(),
-        |reviewer| format!("Send the review to {reviewer} and use that exact name as PARTICIPANT_NAME."),
-    );
+    let reviewer = request.reviewer.as_deref().unwrap_or("the selected reviewer");
     format!(
-        "{header}\nYou are the implementer. Complete the work, then hand it off for review. {reviewer} \
-         End your response with exactly one directive: \
-         <!-- aic-loop {{\"action\":\"review\",\"target\":\"PARTICIPANT_NAME\"}} -->."
+        "{header}\nYou are the implementer. Complete the work. Review by {reviewer} is mandatory \
+         and starts automatically after this turn; no handoff directive is required."
     )
 }
 
@@ -819,14 +855,9 @@ fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: 
     let directive = engineering_loop_directive(output);
     if record.phase == "implementing" {
         if turns >= record.max_turns { return finish("limit_reached", "Turn limit reached") }
-        let target = directive.as_ref()
-            .filter(|value| value["action"].as_str() == Some("review"))
-            .and_then(|value| value["target"].as_str());
-        let Some(target) = target else { return finish("paused", "Implementer did not provide a valid handoff") };
-        if target == record.implementer { return finish("paused", "Implementer cannot review their own work") }
-        if record.reviewer.as_deref().is_some_and(|reviewer| reviewer != target) {
-            return finish("paused", "Implementer changed the selected reviewer")
-        }
+        let Some(target) = record.reviewer.as_deref() else {
+            return finish("paused", "Loop Engineering has no reviewer")
+        };
         if !conversation_participant(&db, &record.conversation_id, target)?.is_some_and(|(active, _)| active) {
             return finish("paused", "Requested reviewer is unavailable")
         }
@@ -841,8 +872,16 @@ fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: 
     match directive.as_ref().and_then(|value| value["verdict"].as_str()) {
         Some("approved") => finish("approved", "Approved by reviewer"),
         Some("changes_requested") => {
-            if directive.as_ref().and_then(|value| value["target"].as_str()) != Some(record.implementer.as_str()) {
-                return finish("paused", "Reviewer returned changes to an invalid participant")
+            if record.implementer.is_none() {
+                db.execute(
+                    "UPDATE chat_engineering_loops
+                     SET state='awaiting_implementer',turns=?2,current_run_id=NULL,
+                         reason='Select a writable implementer to address the requested changes',
+                         updated_at=?3,finished_at=NULL
+                     WHERE id=?1 AND state='running' AND current_run_id=?4",
+                    params![loop_id,turns,now_millis(),run_id],
+                )?;
+                return Ok(())
             }
             if record.round >= record.max_rounds || turns >= record.max_turns {
                 db.execute(
@@ -865,6 +904,76 @@ fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: 
         }
         _ => finish("paused", "Reviewer did not provide a structured verdict"),
     }
+}
+
+enum EngineeringLoopImplementerDecision {
+    Missing,
+    Conflict(String),
+    Applied(serde_json::Value),
+}
+
+fn select_engineering_loop_implementer(
+    app: &App,
+    id: &str,
+    conversation_id: &str,
+    participant: &str,
+) -> Result<EngineeringLoopImplementerDecision> {
+    if participant.trim().is_empty() {
+        return Ok(EngineeringLoopImplementerDecision::Conflict("implementer is required".into()))
+    }
+    let db = app.chat_db.lock().expect("chat database lock poisoned");
+    let Some(record) = engineering_loop_record(&db, id)? else {
+        return Ok(EngineeringLoopImplementerDecision::Missing)
+    };
+    if record.conversation_id != conversation_id {
+        return Ok(EngineeringLoopImplementerDecision::Conflict("Loop Engineering belongs to another conversation".into()))
+    }
+    if record.state != "awaiting_implementer" || record.current_run_id.is_some() {
+        return Ok(EngineeringLoopImplementerDecision::Conflict("Loop Engineering is not waiting for an implementer".into()))
+    }
+    if record.reviewer.as_deref() == Some(participant) {
+        return Ok(EngineeringLoopImplementerDecision::Conflict("implementer and reviewer must be different".into()))
+    }
+    if !conversation_participant(&db, conversation_id, participant)?
+        .is_some_and(|(active, writable)| active && writable)
+    {
+        return Ok(EngineeringLoopImplementerDecision::Conflict(
+            "Loop Engineering implementer must be active with write permission".into(),
+        ))
+    }
+    let now = now_millis();
+    if record.round >= record.max_rounds || record.turns >= record.max_turns {
+        db.execute(
+            "UPDATE chat_engineering_loops
+             SET implementer=?2,state='awaiting_round_approval',current_participant=?2,
+                 reason='The configured round limit was reached without approval. Continue for one more round?',
+                 updated_at=?3,finished_at=NULL
+             WHERE id=?1 AND conversation_id=?4 AND state='awaiting_implementer' AND current_run_id IS NULL",
+            params![id,participant,now,conversation_id],
+        )?;
+        return Ok(EngineeringLoopImplementerDecision::Applied(serde_json::json!({
+            "id":id, "state":"awaiting_round_approval", "phase":"reviewing",
+            "round":record.round, "turns":record.turns, "implementer":participant,
+            "reviewer":record.reviewer, "current":participant,
+            "reason":"The configured round limit was reached without approval. Continue for one more round?",
+        })))
+    }
+    let Some(round) = record.round.checked_add(1) else {
+        return Ok(EngineeringLoopImplementerDecision::Conflict("round limit cannot be increased further".into()))
+    };
+    db.execute(
+        "UPDATE chat_engineering_loops
+         SET implementer=?2,state='running',phase='implementing',round=?3,
+             current_participant=?2,reason=NULL,updated_at=?4,finished_at=NULL
+         WHERE id=?1 AND conversation_id=?5 AND state='awaiting_implementer' AND current_run_id IS NULL",
+        params![id,participant,round,now,conversation_id],
+    )?;
+    Ok(EngineeringLoopImplementerDecision::Applied(serde_json::json!({
+        "id":id, "state":"running", "phase":"implementing", "round":round,
+        "turns":record.turns, "max_rounds":record.max_rounds, "max_turns":record.max_turns,
+        "mode":record.mode, "implementer":participant, "reviewer":record.reviewer,
+        "current":participant,
+    })))
 }
 
 enum EngineeringLoopRoundDecision {
@@ -906,7 +1015,10 @@ fn decide_engineering_loop_round(
             "reason":"Another round was declined by the user",
         })))
     }
-    if !conversation_participant(&db, conversation_id, &record.implementer)?
+    let Some(implementer) = record.implementer.as_deref() else {
+        return Ok(EngineeringLoopRoundDecision::Conflict("Select an implementer before approving another round".into()))
+    };
+    if !conversation_participant(&db, conversation_id, implementer)?
         .is_some_and(|(active, writable)| active && writable)
     {
         return Ok(EngineeringLoopRoundDecision::Conflict(
@@ -932,7 +1044,7 @@ fn decide_engineering_loop_round(
     Ok(EngineeringLoopRoundDecision::Applied(serde_json::json!({
         "id":id, "state":"running", "phase":"implementing", "round":round,
         "max_rounds":max_rounds, "max_turns":max_turns,
-        "current":record.implementer,
+        "current":implementer,
     })))
 }
 
@@ -940,7 +1052,7 @@ fn stop_engineering_loop(app: &App, id: &str) -> Result<Option<(String, Option<S
     let run = {
         let db = app.chat_db.lock().expect("chat database lock poisoned");
         let Some(record) = engineering_loop_record(&db, id)? else { return Ok(None) };
-        if matches!(record.state.as_str(), "running" | "paused" | "awaiting_round_approval") {
+        if matches!(record.state.as_str(), "running" | "paused" | "awaiting_round_approval" | "awaiting_implementer") {
             db.execute(
                 "UPDATE chat_engineering_loops SET state='stopped',reason='Stopped by user',updated_at=?2,finished_at=?2 WHERE id=?1",
                 params![id,now_millis()],
@@ -956,7 +1068,7 @@ fn engineering_loop_snapshot(app: &App, id: &str) -> Result<Option<serde_json::V
     let db = app.chat_db.lock().expect("chat database lock poisoned");
     db.query_row(
         "SELECT conversation_id,checkout,state,phase,round,turns,max_rounds,max_turns,
-                implementer,reviewer,current_participant,current_run_id,objective,reason,
+                mode,implementer,reviewer,current_participant,current_run_id,objective,reason,
                 created_at,updated_at,finished_at
          FROM chat_engineering_loops WHERE id=?1",
         [id],
@@ -965,11 +1077,13 @@ fn engineering_loop_snapshot(app: &App, id: &str) -> Result<Option<serde_json::V
             "state":row.get::<_,String>(2)?, "phase":row.get::<_,String>(3)?,
             "round":row.get::<_,u32>(4)?, "turns":row.get::<_,u32>(5)?,
             "max_rounds":row.get::<_,u32>(6)?, "max_turns":row.get::<_,u32>(7)?,
-            "implementer":row.get::<_,String>(8)?, "reviewer":row.get::<_,Option<String>>(9)?,
-            "current":row.get::<_,String>(10)?, "current_run_id":row.get::<_,Option<String>>(11)?,
-            "objective":row.get::<_,String>(12)?, "reason":row.get::<_,Option<String>>(13)?,
-            "created_at":row.get::<_,i64>(14)?, "updated_at":row.get::<_,i64>(15)?,
-            "finished_at":row.get::<_,Option<i64>>(16)?,
+            "mode":row.get::<_,String>(8)?,
+            "implementer":match row.get::<_,String>(9)?.as_str() { "" => None, value => Some(value.to_string()) },
+            "reviewer":row.get::<_,Option<String>>(10)?,
+            "current":row.get::<_,String>(11)?, "current_run_id":row.get::<_,Option<String>>(12)?,
+            "objective":row.get::<_,String>(13)?, "reason":row.get::<_,Option<String>>(14)?,
+            "created_at":row.get::<_,i64>(15)?, "updated_at":row.get::<_,i64>(16)?,
+            "finished_at":row.get::<_,Option<i64>>(17)?,
         })),
     ).optional().map_err(Into::into)
 }
@@ -1138,6 +1252,30 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
                         serde_json::json!({"id":id,"state":state,"current_run_id":run_id}).to_string(),
                     ),
                     None => respond_text(request, 404, "text/plain", "loop not found"),
+                }
+            }
+            (Method::Post, "implementer") => {
+                let json = header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"));
+                if !json || !same_origin(&request) { return respond_text(request, 403, "text/plain", "forbidden"); }
+                let mut body = String::new();
+                request.as_reader().take(MAX_BODY + 1).read_to_string(&mut body)?;
+                if body.len() as u64 > MAX_BODY {
+                    return respond_text(request, 413, "text/plain", "Loop Engineering request is too large")
+                }
+                let payload = match serde_json::from_str::<EngineeringLoopImplementerRequest>(&body) {
+                    Ok(payload) if !payload.conversation_id.trim().is_empty() && !payload.participant.trim().is_empty() => payload,
+                    _ => return respond_text(request, 400, "text/plain", "invalid implementer selection"),
+                };
+                match select_engineering_loop_implementer(app, id, &payload.conversation_id, &payload.participant)? {
+                    EngineeringLoopImplementerDecision::Applied(body) => {
+                        respond_text(request, 200, "application/json", body.to_string())
+                    }
+                    EngineeringLoopImplementerDecision::Missing => {
+                        respond_text(request, 404, "text/plain", "loop not found")
+                    }
+                    EngineeringLoopImplementerDecision::Conflict(message) => {
+                        respond_text(request, 409, "text/plain", message)
+                    }
                 }
             }
             (Method::Post, "round") => {
@@ -2445,8 +2583,8 @@ mod tests {
         current: &str,
     ) -> EngineeringLoopRequest {
         EngineeringLoopRequest {
-            id: id.into(), state: "running".into(), phase: phase.into(), round, turns,
-            max_rounds: 3, max_turns: 6, implementer: "Impl".into(),
+            id: id.into(), mode: "standard".into(), state: "running".into(), phase: phase.into(), round, turns,
+            max_rounds: 3, max_turns: 6, implementer: Some("Impl".into()),
             reviewer: reviewer.map(str::to_owned), current: current.into(), objective: "Build it".into(),
         }
     }
@@ -2466,13 +2604,18 @@ mod tests {
         ).unwrap();
 
         let root = dir.path();
+        let missing_reviewer = begin_engineering_loop_turn(
+            &app, &loop_request("loop-missing","implementing",1,0,None,"Impl"),
+            "conversation", "Impl", "run-missing", root, 3,
+        ).unwrap_err();
+        assert!(missing_reviewer.to_string().contains("reviewer is required"));
         begin_engineering_loop_turn(
-            &app, &loop_request("loop-1","implementing",1,0,None,"Impl"),
+            &app, &loop_request("loop-1","implementing",1,0,Some("Review"),"Impl"),
             "conversation", "Impl", "run-1", root, 3,
         ).unwrap();
         finish_engineering_loop_turn(
             &app, "loop-1", "run-1",
-            "Implemented. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+            "Implemented without a handoff directive.", true,
         ).unwrap();
         let review = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
         assert_eq!(review["phase"], "reviewing"); assert_eq!(review["turns"], 1);
@@ -2484,7 +2627,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app, "loop-1", "run-2",
-            "Needs work. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->", true,
+            "Needs work. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Other\"} -->", true,
         ).unwrap();
         let changes = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
         assert_eq!(changes["phase"], "implementing"); assert_eq!(changes["round"], 2);
@@ -2496,7 +2639,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app, "loop-1", "run-3",
-            "Fixed. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+            "Fixed without a handoff directive.", true,
         ).unwrap();
         begin_engineering_loop_turn(
             &app, &loop_request("loop-1","reviewing",2,3,Some("Review"),"Review"),
@@ -2508,6 +2651,60 @@ mod tests {
         let approved = engineering_loop_snapshot(&app,"loop-1").unwrap().unwrap();
         assert_eq!(approved["state"], "approved"); assert_eq!(approved["turns"], 4);
         assert!(approved["finished_at"].is_number());
+    }
+
+    #[test]
+    fn review_first_loop_waits_for_a_distinct_writable_implementer() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_app(dir.path());
+        let review_only = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Review","write":false}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "INSERT INTO chat_state(id,state_json,drafts_json,updated_at) VALUES (1,?1,'{}',?2)",
+            params![review_only.to_string(),now_millis()],
+        ).unwrap();
+
+        let mut request = loop_request("review-first","reviewing",1,0,Some("Review"),"Review");
+        request.mode = "review_first".into(); request.implementer = None;
+        begin_engineering_loop_turn(
+            &app,&request,"conversation","Review","review-first-1",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"review-first","review-first-1",
+            "Changes. <!-- aic-loop {\"verdict\":\"changes_requested\"} -->",true,
+        ).unwrap();
+        let waiting = engineering_loop_snapshot(&app,"review-first").unwrap().unwrap();
+        assert_eq!(waiting["state"],"awaiting_implementer");
+        assert!(waiting["implementer"].is_null());
+        assert!(matches!(
+            select_engineering_loop_implementer(&app,"review-first","conversation","Review").unwrap(),
+            EngineeringLoopImplementerDecision::Conflict(_)
+        ));
+
+        let with_implementer = serde_json::json!({"convs":[{"id":"conversation","participants":[
+            {"name":"Review","write":false},{"name":"Impl","write":true}
+        ],"log":[]}],"current":"conversation"});
+        app.chat_db.lock().unwrap().execute(
+            "UPDATE chat_state SET state_json=?1,updated_at=?2 WHERE id=1",
+            params![with_implementer.to_string(),now_millis()],
+        ).unwrap();
+        let EngineeringLoopImplementerDecision::Applied(selected) =
+            select_engineering_loop_implementer(&app,"review-first","conversation","Impl").unwrap()
+        else { panic!("writable implementer should be selected") };
+        assert_eq!(selected["state"],"running"); assert_eq!(selected["phase"],"implementing");
+        assert_eq!(selected["round"],2); assert_eq!(selected["current"],"Impl");
+
+        let mut implementing = loop_request("review-first","implementing",2,1,Some("Review"),"Impl");
+        implementing.mode = "review_first".into();
+        begin_engineering_loop_turn(
+            &app,&implementing,"conversation","Impl","review-first-2",dir.path(),3,
+        ).unwrap();
+        finish_engineering_loop_turn(
+            &app,"review-first","review-first-2","Corrections complete.",true,
+        ).unwrap();
+        let back_to_review = engineering_loop_snapshot(&app,"review-first").unwrap().unwrap();
+        assert_eq!(back_to_review["phase"],"reviewing"); assert_eq!(back_to_review["current"],"Review");
     }
 
     #[test]
@@ -2550,7 +2747,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app, "loop-final", "run-final-1",
-            "Ready. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->", true,
+            "Ready for mandatory review.", true,
         ).unwrap();
         let mut reviewing = loop_request("loop-final","reviewing",1,1,Some("Review"),"Review");
         reviewing.max_rounds = 1;
@@ -2585,7 +2782,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app,"loop-extra","extra-1",
-            "Done. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->",true,
+            "Done for this round.",true,
         ).unwrap();
         let mut reviewing = loop_request("loop-extra","reviewing",1,1,Some("Review"),"Review");
         reviewing.max_rounds = 1; reviewing.max_turns = 2;
@@ -2594,7 +2791,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app,"loop-extra","extra-2",
-            "Changes. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->",true,
+            "Changes. <!-- aic-loop {\"verdict\":\"changes_requested\"} -->",true,
         ).unwrap();
         let waiting = engineering_loop_snapshot(&app,"loop-extra").unwrap().unwrap();
         assert_eq!(waiting["state"],"awaiting_round_approval");
@@ -2631,7 +2828,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app,"loop-extra","extra-3",
-            "Again. <!-- aic-loop {\"action\":\"review\",\"target\":\"Review\"} -->",true,
+            "Again, ready for review.",true,
         ).unwrap();
         let mut reviewing = loop_request("loop-extra","reviewing",2,3,Some("Review"),"Review");
         reviewing.max_rounds = 2; reviewing.max_turns = 4;
@@ -2640,7 +2837,7 @@ mod tests {
         ).unwrap();
         finish_engineering_loop_turn(
             &app,"loop-extra","extra-4",
-            "Still changes. <!-- aic-loop {\"verdict\":\"changes_requested\",\"target\":\"Impl\"} -->",true,
+            "Still changes. <!-- aic-loop {\"verdict\":\"changes_requested\"} -->",true,
         ).unwrap();
         assert_eq!(engineering_loop_snapshot(&app,"loop-extra").unwrap().unwrap()["state"],"awaiting_round_approval");
         let EngineeringLoopRoundDecision::Applied(declined) =

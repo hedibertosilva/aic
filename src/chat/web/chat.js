@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const KEY = "aic-chat-v2";
 const DRAFTS_KEY = "aic-chat-drafts";
 const DRAFT_PASTES_KEY = "aic-chat-draft-pastes";
+const CACHE_REPO_KEY = "aic-chat-cache-repo-v1";
 const THEME_KEY = "aic-chat-theme";
 let state = { convs: [], current: null, layout: "auto" };
 let drafts = {}; // conversation id -> unsent text, saved apart from the (big) state
@@ -56,6 +57,7 @@ const ICONS = {
   download: I('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
   alert: I('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>'),
   rename: I('<path d="M4 20h16"/><path d="M6 16l9.5-9.5 3 3L9 19H6z"/>'),
+  pin: I('<path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 14v7"/>'),
   settings: I('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20h-3v-.08A1.7 1.7 0 0 0 10.66 18.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 14.7 1.7 1.7 0 0 0 5.44 13.66H5v-3h.08A1.7 1.7 0 0 0 6.64 9.62 1.7 1.7 0 0 0 6.3 7.74l-.06-.06 2.12-2.12.06.06A1.7 1.7 0 0 0 10.3 6 1.7 1.7 0 0 0 11.34 4.44V4h3v.08A1.7 1.7 0 0 0 15.38 5.64a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06A1.7 1.7 0 0 0 19 9.3a1.7 1.7 0 0 0 1.56 1.04H21v3h-.08A1.7 1.7 0 0 0 19.4 15z"/>'),
   meter: I('<path d="M4 18a9 9 0 1 1 16 0"/><path d="M12 13l5-5"/><circle cx="12" cy="13" r="1.5"/>'),
   branch: I('<circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M8 15h2a8 8 0 0 0 8-5"/>'),
@@ -104,11 +106,21 @@ const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : 
 // server owns the durable copy in .aic/chat/chat.sqlite3.
 let remoteReady = false, remoteSaving = false, remoteDirty = false;
 let remoteRevision = null, remoteConflict = false;
+const cacheRepoKey = (key) => `${CACHE_REPO_KEY}:${key}`;
+function cacheRepoFor(key) {
+  try { return localStorage.getItem(cacheRepoKey(key)) || ""; }
+  catch { return ""; }
+}
 function loadLocal() {
-  try { state = Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}); } catch {}
-  try { drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {}; } catch {}
+  // All chat servers normally share 127.0.0.1:7878, so localStorage is shared
+  // across repositories too. Never use a cache unless it identifies the
+  // checkout that produced it; SQLite remains the durable source of truth.
+  if (!serverCheckout) return;
+  if (cacheRepoFor(KEY) === serverCheckout) try { state = Object.assign(state, JSON.parse(localStorage.getItem(KEY)) || {}); } catch {}
+  if (cacheRepoFor(DRAFTS_KEY) === serverCheckout) try { drafts = JSON.parse(localStorage.getItem(DRAFTS_KEY)) || {}; } catch {}
   const cachedPastes = state.pastedDrafts && typeof state.pastedDrafts === "object" ? state.pastedDrafts : {};
-  try { draftPastes = { ...cachedPastes, ...(JSON.parse(localStorage.getItem(DRAFT_PASTES_KEY)) || {}) }; } catch { draftPastes = cachedPastes; }
+  if (cacheRepoFor(DRAFT_PASTES_KEY) === serverCheckout) try { draftPastes = { ...cachedPastes, ...(JSON.parse(localStorage.getItem(DRAFT_PASTES_KEY)) || {}) }; } catch { draftPastes = cachedPastes; }
+  else draftPastes = cachedPastes;
   if (!draftPastes || typeof draftPastes !== "object" || Array.isArray(draftPastes)) draftPastes = {};
   state.pastedDrafts = draftPastes;
   normalizeState();
@@ -121,6 +133,7 @@ function normalizeState() {
   if (state.stack) state.layout = "stack";
   delete state.stack;
   state.convs.forEach((c) => {
+    if (c.pinned !== true) delete c.pinned;
     if (c.plan_binding) hydratePlanBinding(c, c.plan_binding);
     if (c.draft && !drafts[c.id]) drafts[c.id] = c.draft;
     delete c.draft;
@@ -135,7 +148,11 @@ function normalizeState() {
   pruneEmptyConversations();
 }
 function storeItem(key, value) {
-  try { localStorage.setItem(key, value); return true; }
+  try {
+    localStorage.setItem(key, value);
+    localStorage.setItem(cacheRepoKey(key), serverCheckout);
+    return true;
+  }
   catch (err) {
     const b = $("banner");
     b.replaceChildren(icon("alert"), el("span", "message",
@@ -204,7 +221,7 @@ window.addEventListener("pagehide", () => {
 });
 
 const cur = () => state.convs.find((c) => c.id === state.current);
-const hasInteraction = (c) => !!c.keepEmpty || !!c.planBinding?.plan_id
+const hasInteraction = (c) => c.pinned === true || !!c.keepEmpty || !!c.planBinding?.plan_id
   || (Array.isArray(c.participants) && c.participants.length > 0)
   || (Array.isArray(c.log) && c.log.length > 0);
 function pruneEmptyConversations() {
@@ -916,11 +933,11 @@ function renderSidebar() {
   const list = $("list"); list.textContent = "";
   const shown = state.convs
     .filter((c) => !q || c.title.toLowerCase().includes(q) || c.log.some((e) => e.text && e.text.toLowerCase().includes(q)))
-    .sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    .sort((a, b) => Number(b.pinned === true) - Number(a.pinned === true) || (b.updated || 0) - (a.updated || 0));
   if (!shown.length) list.appendChild(el("div", "none", q ? "No conversation matches." : "No conversations yet."));
   let group = null;
   shown.forEach((c) => {
-    const g = dateGroup(c.updated || 0);
+    const g = c.pinned === true ? "Pinned" : dateGroup(c.updated || 0);
     if (g !== group) { list.appendChild(el("h3", "", g)); group = g; }
     list.appendChild(convRow(c));
   });
@@ -933,7 +950,12 @@ function renderSidebar() {
 function convRow(c) {
   const row = el("div", "conv" + (c.id === state.current ? " active" : ""));
   const open = el("button", "open"); open.type = "button";
-  open.appendChild(el("span", "title", c.title));
+  const title = el("span", "title", c.title), titleLine = el("span", "titleline");
+  titleLine.appendChild(title);
+  if (c.pinned === true) {
+    const mark = el("span", "pinmark"); mark.title = "Pinned"; mark.appendChild(icon("pin")); titleLine.appendChild(mark);
+  }
+  open.appendChild(titleLine);
   const sub = el("span", "sub");
   c.participants.slice(0, 8).forEach((p) => { const d = applyParticipantColour(el("span", "dot"), hueOf(p)); d.title = p.name; sub.appendChild(d); });
   const lockWait = c.log.find((entry) => entry.pending && entry.waiting?.reason === "worktree_lock");
@@ -956,6 +978,11 @@ function convRow(c) {
       b.onclick = () => { closeMenu(); fn(); };
       menu.appendChild(b);
     };
+    item("pin", c.pinned === true ? "Unpin" : "Pin", () => {
+      if (c.pinned === true) delete c.pinned; else c.pinned = true;
+      save(); renderSidebar();
+      toast(`${c.pinned === true ? "Pinned" : "Unpinned"} “${c.title}”`);
+    });
     item("rename", "Rename", () => openRename(c));
     item("copy", "Clone agents", () => cloneAgents(c));
     item("retry", "Fork conversation", () => forkConversation(c));
@@ -1014,13 +1041,19 @@ async function importFile(file) {
     if (result.draft !== undefined) nextDrafts[c.id] = result.draft;
     const oldCache = localStorage.getItem(KEY);
     const oldDrafts = localStorage.getItem(DRAFTS_KEY);
+    const oldCacheRepo = localStorage.getItem(cacheRepoKey(KEY));
+    const oldDraftsRepo = localStorage.getItem(cacheRepoKey(DRAFTS_KEY));
     try {
       localStorage.setItem(KEY, JSON.stringify(next));
       localStorage.setItem(DRAFTS_KEY, JSON.stringify(nextDrafts));
+      localStorage.setItem(cacheRepoKey(KEY), serverCheckout);
+      localStorage.setItem(cacheRepoKey(DRAFTS_KEY), serverCheckout);
     } catch (err) {
       try {
         if (oldCache === null) localStorage.removeItem(KEY); else localStorage.setItem(KEY, oldCache);
         if (oldDrafts === null) localStorage.removeItem(DRAFTS_KEY); else localStorage.setItem(DRAFTS_KEY, oldDrafts);
+        if (oldCacheRepo === null) localStorage.removeItem(cacheRepoKey(KEY)); else localStorage.setItem(cacheRepoKey(KEY), oldCacheRepo);
+        if (oldDraftsRepo === null) localStorage.removeItem(cacheRepoKey(DRAFTS_KEY)); else localStorage.setItem(cacheRepoKey(DRAFTS_KEY), oldDraftsRepo);
       } catch {}
       throw new Error("Browser storage is unavailable or full. Free space and try again.");
     }
@@ -1557,15 +1590,30 @@ function renderComposer() {
   lockBanner.hidden = !lock;
   if (lock) $("composerlocktext").textContent = lock.text;
   const loop = c?.engineeringLoop, loopBanner = $("engineeringloop");
-  const loopActive = !!loop && ["running", "paused", "awaiting_round_approval"].includes(loop.state);
+  const loopActive = !!loop && ["running", "paused", "awaiting_round_approval", "awaiting_implementer"].includes(loop.state);
   loopBanner.hidden = !loopActive;
   if (loopActive) {
     const phase = loop.state === "awaiting_round_approval" ? "Waiting for your decision"
+      : loop.state === "awaiting_implementer" ? "Waiting for an implementer"
       : loop.state === "paused" ? "Paused" : loop.phase === "reviewing" ? "Reviewing" : "Implementing";
     const reason = loop.reason?.replace(/\s+(Continue for one more round\?)$/, "\n$1");
     $("engineeringloopstatus").textContent = `Round ${loop.round}/${loop.maxRounds} · ${phase} · ${loop.current || "selecting participant"}`
-      + (["paused", "awaiting_round_approval"].includes(loop.state) && reason ? ` · ${reason}` : "");
+      + (["paused", "awaiting_round_approval", "awaiting_implementer"].includes(loop.state) && reason ? ` · ${reason}` : "");
     $("engineeringloopdecision").hidden = loop.state !== "awaiting_round_approval";
+    const assignment = $("engineeringloopassignment"), implementerSelect = $("engineeringloopimplementer");
+    assignment.hidden = loop.state !== "awaiting_implementer";
+    if (loop.state === "awaiting_implementer") {
+      const previous = implementerSelect.value;
+      const candidates = active(c).filter(participant => participant.write && participant.name !== loop.reviewer && meta.agents.includes(participant.agent));
+      implementerSelect.replaceChildren(...candidates.map(participant => {
+        const option = el("option", "", participant.name); option.value = participant.name; return option;
+      }));
+      if (candidates.some(participant => participant.name === previous)) implementerSelect.value = previous;
+      if (!candidates.length) {
+        const option = el("option", "", "Add a participant with edit access"); option.value = ""; implementerSelect.appendChild(option);
+      }
+      $("engineeringloopassign").disabled = !implementerSelect.value;
+    }
     $("engineeringloopstop").hidden = loop.state === "awaiting_round_approval";
     $("engineeringloopstop").disabled = false;
   }
@@ -1610,7 +1658,7 @@ $("composerlockforce").onclick = async () => {
 };
 $("engineeringloopstop").onclick = async () => {
   const c = cur(), loop = c?.engineeringLoop;
-  if (!loop || !["running", "paused"].includes(loop.state)) return;
+  if (!loop || !["running", "paused", "awaiting_implementer"].includes(loop.state)) return;
   const button = $("engineeringloopstop"); button.disabled = true; button.textContent = "Stopping…";
   try {
     const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id) + '/stop', {
@@ -1651,9 +1699,32 @@ async function decideEngineeringLoopRound(approve) {
 }
 $("engineeringloopapprove").onclick = () => decideEngineeringLoopRound(true);
 $("engineeringloopdecline").onclick = () => decideEngineeringLoopRound(false);
+$("engineeringloopimplementer").onchange = () => { $("engineeringloopassign").disabled = !$("engineeringloopimplementer").value; };
+$("engineeringloopassign").onclick = async () => {
+  const c = cur(), loop = c?.engineeringLoop, name = $("engineeringloopimplementer").value;
+  if (!loop || loop.state !== "awaiting_implementer" || !name) return;
+  const implementer = active(c).find(participant => participant.name === name && participant.write && participant.name !== loop.reviewer);
+  if (!implementer) { toast("Choose an active implementer with edit access."); render(); return; }
+  const button = $("engineeringloopassign"); button.disabled = true; button.textContent = "Starting…";
+  try {
+    // The backend validates the selected participant against the durable chat
+    // snapshot. Flush additions and permission changes before asking it to
+    // advance the loop.
+    await flushChatForPlanMutation();
+    const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id) + '/implementer', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({conversation_id:c.id, participant:name}),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    applyEngineeringLoopSnapshot(loop, await response.json());
+    save(); render();
+    if (loop.state === "running" && loop.current === implementer.name) launch(c, [implementer], null, null, {loopTurn:true});
+  } catch (error) { toast("Could not select the implementer: " + (error.message || error)); }
+  finally { button.disabled = false; button.textContent = "Continue"; }
+};
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
-  let msg = "Enter sends · Shift+Enter new line · @ mentions · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
+  let msg = "Enter sends · Shift+Enter new line · @ mentions · /review · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
   if (c && busy(c)) msg = "Replies are coming in. Esc or ■ stops them; you can keep typing.";
   else if (c) {
     const body = text.replace(/^((?:@[\w-]+\s+)+)/, "");
@@ -1789,12 +1860,12 @@ function loopSystem(c, p, loop) {
   const candidates = active(c).filter((participant) => participant.name !== p.name)
     .map((participant) => `${participant.name}${participant.role ? ` (${participant.role})` : ""}`).join(", ");
   if (loop.phase === "reviewing") {
-    return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the reviewer. Review the implementer's work and finish with exactly one machine-readable directive: <!-- aic-loop {"verdict":"approved"} --> when it is ready, or <!-- aic-loop {"verdict":"changes_requested","target":"${loop.implementer}"} --> when changes are needed. Do not omit the directive.`;
+    const routing = loop.implementer
+      ? `The backend always returns requested changes to ${loop.implementer}.`
+      : "If changes are needed, the loop will wait for the user to choose an implementer with edit access.";
+    return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the reviewer. Review the existing implementation and finish with exactly one machine-readable directive: <!-- aic-loop {"verdict":"approved"} --> when it is ready, or <!-- aic-loop {"verdict":"changes_requested"} --> when changes are needed. ${routing} Do not omit the directive.`;
   }
-  const target = loop.reviewer
-    ? `Send review to ${loop.reviewer}.`
-    : `Choose the most appropriate reviewer from the participants by role; if no role distinguishes them, choose any available participant. Candidates: ${candidates || "none"}.`;
-  return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the implementer. Complete the requested work, explain what changed, and hand it off for review. ${target} Finish with exactly one machine-readable directive: <!-- aic-loop {"action":"review","target":"PARTICIPANT_NAME"} -->. Do not omit the directive.`;
+  return `Loop Engineering ${loop.id}, round ${loop.round}/${loop.maxRounds}. You are the implementer. Complete the requested work and explain what changed. Review by ${loop.reviewer || candidates || "the selected reviewer"} is mandatory and starts automatically after this turn; no handoff directive is required.`;
 }
 function systemFor(c, p, loop = null) {
   const others = active(c).filter((q) => q !== p).map((q) => q.name);
@@ -2028,9 +2099,30 @@ function finishRunUI(c, p, entry, key) {
   if (entry.loop_id) queueMicrotask(() => advanceEngineeringLoop(c, p, entry, loopDirectiveValue));
 }
 
-function advanceEngineeringLoop(c, p, entry, directive) {
+async function advanceEngineeringLoop(c, p, entry, directive) {
   const loop = c.engineeringLoop;
   if (!loop || loop.id !== entry.loop_id || loop.state !== "running" || loop.current !== p.name) return;
+  try {
+    const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id));
+    if (response.ok) {
+      const snapshot = await response.json();
+      applyEngineeringLoopSnapshot(loop, snapshot);
+      save(); render();
+      if (snapshot.state === "approved") toast(`Loop Engineering approved by ${p.name}.`);
+      if (snapshot.state !== "running" || snapshot.current_run_id) return;
+      const next = active(c).find(participant => participant.name === snapshot.current);
+      if (!next) {
+        loop.state = "paused"; loop.reason = "The current Loop Engineering participant is unavailable."; save(); render(); return;
+      }
+      launch(c, [next], null, null, {loopTurn:true});
+      return;
+    }
+    // Older servers do not expose durable loop snapshots. Retain the local
+    // transition below so the web UI remains backwards compatible.
+    if (response.status !== 404) throw new Error(await response.text());
+  } catch (error) {
+    console.warn('Could not reconcile Loop Engineering', error);
+  }
   loop.turns = (loop.turns || 0) + 1;
   if (entry.error) {
     loop.state = "paused"; loop.reason = `${p.name} failed. Retry or stop the loop.`; save(); render(); return;
@@ -2039,20 +2131,11 @@ function advanceEngineeringLoop(c, p, entry, directive) {
     if (loop.turns >= loop.maxTurns) {
       loop.state = "limit_reached"; loop.reason = "Turn limit reached."; loop.finishedAt = Date.now(); save(); render(); return;
     }
-    if (directive?.action !== "review" || !directive.target) {
-      loop.state = "paused"; loop.reason = `${p.name} did not provide a valid handoff.`; save(); render(); return;
-    }
-    if (directive.target === p.name) {
-      loop.state = "paused"; loop.reason = "The implementer cannot review their own work."; save(); render(); return;
-    }
-    if (loop.reviewer && directive.target !== loop.reviewer) {
-      loop.state = "paused"; loop.reason = `${p.name} changed the selected reviewer.`; save(); render(); return;
-    }
-    const target = active(c).find((participant) => participant.name === directive.target);
+    const target = active(c).find((participant) => participant.name === loop.reviewer);
     if (!target) {
-      loop.state = "paused"; loop.reason = "The requested reviewer is unavailable."; save(); render(); return;
+      loop.state = "paused"; loop.reason = "The selected reviewer is unavailable."; save(); render(); return;
     }
-    loop.reviewer ||= target.name; loop.phase = "reviewing"; loop.current = target.name;
+    loop.phase = "reviewing"; loop.current = target.name;
     save(); render(); launch(c, [target], null, null, {loopTurn:true}); return;
   }
   if (directive?.verdict === "approved") {
@@ -2061,8 +2144,10 @@ function advanceEngineeringLoop(c, p, entry, directive) {
   if (directive?.verdict !== "changes_requested") {
     loop.state = "paused"; loop.reason = `${p.name} did not provide a structured verdict.`; save(); render(); return;
   }
-  if (directive.target !== loop.implementer) {
-    loop.state = "paused"; loop.reason = `${p.name} returned changes to an invalid participant.`; save(); render(); return;
+  if (!loop.implementer) {
+    loop.state = "awaiting_implementer";
+    loop.reason = "Changes were requested. Choose a participant with edit access to continue.";
+    save(); render(); return;
   }
   if (loop.round >= loop.maxRounds || loop.turns >= loop.maxTurns) {
     loop.state = "awaiting_round_approval";
@@ -2075,6 +2160,55 @@ function advanceEngineeringLoop(c, p, entry, directive) {
   }
   loop.round += 1; loop.phase = "implementing"; loop.current = implementer.name;
   save(); render(); launch(c, [implementer], null, null, {loopTurn:true});
+}
+
+const loopDispatching = new Set();
+function applyEngineeringLoopSnapshot(loop, snapshot) {
+  if (snapshot.state !== undefined) loop.state = snapshot.state;
+  if (snapshot.phase !== undefined) loop.phase = snapshot.phase;
+  if (snapshot.round !== undefined) loop.round = snapshot.round;
+  if (snapshot.turns !== undefined) loop.turns = snapshot.turns;
+  if (snapshot.max_rounds !== undefined) loop.maxRounds = snapshot.max_rounds;
+  if (snapshot.max_turns !== undefined) loop.maxTurns = snapshot.max_turns;
+  if (snapshot.mode) loop.mode = snapshot.mode;
+  if (snapshot.implementer !== undefined) loop.implementer = snapshot.implementer;
+  if (snapshot.reviewer !== undefined) loop.reviewer = snapshot.reviewer;
+  if (snapshot.current !== undefined) loop.current = snapshot.current;
+  if (snapshot.reason !== undefined) loop.reason = snapshot.reason || "";
+  if (snapshot.finished_at) loop.finishedAt = snapshot.finished_at;
+  else delete loop.finishedAt;
+}
+async function resumeEngineeringLoops() {
+  for (const c of state.convs) {
+    const loop = c.engineeringLoop;
+    if (!loop?.id || loop.state !== "running" || loopDispatching.has(loop.id)) continue;
+    if (c.log.some(entry => entry.loop_id === loop.id && entry.pending) || busy(c)) continue;
+    loopDispatching.add(loop.id);
+    try {
+      const response = await fetch('/api/chat/loops/' + encodeURIComponent(loop.id));
+      if (response.status === 404) {
+        // The initial placeholder may have been saved just before its request
+        // started. Re-dispatching is safe because begin_engineering_loop_turn
+        // atomically claims the first durable run.
+        if (loop.turns !== 0) continue;
+      } else {
+        if (!response.ok) throw new Error(await response.text());
+        const snapshot = await response.json();
+        applyEngineeringLoopSnapshot(loop, snapshot);
+        save(); render();
+        if (snapshot.state !== "running" || snapshot.current_run_id) continue;
+      }
+      const participant = active(c).find(item => item.name === loop.current);
+      if (!participant) {
+        loop.state = "paused"; loop.reason = "The current Loop Engineering participant is unavailable."; save(); render(); continue;
+      }
+      launch(c, [participant], null, null, {loopTurn:true});
+    } catch (error) {
+      console.warn('Could not resume Loop Engineering', error);
+    } finally {
+      loopDispatching.delete(loop.id);
+    }
+  }
 }
 
 function resumePendingRuns() {
@@ -2296,30 +2430,65 @@ function normalizeMarkerLine(input) {
 }
 function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; delete draftPastes[c.id]; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
 async function startEngineeringLoop(c, text) {
-  if (["running", "paused"].includes(c.engineeringLoop?.state)) { toast("Stop the current Loop Engineering before starting another."); return; }
-  let rest = text.replace(/^\/loop\b/i, "").trim(), names = [];
+  if (["running", "paused", "awaiting_round_approval", "awaiting_implementer"].includes(c.engineeringLoop?.state)) { toast("Stop the current Loop Engineering before starting another."); return; }
+  const reviewAlias = /^\/review\b/i.test(text);
+  let rest = text.replace(reviewAlias ? /^\/review\b/i : /^\/loop\b/i, "").trim();
+  const reviewFirst = reviewAlias || /^review(?:\s+|$)/i.test(rest);
+  if (!reviewAlias && reviewFirst) rest = rest.replace(/^review\b/i, "").trim();
+  let names = [];
   while (names.length < 2) {
     const match = rest.match(/^@([\w-]+)(?:\s+|$)/);
     if (!match) break;
     names.push(match[1]); rest = rest.slice(match[0].length).trim();
   }
-  if (!rest) { toast("Add an objective after /loop."); return; }
+  if (!rest) { toast(`Add an objective after ${reviewFirst ? "/review" : "/loop"}.`); return; }
   const participants = active(c);
-  if (participants.length < 2) { toast("Loop Engineering needs at least two active participants."); return; }
+  if (!reviewFirst && participants.length < 2) { toast("Loop Engineering needs at least two active participants."); return; }
+  if (!participants.length) { toast("Review needs an active participant."); return; }
   const explicit = names.map((name) => participants.find((participant) => participant.name === name));
   const missing = names.filter((_, index) => !explicit[index]);
   if (missing.length) { toast("Unknown or unavailable participant: " + missing.join(", ")); return; }
   if (explicit.length === 2 && explicit[0] === explicit[1]) { toast("Implementer and reviewer must be different participants."); return; }
   const selected = recipients(c);
-  const implementer = explicit[0] || selected.find((participant) => participant.write) || selected[0] || participants.find((participant) => participant.write) || participants[0];
-  const reviewer = explicit[1] || null;
-  if (!(await prepareSend(c, [implementer]))) return;
+  if (reviewFirst) {
+    const reviewer = explicit[0]
+      || selected.find(participant => /review|qa|quality|critic|architect/i.test(`${participant.name} ${participant.role || ""}`))
+      || selected[0]
+      || participants.find(participant => /review|qa|quality|critic|architect/i.test(`${participant.name} ${participant.role || ""}`))
+      || participants[0];
+    const implementer = explicit[1] || null;
+    if (implementer && (!implementer.write || implementer === reviewer)) {
+      toast(implementer === reviewer ? "Implementer and reviewer must be different participants." : "Loop Engineering implementer needs write permission."); return;
+    }
+    const preflight = [reviewer, ...(implementer ? [implementer] : [])];
+    if (!(await prepareSend(c, preflight))) return;
+    const maxRounds = Math.max(1, Math.min(20, Number(loopMaxRounds) || 3));
+    c.engineeringLoop = {
+      id: globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)),
+      mode: "review_first", state: "running", phase: "reviewing", round: 1, turns: 0,
+      maxRounds, maxTurns: maxRounds * 2, implementer: implementer?.name || null,
+      reviewer: reviewer.name, current: reviewer.name, objective: rest, startedAt: Date.now(),
+    };
+    clearInput(c);
+    launch(c, [reviewer], text, [reviewer.name], {preflightDone:true, loopTurn:true});
+    return;
+  }
+  if (explicit[0] && !explicit[0].write) { toast("Loop Engineering implementer needs write permission."); return; }
+  const implementer = explicit[0] || selected.find((participant) => participant.write) || participants.find((participant) => participant.write);
+  if (!implementer) { toast("Loop Engineering needs an active participant with write permission."); return; }
+  const reviewerCandidates = participants.filter((participant) => participant !== implementer && meta.agents.includes(participant.agent));
+  const reviewer = explicit[1]
+    || reviewerCandidates.find((participant) => /review|qa|quality|critic|architect/i.test(`${participant.name} ${participant.role || ""}`))
+    || reviewerCandidates.find((participant) => !participant.write)
+    || reviewerCandidates[0];
+  if (!reviewer) { toast("Loop Engineering needs an available reviewer different from the implementer."); return; }
+  if (!(await prepareSend(c, [implementer, reviewer]))) return;
   const maxRounds = Math.max(1, Math.min(20, Number(loopMaxRounds) || 3));
   c.engineeringLoop = {
     id: globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2)),
     state: "running", phase: "implementing", round: 1, turns: 0,
     maxRounds, maxTurns: maxRounds * 2, implementer: implementer.name,
-    reviewer: reviewer?.name || null, current: implementer.name, objective: rest, startedAt: Date.now(),
+    reviewer: reviewer.name, current: implementer.name, objective: rest, startedAt: Date.now(),
   };
   clearInput(c);
   launch(c, [implementer], text, [implementer.name], {preflightDone:true, loopTurn:true});
@@ -2336,7 +2505,7 @@ $("form").onsubmit = async (e) => {
   // a reflex Enter on the next message can't throw the replies away.
   if (busy(c)) { if (e.submitter === $("send")) stopAll(c); else renderHint(); return; }
   const text = $("input").value.trim();
-  if (/^\/loop\b/i.test(text)) {
+  if (/^\/(?:loop|review)\b/i.test(text)) {
     await startEngineeringLoop(c, text);
     return;
   }
@@ -2424,7 +2593,8 @@ function acUpdate() {
     const fresh = { type: "/", value: "fresh", label: "/fresh", sub: "Restart selected agents without replaying visible history", off: busy(c) ? "wait for replies to finish" : "" };
     const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
     const loop = { type: "/", value: "loop", label: "/loop", arg: "[@implementer] [@reviewer] <objective>", sub: "Iterate implementation and review until approval" };
-    acItems = [fork, fresh, clear, loop, ...skills.filter((s) => s.name.toLowerCase().includes(q))
+    const review = { type: "/", value: "review", label: "/review", arg: "[@reviewer] [@implementer] <objective>", sub: "Start an Engineering Loop by reviewing existing work" };
+    acItems = [fork, fresh, clear, loop, review, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint,
         off: skillProblem(s.name, recipients(c)),
@@ -2894,13 +3064,13 @@ document.addEventListener("keydown", (e) => {
 });
 
 (async () => {
-  loadLocal();
   try {
     meta = Object.assign(meta, await (await fetch("/api/agents")).json());
     serverCheckout = meta.repo;
   } catch (err) {
     $("msgs").textContent = "Couldn't reach the aic chat server: " + err.message; return;
   }
+  loadLocal();
   try {
     const config = await (await fetch("/api/config")).json();
     loopMaxRounds = Number(config.loop_max_rounds) || loopMaxRounds;
@@ -2923,8 +3093,8 @@ document.addEventListener("keydown", (e) => {
       // Apply compatibility cleanups to records saved by older UI versions.
       normalizeState();
     } else {
-      // First launch after this upgrade: promote the browser history exactly
-      // once, then make SQLite the source of truth for future launches.
+      // First launch after this upgrade: promote a cache owned by this
+      // repository, or initialize an empty repository without foreign data.
       remoteDirty = true;
     }
     remoteReady = true;
@@ -2940,6 +3110,7 @@ document.addEventListener("keydown", (e) => {
   if (!cur()) state.current = state.convs[0]?.id || null;
   if (!cur()) await newConv(); else { $("input").value = drafts[state.current] || ""; autosize(); render(true); }
   resumePendingRuns();
+  resumeEngineeringLoops();
   refreshPlanBinding(cur()).catch(error => showPlanError(error.message));
   fetchQuotaState();
 })();
@@ -2958,6 +3129,12 @@ setInterval(() => {
   });
 }, 1000);
 setInterval(() => { if (!$("quotas").hidden) renderQuotas(); }, 60000);
+// The server owns Loop Engineering transitions. Poll only while a loop is
+// running so a tab can resume a mandatory next turn that another tab (or a
+// reload between turns) left without an active run.
+setInterval(() => {
+  if (state.convs.some(c => c.engineeringLoop?.state === "running")) resumeEngineeringLoops();
+}, 2000);
 
 /* ---------- shared plans ---------- */
 const planRecords = new Map();

@@ -14,10 +14,9 @@ case "$(uname -s)" in
 esac
 
 case "$(uname -m)" in
-  x86_64|amd64) target=x86_64-unknown-linux-musl ;;
-  aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+  x86_64|amd64) ;;
   *)
-    echo "Unsupported architecture: $(uname -m). Use Linux x86_64 or arm64." >&2
+    echo "The current release publishes a Linux x86_64 binary only." >&2
     exit 1
     ;;
 esac
@@ -38,21 +37,17 @@ case "$version" in
     ;;
 esac
 
-archive="aic-$version-$target.tar.gz"
-base_url="https://github.com/$repo/releases/download/v$version"
+asset="aic"
+base_url="https://github.com/$repo/releases/download/$version"
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
-echo "Downloading aic v$version ($target)..."
-curl -fsSL --retry 3 -o "$tmp_dir/$archive" "$base_url/$archive"
-curl -fsSL --retry 3 -o "$tmp_dir/SHA256SUMS" "$base_url/SHA256SUMS"
-
-awk -v archive="$archive" '$2 == archive { print }' "$tmp_dir/SHA256SUMS" |
-  sha256sum -c -
-
-tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" aic
+echo "Downloading aic v$version..."
+curl -fsSL --retry 3 -o "$tmp_dir/$asset" "$base_url/$asset"
+chmod 755 "$tmp_dir/$asset"
+"$tmp_dir/$asset" --version >/dev/null
 mkdir -p "$install_dir"
-install -m 755 "$tmp_dir/aic" "$install_dir/aic"
+install -m 755 "$tmp_dir/$asset" "$install_dir/aic"
 
 echo "Installed aic v$version at $install_dir/aic"
 case ":${PATH:-}:" in

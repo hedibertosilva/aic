@@ -47,6 +47,55 @@ async function paddedDialog(page, id) {
   return metrics;
 }
 
+for (const [label, cacheRepo] of [['legacy unscoped', null], ['another repository', '/different/repository']]) {
+  test(`${label} browser cache is not promoted into an empty database`, options, async () => {
+    const f = await fixture(); let browser;
+    try {
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.addInitScript(repo => {
+        localStorage.setItem('aic-chat-v2', JSON.stringify({
+          convs: [{ id: 'foreign', title: 'Foreign repository chat', participants: [],
+            log: [{ from: 'you', text: 'foreign message', round: 1 }], round: 1, updated: Date.now() }],
+          current: 'foreign', layout: 'auto',
+        }));
+        localStorage.setItem('aic-chat-drafts', JSON.stringify({ foreign: 'foreign draft' }));
+        if (repo) for (const key of ['aic-chat-v2', 'aic-chat-drafts', 'aic-chat-draft-pastes']) {
+          localStorage.setItem('aic-chat-cache-repo-v1:' + key, repo);
+        }
+      }, cacheRepo);
+      await page.goto(f.base);
+      await emptyChat(page);
+      const cached = await page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')));
+      assert.equal(cached.convs.some(conversation => conversation.id === 'foreign'), false);
+      assert.equal(await page.locator('#list').getByText('Foreign repository chat').count(), 0);
+    } finally { await browser?.close(); await f.close(); }
+  });
+}
+
+test('cache owned by the current repository is promoted into an empty database', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.addInitScript(repo => {
+      localStorage.setItem('aic-chat-v2', JSON.stringify({
+        convs: [{ id: 'local', title: 'Current repository chat', participants: [],
+          log: [{ from: 'you', text: 'local message', round: 1 }], round: 1, updated: Date.now() }],
+        current: 'local', layout: 'auto',
+      }));
+      localStorage.setItem('aic-chat-cache-repo-v1:aic-chat-v2', repo);
+    }, f.root);
+    await page.goto(f.base);
+    await page.waitForFunction(() => document.querySelector('#list')?.textContent.includes('Current repository chat'));
+    await page.waitForFunction(async () => {
+      const response = await fetch('/api/chat/state');
+      const saved = await response.json();
+      return saved.state?.convs?.some(conversation => conversation.id === 'local');
+    });
+  } finally { await browser?.close(); await f.close(); }
+});
+
 test('explicit participant choice, targeted sends, keyboard recovery, draft and branch acknowledgement', options, async () => {
   const f = await fixture(); let browser;
   try {
@@ -219,6 +268,36 @@ test('new chat cards allow importing before participant setup, including after t
     assert.equal(imported.log.length, 2);
     assert.equal(await page.locator('dialog[open]').count(), 0);
     assert.ok(fs.readFileSync(path.join(f.root, 'config/config.toml'), 'utf8').includes('default_agent=""'));
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('sidebar pins favorite conversations above the chronological groups and persists the choice', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    const now = Date.now();
+    const conversation = (id, title, updated) => ({ id, title, participants: [],
+      log: [{ from: 'you', text: title, round: 1 }], round: 1, updated, sendTo: null });
+    await f.request('/api/chat/state', { state: {
+      convs: [conversation('recent', 'Recent conversation', now), conversation('favorite', 'Favorite conversation', now - 864e5)],
+      current: 'recent', layout: 'auto',
+    }, drafts: {} });
+    browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+    await page.goto(f.base); await page.waitForSelector('.conv');
+    assert.deepEqual(await page.locator('.conv .title').allTextContents(), ['Recent conversation', 'Favorite conversation']);
+
+    const favorite = page.locator('.conv').filter({ hasText: 'Favorite conversation' });
+    await favorite.getByRole('button', { name: /More actions/ }).click();
+    await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs.find(c => c.id === 'favorite')?.pinned === true);
+    assert.equal(await page.locator('#list h3').first().textContent(), 'Pinned');
+    assert.deepEqual(await page.locator('.conv .title').allTextContents(), ['Favorite conversation', 'Recent conversation']);
+    assert.equal(await page.locator('.conv').first().locator('.pinmark').getAttribute('title'), 'Pinned');
+    await page.waitForFunction(async () => (await (await fetch('/api/chat/state')).json()).state.convs.find(c => c.id === 'favorite')?.pinned === true);
+
+    await page.reload(); await page.waitForSelector('.conv');
+    assert.deepEqual(await page.locator('.conv .title').allTextContents(), ['Favorite conversation', 'Recent conversation']);
+    await page.locator('.conv').first().getByRole('button', { name: /More actions/ }).click();
+    assert.equal(await page.getByRole('menuitem', { name: 'Unpin', exact: true }).count(), 1);
   } finally { await browser?.close(); await f.close(); }
 });
 

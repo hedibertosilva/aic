@@ -69,7 +69,8 @@ function harness(failKey) {
   let undo;
   const context = vm.createContext({
     ChatImport: importer, state: initial, drafts: {}, meta: { agents: ['codex'] }, MAX_PARTICIPANTS: 5,
-    KEY: 'state', DRAFTS_KEY: 'drafts', crypto: { randomUUID: () => 'new-id' }, hist: {},
+    KEY: 'state', DRAFTS_KEY: 'drafts', CACHE_REPO_KEY: 'repo', cacheRepoKey: key => `repo:${key}`,
+    serverCheckout: '/repo', crypto: { randomUUID: () => 'new-id' }, hist: {},
     document: { body: { classList: { remove() {} } } },
     $: (id) => { if (!elements.has(id)) elements.set(id, { value: '', focus() {} }); return elements.get(id); },
     localStorage: { getItem: (k) => cache.get(k) ?? null, removeItem: (k) => cache.delete(k), setItem(k,v) { if (k === failKey) throw Error('quota'); cache.set(k,v); } },
@@ -86,9 +87,11 @@ test('file import creates a complete conversation and undo removes it', async ()
   assert.equal(h.context.state.convs.length, 1);
   assert.equal(h.context.state.current, 'new-id');
   assert.equal(h.context.state.convs[0].log.length, 4);
+  assert.equal(h.cache.get('repo:state'), '/repo');
+  assert.equal(h.cache.get('repo:drafts'), '/repo');
   h.undo(); assert.equal(h.context.state.convs.length, 0);
 });
-for (const key of ['state', 'drafts']) test(`failure writing ${key} leaves no partial import`, async () => {
+for (const key of ['state', 'drafts', 'repo:state', 'repo:drafts']) test(`failure writing ${key} leaves no partial import`, async () => {
   const h = harness(key);
   await h.context.importFile({ size: 1, name: 'chat.json', text: async () => JSON.stringify(source) });
   assert.equal(h.context.state, h.initial);
