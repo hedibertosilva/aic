@@ -363,17 +363,27 @@ fn auth_status(binary: &str) -> String {
     }
 }
 pub fn snapshot(root: &Path, config: &Config) -> Diagnostic {
-    snapshot_selected(root, config, None)
+    snapshot_selected(root, config, None, true)
+}
+
+/// Refresh and return diagnostics only for agents selected by the UI.
+pub fn snapshot_agents(root: &Path, config: &Config, agents: &[String]) -> Diagnostic {
+    snapshot_selected(root, config, Some(agents), true)
 }
 
 /// Validate only the requested agents against their last real test. This path
 /// checks runtime/image identity and local metadata, without auth CLI calls or
 /// starting probe containers. A missing/expired test still blocks execution.
 pub fn for_send(root: &Path, config: &Config, agents: &[String]) -> Diagnostic {
-    snapshot_selected(root, config, Some(agents))
+    snapshot_selected(root, config, Some(agents), false)
 }
 
-fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) -> Diagnostic {
+fn snapshot_selected(
+    root: &Path,
+    config: &Config,
+    selected: Option<&[String]>,
+    probe_installation: bool,
+) -> Diagnostic {
     let now = chrono::Utc::now().timestamp();
     let git = git_context(root).ok();
     let (runtime, image, image_id) = environment(config);
@@ -395,7 +405,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
             let mut installation = if host { "installed" } else { "missing" }.to_owned();
             if context == "sandbox" {
                 installation = "unknown".into();
-                if selected.is_none() && runtime.state == "ready" && image.state == "ready" {
+                if probe_installation && runtime.state == "ready" && image.state == "ready" {
                     let mut cmd = Command::new(config.sandbox.runtime.label());
                     let probe_name = format!(
                         "aic-check-{}-{}",
@@ -435,7 +445,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
                         installation = if host { "installed" } else { "missing" }.into();
                     }
                 }
-                if selected.is_some() && config.sandbox.bind_agents
+                if !probe_installation && config.sandbox.bind_agents
                     && !CliAgent::new(name, &cfg.binary).is_claude()
                 {
                     installation = if host { "installed" } else { "missing" }.into();
@@ -447,7 +457,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
                 configuration: "configured".into(),
                 host_installation: if host { "installed" } else { "missing" }.into(),
                 installation,
-                authentication: if selected.is_none() && context == "host" && host {
+                authentication: if probe_installation && context == "host" && host {
                     auth_status(&cfg.binary)
                 } else {
                     "unknown".into()
@@ -471,7 +481,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
                 let installation = d.installation.clone();
                 let host = d.host_installation.clone();
                 d = record.result.clone();
-                if selected.is_none() || installation != "unknown" {
+                if probe_installation || installation != "unknown" {
                     d.installation = installation;
                 }
                 d.host_installation = host;
@@ -854,6 +864,23 @@ mod tests {
         let c = git_context(tmp.path()).unwrap();
         assert!(c.branch.is_some());
         assert!(c.sha.is_empty());
+    }
+    #[test]
+    fn selected_snapshot_only_reports_requested_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        let mut config = Config::default();
+        config.sandbox.runtime = SandboxKind::None;
+        for agent in config.agents.values_mut() {
+            agent.binary = "/missing-agent".into();
+        }
+        let report = snapshot_agents(tmp.path(), &config, &["codex".into()]);
+        assert_eq!(report.agents.len(), 1);
+        assert_eq!(report.agents[0].agent, "codex");
     }
     #[test]
     fn bounded_command_times_out() {

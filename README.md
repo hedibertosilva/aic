@@ -114,7 +114,8 @@ participants.
 - Select recipients in **To:** or use `@name` at the start of a message.
 - Send the same question to several participants to compare answers, then use
   **Ask them to comment on each other's replies**.
-- Use `/fresh` to restart selected sessions without replaying history;
+- Use `/fresh` to restart selected sessions without replaying history, or
+  `/fresh @name` to reset a participant without changing the **To:** selection;
   `/clear` clears the conversation; `/fork` creates an alternative branch.
 - Skills appear when you type `/`. Send a skill to exactly one participant.
   That participant must support skills and have editing enabled when the skill

@@ -202,6 +202,12 @@ test('opening and refreshing Environment never changes existing participants, ro
     await page.locator('#input').fill('with existing sessions'); await page.locator('#send').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].participants.every(p => p.session));
     assert.ok(prompts.some(prompt => prompt.system.includes(role)), 'instructions are sent with their line breaks');
+    await page.locator('#to .pill').filter({ hasText: 'Reviewer' }).click();
+    await page.locator('#input').fill('/fresh @Reviewer'); await page.locator('#send').click();
+    const reset = await savedConversation(page), primary = reset.participants.find(p => p.name !== 'Reviewer'), reviewer = reset.participants.find(p => p.name === 'Reviewer');
+    assert.ok(primary.session, 'an unmentioned participant keeps its session');
+    assert.equal(reviewer.session, ''); assert.equal(reviewer.freshContext, true);
+    assert.equal(await page.locator('#to .pill').filter({ hasText: 'Reviewer' }).getAttribute('aria-pressed'), 'false', 'an explicit /fresh target does not change To:');
     await page.locator('#input').fill('Unsent draft');
     const before = await savedConversation(page);
     await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
@@ -214,6 +220,36 @@ test('opening and refreshing Environment never changes existing participants, ro
     await page.reload(); await page.waitForSelector('#chips .chip');
     assert.equal((await savedConversation(page)).participants[1].role, role, 'instructions survive reload');
     assert.deepEqual(errors, []);
+  } finally { await browser?.close(); await f.close(); }
+});
+
+test('a failed participant can be retried while another reply is still running', options, async () => {
+  const f = await fixture(); let browser;
+  try {
+    browser = await chromium.launch({ headless: true }); const page = await browser.newPage();
+    await page.goto(f.base); await page.waitForSelector('#chips .chip');
+    const first = (await savedConversation(page)).participants[0].name;
+    await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
+    await page.locator('#pagent').selectOption('codex'); await page.locator('#pname').fill('Slow'); await page.locator('#psave').click();
+    let firstAttempts = 0;
+    await page.route('**/api/chat', async route => {
+      const request = route.request();
+      if (request.method() !== 'POST') return route.continue();
+      const body = request.postDataJSON();
+      if (body.participant === 'Slow') await new Promise(resolve => setTimeout(resolve, 1500));
+      const failed = body.participant === first && firstAttempts++ === 0;
+      const events = failed
+        ? [{type:'done', ok:false, error:'Temporary failure'}]
+        : [{type:'session', id:'retry-session'}, {type:'delta', text:body.participant === 'Slow' ? 'Slow reply' : 'Recovered reply'}, {type:'done', ok:true}];
+      await route.fulfill({status:200, contentType:'application/x-ndjson', body:events.map(JSON.stringify).join('\n') + '\n'});
+    });
+    await page.locator('#input').fill('retry this message'); await page.locator('#send').click();
+    const retry = page.getByRole('button', { name: 'Try again', exact: true });
+    await retry.waitFor();
+    assert.ok(await page.locator('.card .status:not([hidden])').count(), 'the other participant is still replying');
+    await retry.click();
+    await page.waitForFunction(() => document.querySelector('#msgs').textContent.includes('Recovered reply'));
+    assert.equal(await page.locator('.user').count(), 1, 'retry does not require deleting or resending the user message');
   } finally { await browser?.close(); await f.close(); }
 });
 
@@ -324,12 +360,20 @@ test('default visibility is protected and checkout switching is scoped to this c
     await page.locator('#input').fill('first message'); await page.locator('#send').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.text === 'Fixture reply' && !e.pending));
     await page.locator('#configbtn').click(); await page.waitForSelector('#cdialog[open]');
+    assert.equal(await page.locator('#agentvisibility legend').innerText(), 'Visible');
     const def = page.locator('#agentvisibilityrows label').filter({ hasText: 'Codex' }).locator('input');
     assert.equal(await def.isDisabled(), true); assert.equal(await def.isChecked(), true);
     await page.locator('#agentvisibilityrows label').filter({ hasText: 'Claude' }).locator('input').uncheck();
     assert.equal(await page.locator('#worktreebtn').isVisible(), false);
     assert.equal(await page.locator('#cform #worktreebtn').count(), 0);
     await page.locator('#csave').click(); await page.waitForSelector('#cdialog', { state: 'hidden' });
+    await page.locator('#readybtn').click(); await page.waitForSelector('#readydialog[open]');
+    assert.equal(await page.locator('#readyrows .readyagents').getByText('Claude', { exact: true }).count(), 0);
+    await page.locator('#readyclose').click();
+    await page.locator('#quotabtn').click();
+    await page.waitForFunction(() => document.querySelectorAll('#quotarows > .quota').length > 0);
+    assert.equal(await page.locator('#quotarows > .quota').filter({ hasText: 'Claude' }).count(), 0);
+    await page.locator('#quotaclose').click();
     await page.locator('#conversationadvanced summary').click();
     assert.match(await page.locator('#conversationadvanced').innerText(), /this conversation only/);
     await page.locator('#worktreebtn').click();

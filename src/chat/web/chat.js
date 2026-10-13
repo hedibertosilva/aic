@@ -100,6 +100,10 @@ function toast(text, undo, actionLabel = 'Undo') {
 const announce = (text) => { $("announce").textContent = text; };
 const uniq = (xs) => [...new Set(xs)];
 const fmtK = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n));
+const agentVisible = name => name === meta.default || !(state.hiddenAgents || []).includes(name);
+const visibleAgentNames = () => meta.agents.filter(agentVisible);
+const visibleReadiness = () => readiness ? { ...readiness, agents: (readiness.agents || []).filter(a => agentVisible(a.agent)) } : readiness;
+const visibleParticipants = () => (cur()?.participants || []).filter(p => agentVisible(p.agent));
 
 /* ---------- persistence ---------- */
 // localStorage is retained only as an offline/startup cache. The local aic
@@ -353,13 +357,24 @@ function quotaMeter(w, name) {
   meter.appendChild(el("i")); return meter;
 }
 async function fetchQuotaState() {
-  if (quotaRequest || !meta.agents.length) return quotaRequest;
+  const agents = visibleAgentNames();
+  const agentKey = JSON.stringify(agents);
+  if (quotaRequest) return quotaRequest;
+  if (!agents.length) {
+    quotaData.agents = [];
+    quotaData.consumption = {};
+    quotaConversation = cur()?.id || "";
+    renderQuotas();
+    return null;
+  }
   const conversation = cur()?.id || "";
   quotaRequest = (async () => {
     try {
-      const res = await fetch("/api/quotas?conversation=" + encodeURIComponent(conversation));
+      const params = new URLSearchParams({ conversation, agents: JSON.stringify(agents) });
+      const res = await fetch("/api/quotas?" + params);
       if (!res.ok) throw new Error("Couldn't read usage limits");
       const data = await res.json();
+      if (agentKey !== JSON.stringify(visibleAgentNames())) return;
       const changed = JSON.stringify(data.agents) !== JSON.stringify(quotaData.agents);
       quotaData.agents = data.agents || [];
       if ((cur()?.id || "") === conversation) { quotaData.consumption = data.consumption || {}; quotaConversation = conversation; }
@@ -374,27 +389,30 @@ async function fetchQuotaState() {
       if (changed) repaintQuotaIndicators();
       renderQuotas();
     } catch {
+      if (agentKey !== JSON.stringify(visibleAgentNames())) return;
       quotaManualReads.clear();
       // A transport failure keeps old readings visible without claiming freshness.
-      quotaData.agents = meta.agents.map(agent => ({ ...(quotaOf(agent) || { agent, windows: [] }),
+      quotaData.agents = agents.map(agent => ({ ...(quotaOf(agent) || { agent, windows: [] }),
         refreshable: meta.details?.[agent]?.kind === "codex", state: "read_error", reading: false, error: "Couldn't reach the quota reader", attempted_at: new Date().toISOString() }));
       repaintQuotaIndicators();
       renderQuotas();
     } finally {
       quotaRequest = null;
-      if ((cur()?.id || "") !== conversation) fetchQuotaState();
+      if ((cur()?.id || "") !== conversation || agentKey !== JSON.stringify(visibleAgentNames())) fetchQuotaState();
     }
   })();
   return quotaRequest;
 }
 async function refreshQuotas(agent, silent = false) {
   if (quotaRefreshPending && !agent) return;
+  const agents = agent ? [agent] : visibleAgentNames();
+  if (!agents.length) return;
   quotaRefreshPending = true;
-  if (!silent) (agent ? [agent] : quotaData.agents.filter(q => q.refreshable).map(q => q.agent)).forEach(a => quotaManualReads.add(a));
+  if (!silent) (agent ? agents : quotaData.agents.filter(q => q.refreshable && agents.includes(q.agent)).map(q => q.agent)).forEach(a => quotaManualReads.add(a));
   renderQuotas();
   try {
     const res = await fetch("/api/quotas/refresh", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ agent: agent || null }) });
+      body: JSON.stringify(agent ? { agent } : { agents }) });
     if (!res.ok) throw new Error(await res.text());
     // A snapshot begun before the POST cannot establish the refresh result.
     if (quotaRequest) await quotaRequest;
@@ -417,7 +435,7 @@ function renderQuotas() {
     : level === "out" ? "An agent has exhausted its quota"
     : level === "warn" ? "An agent is nearing its limit"
     : "Provider limits and conversation usage";
-  meta.agents.forEach(agent => {
+  visibleAgentNames().forEach(agent => {
     const q = quotaOf(agent) || { agent, windows: [], reason: "No quota reading yet" };
     const quotaLevel = ChatQuotas.level(q), visualStatus = quotaVisualStatus(agent, ""), w = ChatQuotas.primary(q), stale = ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error";
     const row = el("div", "quota " + quotaLevel + (stale ? " stale" : "") + (visualStatus.kind === "unavailable" ? " unavailable" : ""));
@@ -474,7 +492,7 @@ function renderQuotas() {
   });
   $("quotaunknown").hidden = !c?.log.some(e => e.from !== "you" && !e.agent);
   if (focused) [...rows.querySelectorAll("[data-quota-focus]")].find(e => e.dataset.quotaFocus === focused)?.focus();
-  if (!sameConversation && !quotaRequest && meta.agents.length) fetchQuotaState();
+  if (!sameConversation && !quotaRequest && visibleAgentNames().length) fetchQuotaState();
 }
 
 /* ---------- participants / conversations ---------- */
@@ -604,6 +622,25 @@ function freshContext(c, targets) {
     });
     c.updated = Date.now(); save(); render();
   });
+}
+
+// `/fresh` normally follows the To: selection. An explicit participant list
+// after the command lets someone reset another participant without changing
+// who receives the next regular message (for example, `/fresh @Reviewer`).
+function freshCommandTargets(c, body, fallback) {
+  const match = body.match(/^\/fresh(?:\s+([\s\S]+))?$/i);
+  if (!match) return null;
+  if (!match[1]) return { targets: fallback };
+  const tokens = match[1].trim().split(/\s+/);
+  if (tokens.some(token => !/^@[\w-]+$/.test(token))) {
+    return { error: "Use /fresh @participant (or select participants in “To:”)." };
+  }
+  const names = uniq(expandMentions(c, tokens.map(token => token.slice(1))));
+  const unknown = names.filter(name => !c.participants.some(p => p.name === name));
+  if (unknown.length) return { error: "Unknown participant: " + unknown.join(", ") };
+  const unavailable = names.filter(name => !active(c).some(p => p.name === name));
+  if (unavailable.length) return { error: unavailable.join(", ") + (unavailable.length > 1 ? " are" : " is") + " unavailable." };
+  return { targets: active(c).filter(p => names.includes(p.name)) };
 }
 function switchTo(id) {
   hist.idx = -1;
@@ -1255,9 +1292,9 @@ function paintCard(c, e) {
     }
   }
 
-  const canRegen = !e.pending && !!p && !busy(c) && lastEntryOf(c, e.from) === e && (e.seen0 != null || e.error);
+  const canRegen = !e.pending && !!p && !running.has(runKey(c, p)) && lastEntryOf(c, e.from) === e && (e.seen0 != null || e.error);
   const [usage, detail] = usageText(e.usage);
-  if (changed("foot", [e.pending, e.dur, usage, canRegen, !!e.text, e.stopped, busy(c)])) {
+  if (changed("foot", [e.pending, e.dur, usage, canRegen, !!e.text, !!e.error, e.stopped, busy(c)])) {
     k.foot.textContent = "";
     if (e.pending) {
       // While it thinks or writes, the footer shows how long it has been at it, where the clock time goes afterwards.
@@ -1895,8 +1932,9 @@ function systemFor(c, p, loop = null) {
 // placeholder is logged so replies from this same round stay unseen for the next one.
 async function launch(c, targets, userText, to, opts = {}) {
   if (!opts.preflightDone && !(await prepareSend(c, targets))) return;
-  if (busy(c)) return;
+  if (busy(c) && !opts.allowWhileBusy) return;
   targets = targets.filter((p) => !p.inactive && meta.agents.includes(p.agent));
+  if (targets.some(p => running.has(runKey(c, p)))) return;
   if (!targets.length) { toast("Choose an available, active participant first."); return; }
   // A regenerated reply keeps its round, so it fills its own slot in that round's row.
   const round = opts.round ?? (c.round = (c.round || 0) + 1);
@@ -1940,15 +1978,25 @@ async function launch(c, targets, userText, to, opts = {}) {
 }
 
 // Another answer from the same participant to the same messages.
-function regenerate(c, e, p) {
-  if (busy(c) || lastEntryOf(c, p.name) !== e) return;
+async function regenerate(c, e, p) {
+  if (running.has(runKey(c, p)) || lastEntryOf(c, p.name) !== e) return;
   const idx = c.log.indexOf(e);
-  const seen = e.seen0 != null ? Math.min(p.seen, e.seen0) : p.seen;
+  // Older/imported failed entries may not have recorded `seen0`. In that
+  // case, replay everything since this participant's preceding reply.
+  let previousOwn = -1;
+  if (e.seen0 == null) for (let i = idx - 1; i >= 0; i--) {
+    if (c.log[i].from === p.name) { previousOwn = i; break; }
+  }
+  const seen = Math.min(p.seen, e.seen0 ?? previousOwn + 1);
   if (!unseen(c, { name: p.name, seen }, idx).length) { toast("The messages this answered are gone; nothing to answer again."); return; }
+  // Validate before removing the failed card. If recovery or branch
+  // confirmation is needed, the user keeps the error and can retry again.
+  if (!(await prepareSend(c, [p]))) return;
+  if (running.has(runKey(c, p)) || lastEntryOf(c, p.name) !== e || c.log.indexOf(e) !== idx) return;
   p.seen = seen;
   removeEntry(c, e);
   // Only what the original reply answered; later messages stay unread.
-  launch(c, [p], null, null, { regen: !e.error, until: idx, round: e.round });
+  launch(c, [p], null, null, { regen: !e.error, until: idx, round: e.round, preflightDone: true, allowWhileBusy: true });
 }
 
 async function stopEntry(c, entry) {
@@ -2530,12 +2578,15 @@ $("form").onsubmit = async (e) => {
     body = m[2].trim();
   }
   const targets = recipients(c, text);
-  if (!targets.length) { toast("Pick who receives the message in “To:”."); return; }
-  if (body === "/fresh") {
+  const fresh = freshCommandTargets(c, body, targets);
+  if (fresh) {
+    if (fresh.error) { toast(fresh.error); return; }
+    if (!fresh.targets.length) { toast("Pick whose context to reset in “To:”, or use /fresh @participant."); return; }
     clearInput(c);
-    freshContext(c, targets);
+    freshContext(c, fresh.targets);
     return;
   }
+  if (!targets.length) { toast("Pick who receives the message in “To:”."); return; }
   const to = targets.length === active(c).length ? null : targets.map((p) => p.name);
   if (!body) { // nothing to add: let them answer what's new to them
     const ready = targets.filter((p) => unseen(c, p).length);
@@ -2590,7 +2641,7 @@ function acUpdate() {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
     const fork = { type: "/", value: "fork", label: "/fork", sub: "Create a conversation branch", off: busy(c) ? "wait for replies to finish" : "" };
-    const fresh = { type: "/", value: "fresh", label: "/fresh", sub: "Restart selected agents without replaying visible history", off: busy(c) ? "wait for replies to finish" : "" };
+    const fresh = { type: "/", value: "fresh", label: "/fresh", arg: "[@participant ...]", sub: "Restart selected or named participants without replaying visible history", off: busy(c) ? "wait for replies to finish" : "" };
     const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
     const loop = { type: "/", value: "loop", label: "/loop", arg: "[@implementer] [@reviewer] <objective>", sub: "Iterate implementation and review until approval" };
     const review = { type: "/", value: "review", label: "/review", arg: "[@reviewer] [@implementer] <objective>", sub: "Start an Engineering Loop by reviewing existing work" };
@@ -2978,6 +3029,8 @@ $("cform").onsubmit = async (e) => {
     meta.sandboxed = config.sandbox !== "none";
     loopMaxRounds = Number(config.loop_max_rounds) || Number($("clooprounds").value) || 3;
     state.hiddenAgents = hiddenAgents.filter(name => name !== config.default_agent);
+    quotaData.agents = quotaData.agents.filter(q => agentVisible(q.agent));
+    quotaConversation = null;
     save(); updateAgentOptions();
     $("cdialog").close();
     try { await refreshReadiness(cur(), { full: true, catalog: true }); }
@@ -3413,16 +3466,21 @@ $('planform').onsubmit = async event => {
 };
 /* ---------- onboarding and contextual preflight ---------- */
 async function refreshReadiness(conversation = cur(), { full = false, catalog = false, targets = null } = {}) {
-  const query = conversation?.checkout ? '?checkout=' + encodeURIComponent(conversation.checkout) : '';
+  const checkoutParams = new URLSearchParams();
+  if (conversation?.checkout) checkoutParams.set('checkout', conversation.checkout);
+  const checkoutQuery = checkoutParams.size ? '?' + checkoutParams : '';
   // Agent/skill catalogs change with checkout or configuration, not every send.
   if (catalog || (conversation?.checkout || serverCheckout) !== meta.repo) {
-    const [agents, catalogResponse] = await Promise.all([fetch('/api/agents' + query), fetch('/api/skills' + query)]);
+    const [agents, catalogResponse] = await Promise.all([fetch('/api/agents' + checkoutQuery), fetch('/api/skills' + checkoutQuery)]);
     const nextMeta = agents.ok ? await agents.json() : null;
     const nextSkills = catalogResponse.ok ? await catalogResponse.json() : [];
     if (cur() !== conversation) return null;
     if (nextMeta) meta = Object.assign(meta, nextMeta);
     skills = nextSkills;
   }
+  const params = new URLSearchParams(checkoutParams);
+  if (full) params.set('agents', JSON.stringify(visibleAgentNames()));
+  const query = params.size ? '?' + params : '';
   const response = full ? await fetch('/api/diagnostics' + query) : await fetch('/api/chat/preflight', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ checkout: conversation?.checkout || null, agents: targets ? uniq(targets.map(p => p.agent)) : meta.agents }),
@@ -3479,7 +3537,7 @@ function readinessDot(state) {
 }
 const readinessValue = value => value === 'ready_sandbox' ? 'ready' : value;
 function renderEnvironmentStatus() {
-  const status = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
+  const status = ChatOnboarding.environment(visibleReadiness(), meta.default, visibleParticipants());
   const description = status.state === 'unknown' ? 'Environment status unknown' : status.state === 'blocked' ? 'Environment blocked' : status.pending ? 'Environment: ' + status.pending + (status.pending === 1 ? ' pending item' : ' pending items') : 'Environment ready';
   for (const button of [$('readybtn'), $('penvironment')]) {
     button.dataset.state = status.state;
@@ -3490,7 +3548,8 @@ function renderEnvironmentStatus() {
 }
 function renderReadiness() {
   const rows = $('readyrows'); rows.textContent = '';
-  const overall = ChatOnboarding.environment(readiness, meta.default, cur()?.participants || []);
+  const report = visibleReadiness();
+  const overall = ChatOnboarding.environment(report, meta.default, visibleParticipants());
   $('readystate').className = 'ready-' + overall.state;
   $('readystate').textContent = overall.state === 'ready' ? 'Ready' : overall.state === 'blocked' ? 'Blocked'
     : overall.pending ? overall.pending + (overall.pending === 1 ? ' pending item' : ' pending items') : 'Unknown';
@@ -3501,11 +3560,11 @@ function renderReadiness() {
     const head = el('div', 'readycardhead'); head.append(readinessDot(state), el('strong', '', label)); item.append(head, el('p', 'note', check?.reason || 'Not checked'));
     readinessCommand(item, check?.action); workspaceGrid.append(item);
   }
-  const selection = ChatOnboarding.selection(readiness, meta.default);
+  const selection = ChatOnboarding.selection(report, meta.default);
   $('readyreason').textContent = selection.reason === 'preferred_unavailable' ? 'Your preferred agent (' + meta.default + ') is unavailable. Recover it in the terminal, or choose another ready agent with Add participant. The global preference stays unchanged.' : selection.reason === 'none_ready' ? 'No agents are ready. Install, sign in and test an agent in the terminal, then refresh.' : 'Environment status for this checkout.';
   const agents = el('section', 'readysection'); agents.appendChild(el('h3', '', 'Agents'));
   const agentGrid = el('div', 'readygrid readyagents'); agents.appendChild(agentGrid); rows.appendChild(agents);
-  for (const a of readiness?.agents || []) {
+  for (const a of report?.agents || []) {
     const card = el('article', 'readycard ready-' + a.readiness), head = el('div', 'readycardhead');
     head.append(readinessDot(a.readiness), el('strong', '', cap(a.agent))); card.appendChild(head);
     const fields = el('dl'); for (const key of ['installation', 'authentication', 'execution']) { const field = el('div'), value = readinessValue(String(a[key] || 'unknown')); field.append(el('dt', '', cap(key)), el('dd', '', cap(value))); fields.append(field); } card.append(fields);
@@ -3617,8 +3676,8 @@ $('worktreeconfirm').onclick = async () => {
 function updateAgentOptions(selected = $('pagent').value) {
   const select = $('pagent'); select.textContent = '';
   const placeholder = el('option', '', 'Choose a ready agent'); placeholder.value = ''; select.append(placeholder);
-  for (const a of meta.agents.filter(a => ChatOnboarding.ready(readiness, a)
-    && (a === meta.default || !(state.hiddenAgents || []).includes(a) || a === selected || a === editing?.agent))) {
+  for (const a of meta.agents.filter(a => a === editing?.agent
+    || (ChatOnboarding.ready(readiness, a) && (agentVisible(a) || a === selected)))) {
     const option = el('option', '', cap(a)); option.value = a; select.append(option);
   }
   select.value = [...select.options].some(option => option.value === selected) ? selected : '';
