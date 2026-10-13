@@ -4,7 +4,7 @@ Canonical slug: `aic-chat-onboarding`, as explicitly requested by the user with
 `/plan aic-chat-onboarding`. References to `aic-chat-improvements` in the PM
 review refer to an earlier proposal; this work retains the user's actual slug.
 
-The 0.1.0 release publishes a Linux x86_64 binary asset. macOS, Windows,
+The 0.1.1 release publishes a Linux x86_64 binary asset. macOS, Windows,
 arm64, other CPU architectures and glibc artifacts are not release targets for
 this release.
 A static aic binary does not make third-party CLIs or container images portable.
