@@ -4,7 +4,7 @@ Canonical slug: `aic-chat-onboarding`, as explicitly requested by the user with
 `/plan aic-chat-onboarding`. References to `aic-chat-improvements` in the PM
 review refer to an earlier proposal; this work retains the user's actual slug.
 
-The 0.1.0 release publishes a Linux x86_64 binary asset. macOS, Windows,
+The v0.1.1 release publishes a Linux x86_64 binary asset. macOS, Windows,
 arm64, other CPU architectures and glibc artifacts are not release targets for
 this release.
 A static aic binary does not make third-party CLIs or container images portable.
@@ -13,7 +13,7 @@ Shared diagnostic schema version 1 contains environment, Git context, default
 agent and sorted agent records. Each agent independently reports configuration,
 installation, authentication, execution, quota and derived readiness, plus safe
 reason/action codes, last-test UTC timestamp, verification origin and context.
-Only successful real execution in the configured context establishes readiness.
+Only successful real execution in the active environment establishes readiness.
 Unknown authentication must stay unknown; quota errors never imply logout.
 
 Last tests live in `.aic/diagnostics/tests.json`, local to the checkout, written

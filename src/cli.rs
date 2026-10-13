@@ -264,7 +264,7 @@ pub enum SandboxCommands {
 
 #[derive(Subcommand)]
 pub enum AgentCommands {
-    /// Test a real minimal response in the configured context (may consume quota).
+    /// Test a real minimal response (may consume quota).
     Test {
         agent: Option<String>,
         /// Consent to the provider call without an interactive question.

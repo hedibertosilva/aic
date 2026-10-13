@@ -32,7 +32,7 @@ in CLAUDE.md. Node tests: `node --test tests/*.test.cjs`; CLI/browser tests use
 `AIC_TEST_BINARY=/absolute/path/to/aic` and Playwright with Chromium.
 
 ```sh
-scripts/package-release.sh 0.1.0 x86_64-unknown-linux-musl
+scripts/package-release.sh 0.1.1 x86_64-unknown-linux-musl
 ```
 
 Release CI builds and tests each architecture natively, smoke-tests the binary

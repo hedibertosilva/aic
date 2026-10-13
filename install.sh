@@ -23,11 +23,13 @@ esac
 
 if [ -n "$requested_version" ]; then
   version=${requested_version#v}
+  release_tag="v$version"
 else
   release_url=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
     "https://github.com/$repo/releases/latest")
   tag=${release_url##*/}
   version=${tag#v}
+  release_tag="v$version"
 fi
 
 case "$version" in
@@ -38,7 +40,7 @@ case "$version" in
 esac
 
 asset="aic"
-base_url="https://github.com/$repo/releases/download/$version"
+base_url="https://github.com/$repo/releases/download/$release_tag"
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
 
