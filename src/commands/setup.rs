@@ -53,7 +53,7 @@ pub fn doctor(root: &Path, json: bool) -> Result<()> {
                 .unwrap_or_else(|| "never".into())
         );
         if !a.action.is_empty() {
-            println!("  Next: {}", a.action);
+            println!("  Action: {}", a.action);
         }
     }
     Ok(())
@@ -92,7 +92,7 @@ pub fn agent_test(root: &Path, name: Option<String>, yes: bool, timeout: u64) ->
             Ok(d) => {
                 println!("{}: {} · {}", name, d.readiness, d.reason);
                 if !d.action.is_empty() {
-                    println!("Next: {}", d.action);
+                    println!("Action: {}", d.action);
                 }
                 failed |= d.readiness != "ready";
             }
@@ -157,15 +157,23 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
             agent_test(root, Some(name.clone()), yes, 45)?;
         }
         set_default(root, &name)?;
-        println!("Setup complete. Next: aic chat");
-        if !no_open
-            && io::stdin().is_terminal()
-            && Confirm::new()
-                .with_prompt("Create your first chat now?")
-                .default(true)
-                .interact()?
-        {
-            crate::chat::server::run(root, "127.0.0.1", 7878, true)?;
+        println!("\nSetup complete");
+        println!("{}", "─".repeat(56));
+        println!("Status: Ready");
+        println!("\nYour first aic chat is ready.");
+        println!("\nDefault agent: {name}");
+        println!("Repository: {}", root.display());
+        if !no_open && io::stdin().is_terminal() {
+            let action = Select::new()
+                .with_prompt("Select an action")
+                .items(["[Open first chat]", "[Close setup]"])
+                .default(0)
+                .interact()?;
+            if action == 0 {
+                crate::chat::server::run(root, "127.0.0.1", 7878, true)?;
+            }
+        } else {
+            println!("\nRun aic to start chatting.");
         }
         return Ok(());
     }
@@ -173,40 +181,32 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
     loop {
         let config = Config::load_merged(root)?;
         let report = diagnostics::snapshot(root, &config);
-        println!(
-            "\n{} of 5 · {}",
-            stage + 1,
-            [
-                "Environment",
-                "Sandbox",
-                "Agents",
-                "Default agent",
-                "Conclusion"
-            ][stage]
-        );
+        let title = [
+            "Environment",
+            "Sandbox",
+            "Connect an agent",
+            "Choose your default agent",
+        ][stage];
+        println!("\nStep {} of 4 · {title}", stage + 1);
+        println!("{}", "─".repeat(56));
         let choices: Vec<String> = match stage {
             0 => vec![
-                format!(
-                    "Continue · {} / {} · {}",
-                    report.system,
-                    report.architecture,
-                    root.display()
-                ),
-                "Choose runtime".into(),
-                "Finish later".into(),
+                "[Continue]".into(),
+                "[Choose runtime]".into(),
+                "[Save and exit]".into(),
             ],
             1 => vec![
-                format!("Continue · image {}", report.image.state),
-                "Prepare sandbox".into(),
-                "Back".into(),
-                "Finish later".into(),
+                "[Continue]".into(),
+                "[Build sandbox]".into(),
+                "[Go back]".into(),
+                "[Save and exit]".into(),
             ],
             2 => {
-                let mut c = vec!["Continue (unused agents can be skipped)".into()];
+                let mut c = vec!["[Continue with ready agents]".into()];
                 for a in &report.agents {
                     c.push(format!("{} · {} · {}", a.agent, a.readiness, a.reason));
                 }
-                c.extend(["Back".into(), "Finish later".into()]);
+                c.extend(["[Go back]".into(), "[Save and exit]".into()]);
                 c
             }
             3 => {
@@ -214,29 +214,80 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                     .agents
                     .iter()
                     .filter(|a| a.readiness == "ready")
-                    .map(|a| format!("Use {} for new chats", a.agent))
+                    .map(|a| format!("[Use {} for new chats]", a.agent))
                     .collect();
-                c.extend(["Back".into(), "Finish later".into()]);
+                c.extend(["[Go back]".into(), "[Save and exit]".into()]);
                 c
             }
-            _ => vec!["Create first chat".into(), "Conclude".into(), "Back".into()],
+            _ => unreachable!(),
         };
+        match stage {
+            0 => {
+                println!("Status: Ready");
+                println!("Repository: {}", root.display());
+                println!("System: {} {}", report.system, report.architecture);
+                if let Some(git) = &report.git {
+                    println!("Git checkout: {}", git.label);
+                }
+                println!("\nYour repository and system are ready.");
+            }
+            1 => {
+                let status = if config.sandbox.runtime == SandboxKind::None
+                    || report.image.state == "ready"
+                {
+                    "Ready"
+                } else {
+                    "Not ready"
+                };
+                println!("Status: {status}");
+                if config.sandbox.runtime == SandboxKind::None {
+                    println!("\nAgents will run directly on the host.");
+                } else if report.image.state == "ready" {
+                    println!("\nAgents will run inside the configured sandbox.");
+                    println!("Runtime: {}", config.sandbox.runtime.label());
+                    println!("Image: {}", config.sandbox.image);
+                } else {
+                    println!("\nThe sandbox image has not been built yet.");
+                    println!("\nWhy this matters:");
+                    println!("The sandbox limits the files and permissions available to agents.");
+                }
+            }
+            2 => {
+                let ready = report.agents.iter().filter(|a| a.readiness == "ready").count();
+                let status = if ready > 0 { "Ready" } else { "Action required" };
+                println!("Status: {status}");
+                println!("\naic needs at least one ready agent before you can start a chat.");
+                println!("\nConfigured agents:");
+                for a in &report.agents {
+                    println!("  {} · {} · {}", a.agent, a.readiness, a.reason);
+                }
+            }
+            3 => {
+                let ready = report.agents.iter().filter(|a| a.readiness == "ready").count();
+                println!("Status: {}", if ready > 0 { "Ready" } else { "Action required" });
+                if ready > 0 {
+                    println!("\nChoose the agent selected automatically when you create a new chat.");
+                    println!("You can add other agents as participants later.");
+                } else {
+                    println!("\nChoose a ready agent before continuing.");
+                }
+            }
+            _ => unreachable!(),
+        }
         let Some(choice) = Select::new()
-            .with_prompt("Choose next step (Esc finishes later)")
+            .with_prompt("Select an action (Esc saves and exits)")
             .items(&choices)
             .default(0)
             .interact_opt()?
         else {
-            println!("Pending steps saved. Resume with aic setup.");
+            println!("Setup saved. Resume later with aic setup.");
             return Ok(());
         };
-        if choices[choice] == "Finish later" {
-            println!(
-                "Setup pending. Run aic setup to resume; sends require a ready selected agent."
-            );
+        if choices[choice] == "[Save and exit]" {
+            println!("Setup saved. Resume later with aic setup.");
             return Ok(());
         }
-        if choices[choice] == "Back" {
+        if choices[choice] == "[Go back]" {
             stage = stage.saturating_sub(1);
             continue;
         }
@@ -262,19 +313,22 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                     } else if report.image.state == "ready" {
                         println!("Image already prepared; no build repeated");
                     } else if let Err(e) = crate::commands::sandbox::build(&config, None, None) {
-                        println!(
-                            "Sandbox preparation failed: {e}. Next: aic sandbox build, then aic setup"
-                        );
+                        println!("\nStatus: Action required");
+                        println!("The sandbox could not be prepared.");
+                        println!("\nReason: {e}");
+                        println!("\nYou can retry, choose host execution or save setup for later.");
                     }
                 } else if report.runtime.state == "ready"
                     && matches!(report.image.state.as_str(), "ready" | "not_required")
                 {
                     stage += 1;
                 } else {
-                    println!(
-                        "{}; next: {}. Choose Back to change runtime or Finish later.",
-                        report.image.reason, report.image.action
-                    );
+                    println!("\nStatus: Action required");
+                    println!("{}", report.image.reason);
+                    if !report.image.action.is_empty() {
+                        println!("\nRecovery command: {}", report.image.action);
+                    }
+                    println!("\nChoose Go back to change the runtime or Save and exit.");
                 }
             }
             2 => {
@@ -319,20 +373,31 @@ pub fn run(root: &Path, requested: Option<String>, yes: bool, no_open: bool) -> 
                     .collect();
                 if let Some(a) = ready.get(choice) {
                     set_default(root, &a.agent)?;
-                    stage += 1;
-                }
-            }
-            _ => {
-                if choice == 0 && !no_open {
-                    crate::chat::server::run(root, "127.0.0.1", 7878, true)?;
+                    println!("\nSetup complete");
+                    println!("{}", "─".repeat(56));
+                    println!("Status: Ready");
+                    println!("\nYour first aic chat is ready.");
+                    println!("\nDefault agent: {}", a.agent);
+                    println!("Sandbox: {}", config.sandbox.runtime.label());
+                    println!("Repository: {}", root.display());
+                    if !no_open {
+                        let action = Select::new()
+                            .with_prompt("Select an action")
+                            .items(["[Open first chat]", "[Close setup]"])
+                            .default(0)
+                            .interact()?;
+                        if action == 0 {
+                            crate::chat::server::run(root, "127.0.0.1", 7878, true)?;
+                        }
+                    } else {
+                        println!("\nSetup complete. Run aic to start chatting.");
+                    }
                 } else {
-                    println!(
-                        "Setup complete. Chat default: {}. Next: aic",
-                        report.default_agent
-                    );
+                    println!("Choose a ready agent before continuing.");
                 }
                 return Ok(());
             }
+            _ => unreachable!(),
         }
     }
 }

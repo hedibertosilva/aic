@@ -603,6 +603,10 @@ fn apply_failure(d: &mut AgentDiagnostic, message: &str) {
     d.readiness = "blocked".into();
     d.execution = "failure".into();
     d.reason = reason.into();
+    // A successful test clears the recovery action. If a later chat run or
+    // availability test fails, restore it so the Environment dialog can offer
+    // Copy and Run instead of showing a blocked card with no way to retry.
+    d.action = format!("aic agent test {}", d.agent);
     if kind == "quota" {
         d.quota = "exhausted".into();
     }
@@ -795,6 +799,30 @@ mod tests {
         assert_eq!(classify_error("HTTP 429").0, "execution");
         assert_eq!(classify_error("token expired").0, "authentication");
         assert_eq!(classify_error("network error").0, "network");
+    }
+    #[test]
+    fn execution_failure_restores_test_action_after_success() {
+        let mut diagnostic = AgentDiagnostic {
+            agent: "codex".into(),
+            configuration: "configured".into(),
+            installation: "installed".into(),
+            host_installation: "installed".into(),
+            authentication: "authenticated".into(),
+            execution: "ready_host".into(),
+            quota: "available".into(),
+            readiness: "ready".into(),
+            reason: "Real response confirmed in the configured context".into(),
+            action: String::new(),
+            tested_at: Some(1),
+            origin: "agent_test".into(),
+            context: "host".into(),
+        };
+
+        apply_failure(&mut diagnostic, "process exited unsuccessfully");
+
+        assert_eq!(diagnostic.execution, "failure");
+        assert_eq!(diagnostic.readiness, "blocked");
+        assert_eq!(diagnostic.action, "aic agent test codex");
     }
     #[test]
     fn context_handles_unborn_and_detached() {
