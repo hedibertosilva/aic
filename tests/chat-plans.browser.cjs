@@ -109,17 +109,18 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
       if(url.pathname==='/api/chat'){
         f.used.add(body.conversation_id);
         const events=[{type:'session',id:'new-native-session'}];
-        if(body.prompt.includes('lock-wait')){
+        const normalizedPrompt=body.prompt.toLowerCase();
+        if(normalizedPrompt.includes('lock-wait')){
           const waiting={type:'waiting',reason:'worktree_lock',holder:'Writer',seq:1};
           const run={state:'running',events:[waiting]};
           const publish=()=>{
             f.runs.set(body.run_id,run);
-            if(!body.prompt.includes('buffered'))res.write(JSON.stringify(waiting)+'\n');
+            if(!normalizedPrompt.includes('buffered'))res.write(JSON.stringify(waiting)+'\n');
             setTimeout(()=>{const tail=[{type:'waiting',reason:'worktree_lock',waiting:false,seq:2},{type:'delta',text:'Lock acquired',seq:3},{type:'done',ok:true,text:'Lock acquired',seq:4}];run.events.push(...tail);run.state='completed';res.end(tail.map(event=>JSON.stringify(event)+'\n').join(''));},700);
           };
           res.writeHead(200,{'Content-Type':'application/x-ndjson'});
-          if(body.prompt.includes('buffered'))res.flushHeaders();
-          if(body.prompt.includes('delayed'))setTimeout(publish,700);else publish();
+          if(normalizedPrompt.includes('buffered'))res.flushHeaders();
+          if(normalizedPrompt.includes('delayed'))setTimeout(publish,700);else publish();
           return;
         }
         if(body.task_id&&body.write){
@@ -127,7 +128,7 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
           plan.executions.push(execution);const task=plan.tasks.find(t=>t.id===body.task_id);task.status='validation_pending';task.latest_execution=execution.id;plan.version++;
           events.push({type:'execution',id:execution.id});
         }
-        if(body.prompt.includes('refresh-safe')){
+        if(normalizedPrompt.includes('refresh-safe')){
           const run={state:'running',events:[{type:'delta',text:'Part one',seq:1}]};f.runs.set(body.run_id,run);
           res.writeHead(200,{'Content-Type':'application/x-ndjson'});res.write(JSON.stringify(run.events[0])+'\n');
           setTimeout(()=>{run.events.push({type:'delta',text:' and two',seq:2},{type:'done',ok:true,text:'Part one and two',seq:3});run.state='completed';res.end(run.events.slice(1).map(event=>JSON.stringify(event)+'\n').join(''));},700);
@@ -217,7 +218,7 @@ test('changing plan with history forks only after confirmation and preserves ori
     await t.page.locator('#input').fill('Original draft');
     const before=await current(t.page);
     await chooser(t.page);await t.page.locator('#existingplan').selectOption('beta');assert.match(await t.page.locator('#planchangeeffect').innerText(),/agent sessions restart/);
-    assert.equal(await t.page.locator('#planapply').innerText(),'Create fork and change plan');await t.page.locator('#planapply').click();await t.page.waitForSelector('#plandialog',{state:'hidden'});
+    assert.equal(await t.page.locator('#planapply').innerText(),'Create Fork and Change Plan');await t.page.locator('#planapply').click();await t.page.waitForSelector('#plandialog',{state:'hidden'});
     const fork=await current(t.page);assert.notEqual(fork.id,'source');assert.deepEqual(fork.log,before.log);assert.equal(fork.checkout,before.checkout);
     assert.equal(fork.planBinding.plan_id,'beta');assert.equal(fork.participants[0].session,'');assert.equal(fork.participants[0].role,before.participants[0].role);
     assert.equal(await t.page.locator('#planorigin').evaluate(node=>node.parentElement.id),'contextbar');
@@ -285,7 +286,7 @@ test('linked team conversations keep every participant in discussion mode',optio
   const t=await setup({linked:true,team:true});try{
     await reply(t.page,'Review together');
     const requests=t.f.requests.filter(r=>r.path==='/api/chat').map(r=>r.body);
-    assert.equal(requests.length,2);assert.ok(requests.every(r=>r.intent==='discussion'&&r.write===false&&r.task_id===undefined));
+    assert.equal(requests.length,3);assert.ok(requests.every(r=>r.intent==='discussion'&&r.write===false&&r.task_id===undefined));
     assert.equal(await t.page.locator('#planmode, #plantargets').count(),0);assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
@@ -358,7 +359,7 @@ test('a writing participant shows and clears the worktree lock wait notice',opti
     const runId=await t.page.evaluate(()=>cur().log.find(entry=>entry.pending)?.run_id);
     assert.equal(await t.page.locator('.card .locknotice, .card .lockbadge').count(),0);
     assert.equal(await t.page.locator('.conv.active .lockworking').innerText(),'waiting for Writer');
-    assert.match(await t.page.locator('#composerlock').innerText(),/Dev in “New conversation” is waiting for Writer.*only one conversation can execute writes/s);
+    assert.match(await t.page.locator('#composerlock').innerText(),/Dev in “Lock-wait buffered delayed” is waiting for Writer.*only one conversation can write to a worktree at a time/s);
     await t.page.evaluate(()=>{
       const c={id:crypto.randomUUID(),title:'Foreground chat',participants:[],log:[],round:0,updated:Date.now(),sendTo:null,checkout:null};
       state.convs.unshift(c);switchTo(c.id);
@@ -367,7 +368,7 @@ test('a writing participant shows and clears the worktree lock wait notice',opti
     assert.equal(await t.page.locator('.conv .lockworking').count(),1,'the sidebar still identifies the waiting conversation');
     await t.page.evaluate(id=>switchTo(id),waitingConversation);
     assert.equal(await t.page.locator('#composerlock').isVisible(),true);
-    assert.match(await t.page.locator('#composerlock').innerText(),/New conversation/);
+    assert.match(await t.page.locator('#composerlock').innerText(),/Lock-wait buffered delayed/);
     assert.ok(t.f.requests.filter(request=>request.method==='GET'&&request.path==='/api/chat/runs/'+runId).length>=2,'startup polling retries after the run initially returns 404');
     await t.page.locator('#composerlockforce').click();
     assert.equal(await t.page.locator('#composerlock').isHidden(),true);
@@ -392,6 +393,7 @@ test('Loop Engineering selects a reviewer by role, persists progress and stops e
     assert.equal(turns[0].engineering_loop.id,loop.id);assert.equal(turns[0].engineering_loop.reviewer,'Reviewer');assert.match(turns[1].system,/machine-readable directive/);
     await t.page.locator('#engineeringloopstop').click();
     assert.equal(await t.page.locator('#engineeringloop').isHidden(),true);
+    for(let i=0;i<100&&!t.f.requests.some(request=>request.method==='POST'&&request.path.endsWith('/stop'));i++)await t.page.waitForTimeout(10);
     assert.ok(t.f.requests.some(request=>request.method==='POST'&&request.path.endsWith('/stop')&&request.path.includes('/api/chat/loops/')));
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
@@ -428,7 +430,8 @@ test('review-first waits for a writable implementer when changes are requested',
       .some(conversation=>conversation.participants.some(participant=>participant.name==='Fixer')));
     const implementerPost=posts.findIndex(request=>request.path.endsWith('/implementer')&&request.body.participant==='Fixer');
     assert.ok(statePost>=0);assert.ok(implementerPost>statePost);
-    assert.ok(posts.some(request=>request.path==='/api/chat'&&request.body.participant==='Fixer'));
+    for(let i=0;i<100&&!t.f.requests.some(request=>request.path==='/api/chat'&&request.body.participant==='Fixer');i++)await t.page.waitForTimeout(10);
+    assert.ok(t.f.requests.some(request=>request.path==='/api/chat'&&request.body.participant==='Fixer'));
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });

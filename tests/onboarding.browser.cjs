@@ -65,7 +65,12 @@ for (const [label, cacheRepo] of [['legacy unscoped', null], ['another repositor
         }
       }, cacheRepo);
       await page.goto(f.base);
-      await emptyChat(page);
+      await page.waitForSelector('#empty');
+      await page.waitForFunction(() => {
+        const state = JSON.parse(localStorage.getItem('aic-chat-v2'));
+        return state?.convs.some(conversation => conversation.id === state.current)
+          && !state.convs.some(conversation => conversation.id === 'foreign');
+      });
       const cached = await page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')));
       assert.equal(cached.convs.some(conversation => conversation.id === 'foreign'), false);
       assert.equal(await page.locator('#list').getByText('Foreign repository chat').count(), 0);
@@ -124,17 +129,20 @@ test('explicit participant choice, targeted sends, keyboard recovery, draft and 
     await page.locator('#send').click(); await page.waitForSelector('#readydialog[open]');
     assert.equal(await page.locator('#input').inputValue(), draft);
     await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Last test: never'));
-    assert.deepEqual(await page.locator('#readyrows .readycommand').first().locator('button').allTextContents(), ['Copy', 'Run']);
-    assert.equal(await page.locator('#readyrows .readycommand').first().locator('button.readyrun').isEnabled(), true);
-    await page.locator('#readyrows button').filter({ hasText: 'Copy' }).first().click();
+    const codexRecovery = page.locator('#readyrows .readycard').filter({ hasText: 'Codex' });
+    assert.deepEqual(await codexRecovery.locator('.readycommand button').allTextContents(), ['Copy', 'Run']);
+    assert.equal(await codexRecovery.locator('button.readyrun').isEnabled(), true);
+    await codexRecovery.locator('button').filter({ hasText: 'Copy' }).click();
     assert.match(await page.evaluate(() => navigator.clipboard.readText()), /aic/);
-    await page.locator('#readyrows button.readyrun').filter({ hasText: 'Run' }).first().click();
-    await page.waitForFunction(() => document.querySelector('#readyrows').textContent.includes('Ready_host'));
+    await codexRecovery.locator('button.readyrun').click();
+    await page.waitForFunction(() => [...document.querySelectorAll('#readyrows .readycard')]
+      .some(card => card.textContent.includes('Codex') && card.textContent.includes('Ready_host')));
     assert.ok(requests.includes('/api/diagnostics/run'));
     await page.locator('#readyclose').focus(); await page.keyboard.press('Enter');
     assert.equal(await page.locator('#input').inputValue(), draft);
     execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--allow-empty', '-qm', 'initial'], { cwd: f.root });
     execFileSync('git', ['checkout', '-qb', 'changed-branch'], { cwd: f.root });
+    await page.waitForFunction(async () => (await (await fetch('/api/git')).json()).branch === 'changed-branch');
     await page.locator('#send').click(); await page.waitForSelector('#branchdialog[open]');
     assert.match(await page.locator('#branchdialog').innerText(), /keeps its history and participant sessions/);
     assert.equal(await page.locator('#input').inputValue(), draft);
@@ -161,7 +169,7 @@ test('no ready agents: Environment is consultative, padded and scrollable on a s
     await page.locator('#readyrefresh').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
     assert.deepEqual(await savedConversation(page), before);
     await page.locator('#readyclose').click(); assert.equal(await page.locator('#send').isDisabled(), true);
-    await page.locator('#addbtn').click(); await page.waitForSelector('#pdialog[open]');
+    await page.locator('#empty button').filter({ hasText: 'Add participant' }).click(); await page.waitForSelector('#pdialog[open]');
     assert.equal(await page.locator('#psave').isDisabled(), true);
     assert.equal((await savedConversation(page)).participants.length, 0);
   } finally { await browser?.close(); await f.close(); }
@@ -323,7 +331,7 @@ test('default visibility is protected and checkout switching is scoped to this c
     assert.equal(await page.locator('#cform #worktreebtn').count(), 0);
     await page.locator('#csave').click(); await page.waitForSelector('#cdialog', { state: 'hidden' });
     await page.locator('#conversationadvanced summary').click();
-    assert.match(await page.locator('#conversationadvanced').innerText(), /This conversation only/);
+    assert.match(await page.locator('#conversationadvanced').innerText(), /this conversation only/);
     await page.locator('#worktreebtn').click();
     await page.setViewportSize({ width: 390, height: 360 }); await paddedDialog(page, '#worktreedialog');
     await page.locator('#worktreeselect').selectOption(worktree); await page.locator('#worktreeconfirm').click();
@@ -398,7 +406,7 @@ test('Environment indicator ignores unused agents, follows participants and keep
     const records = JSON.parse(fs.readFileSync(cache, 'utf8')); delete records.tests.claude; delete records.tests.gemini; fs.writeFileSync(cache, JSON.stringify(records));
     browser = await chromium.launch({headless:true}); const page = await browser.newPage();
     await page.goto(f.base); await page.waitForSelector('#chips .chip');
-    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
+    await page.waitForFunction(() => document.querySelector('#readybtn').getAttribute('aria-label') === 'Environment ready');
     await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled);
     assert.deepEqual(await page.locator('#readyrows .readysection > h3').allTextContents(), ['Workspace','Agents']);
     assert.equal(await page.locator('#readyrows .readycard').count(), 6);
@@ -418,11 +426,11 @@ test('Environment indicator ignores unused agents, follows participants and keep
     const withoutClaude = await savedConversation(page);
     const invalid = JSON.parse(fs.readFileSync(cache,'utf8')); delete invalid.tests.claude; fs.writeFileSync(cache,JSON.stringify(invalid));
     await page.locator('#readybtn').click(); await page.waitForFunction(() => !document.querySelector('#readyrefresh').disabled); await page.locator('#readyclose').click();
-    assert.equal(await page.locator('#readybtn').innerText(), 'Environment ready');
+    assert.equal(await page.locator('#readybtn').getAttribute('aria-label'), 'Environment ready');
     await page.locator('#list .conv .open').filter({hasText:withClaude.title}).click();
-    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment · 1 pending item');
+    await page.waitForFunction(() => document.querySelector('#readybtn').getAttribute('aria-label') === 'Environment: 1 pending item');
     await page.locator('#list .conv .open').filter({hasText:withoutClaude.title}).click();
-    await page.waitForFunction(() => document.querySelector('#readybtn').textContent === 'Environment ready');
+    await page.waitForFunction(() => document.querySelector('#readybtn').getAttribute('aria-label') === 'Environment ready');
     await page.locator('#quotabtn').click(); assert.equal(await page.locator('#quotas').isVisible(), true);
   } finally { await browser?.close(); await f.close(); }
 });

@@ -95,7 +95,7 @@ test('interactive setup can finish later without losing an existing preference',
   const child=spawn('script',['-q','-e','-c',quote(binary)+' setup --no-open','/dev/null'],{cwd:f.root,env:{...process.env,AIC_CONFIG_DIR:path.join(f.root,'config'),AIC_IN_SANDBOX:'1'},stdio:['pipe','pipe','pipe']});
   let output='',cancelled=false;child.stdout.on('data',buf=>{output+=buf;if(output.includes('Environment')&&!cancelled){cancelled=true;child.stdin.write('\x1b');}});
   const status=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>{child.kill();reject(new Error('Setup did not respond to cancellation'));},10000);child.on('error',reject);child.on('exit',code=>{clearTimeout(timeout);resolve(code);});});
-  assert.equal(status,0);assert.match(output,/Resume with aic setup/);assert.equal(JSON.parse(cli(f,['doctor','--json']).stdout).default_agent,'codex');
+  assert.equal(status,0);assert.match(output,/Resume later with aic setup/);assert.equal(JSON.parse(cli(f,['doctor','--json']).stdout).default_agent,'codex');
  }finally{await f.close();}
 });
 

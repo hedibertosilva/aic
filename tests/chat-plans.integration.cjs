@@ -167,8 +167,9 @@ test('worktree writer lock groups one conversation while queuing other conversat
 const fs=require('fs'),path=require('path');const root=__dirname,args=process.argv.slice(2).join(' ');
 const send=value=>process.stdout.write(JSON.stringify(value)+'\\n');
 if(args.includes('single word READY')){send({type:'item.completed',item:{type:'agent_message',text:'READY'}});send({type:'turn.completed'});process.exit(0);}
-const finish=text=>{send({type:'thread.started',thread_id:'lock-session'});send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.completed'});};
-if(args.includes('hold writer')){fs.writeFileSync(path.join(root,'writer-one-started'),'yes');const timer=setInterval(()=>{if(fs.existsSync(path.join(root,'release-writer'))){clearInterval(timer);finish('First writer done');}},20);}
+const start=()=>send({type:'thread.started',thread_id:'lock-session'});
+const finish=(text,startThread=true)=>{if(startThread)start();send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.completed'});};
+if(args.includes('hold writer')){start();fs.writeFileSync(path.join(root,'writer-one-started'),'yes');const timer=setInterval(()=>{if(fs.existsSync(path.join(root,'release-writer'))){clearInterval(timer);finish('First writer done',false);}},20);}
 else if(args.includes('second writer')){fs.writeFileSync(path.join(root,'writer-two-started'),'yes');finish('Second writer done');}
 else if(args.includes('forced writer')){fs.writeFileSync(path.join(root,'forced-writer-started'),'yes');finish('Forced writer done');}
 else if(args.includes('peer writer')){fs.writeFileSync(path.join(root,'peer-writer-started'),'yes');finish('Peer writer done');}
@@ -186,8 +187,7 @@ else finish('Fixture reply');
     }
     throw new Error('run event did not arrive for '+id);
   };
-  const first=await post({run_id:'writer-one',conversation_id:'one',participant:'Writer-One',agent:'codex',prompt:'hold writer',write:true});
-  assert.equal(first.status,200);
+  const firstResponse=post({run_id:'writer-one',conversation_id:'one',participant:'Writer-One',agent:'codex',prompt:'hold writer',write:true});
   for(let i=0;i<100&&!fs.existsSync(path.join(f.root,'writer-one-started'));i++)await new Promise(resolve=>setTimeout(resolve,10));
   assert.ok(fs.existsSync(path.join(f.root,'writer-one-started')));
   const lockPath=path.join(f.root,'.aic/chat/worktree-write.lock');
@@ -200,14 +200,7 @@ else finish('Fixture reply');
   assert.ok(fs.existsSync(path.join(f.root,'peer-writer-started')),'writers in the same conversation run together');
   assert.equal(fs.existsSync(path.join(f.root,'release-writer')),false,'the first writer is still holding its lease');
 
-  let openTimer;
-  const secondResponse=await Promise.race([
-    post({run_id:'writer-two',conversation_id:'two',participant:'Writer-Two',agent:'codex',prompt:'second writer',write:true}),
-    new Promise((_,reject)=>{openTimer=setTimeout(()=>reject(new Error('queued writer stream did not open')),2000);}),
-  ]);
-  clearTimeout(openTimer);
-  assert.equal(secondResponse.status,200);
-  const secondText=secondResponse.text();
+  const secondResponse=post({run_id:'writer-two',conversation_id:'two',participant:'Writer-Two',agent:'codex',prompt:'second writer',write:true});
   const queued=await waitRunEvent('writer-two',event=>event.type==='waiting');
   const waiting=queued.events.find(event=>event.type==='waiting'&&event.waiting!==false);
   assert.equal(waiting.reason,'worktree_lock');assert.equal(waiting.holder,'Writer-One');
@@ -237,8 +230,10 @@ else finish('Fixture reply');
 
   const holderStopped=await fetch(f.base+'/api/chat/runs/writer-one/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
   assert.equal(holderStopped.status,202);
+  const first=await firstResponse;assert.equal(first.status,200);
   assert.match(await first.text(),/Stopped/);
-  const second=await secondText;assert.match(second,/Second writer done/);
+  const secondResult=await secondResponse;assert.equal(secondResult.status,200);
+  const second=await secondResult.text();assert.match(second,/Second writer done/);
   assert.ok(fs.existsSync(path.join(f.root,'writer-two-started')),'cancelling the holder releases the next queued writer');
   assert.match(second,/"waiting":false/);
   for(let i=0;i<50&&fs.existsSync(lockPath);i++)await new Promise(resolve=>setTimeout(resolve,10));

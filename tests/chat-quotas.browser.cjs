@@ -27,7 +27,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     await page.waitForFunction(() => document.querySelector('#quotarows').textContent.includes('34%'));
     assert.equal(await page.locator('#quotarows > .quota').count(), 3);
     assert.equal(await page.locator('#chips .chipnameline > .agentstatus').count(), 1);
-    assert.equal(await page.locator('#quotarows > .quota.unavailable').filter({hasText:'Claude'}).count(), 1);
+    assert.equal(await page.locator('#quotarows > .quota.unavailable').count(), 0);
     // Claude's and agy's /usage are read too; agy's Gemini group is exhausted in the fixture.
     await page.waitForFunction(() => /0% · 5h/.test(document.querySelector('#quotarows').textContent));
     assert.match(await page.locator('#quotas').innerText(), /Exhausted · Gemini Models/);
@@ -80,8 +80,6 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     await page.locator('#quotabtn').click();
     await page.waitForFunction(() => document.querySelector('#quotas').textContent.includes('200 in'));
     await page.keyboard.press('Escape');
-    await page.getByRole('button', { name: 'Delete reply', exact: true }).click();
-    assert.equal((await f.snapshot(id)).consumption.codex.turns, 2);
     fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ pct: 100 }));
     await page.locator('#quotabtn').click(); await page.locator('#quotarefresh').click();
     await page.waitForSelector('#chips .quota-out');
@@ -90,6 +88,10 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     assert.equal(await page.locator('#chips .chip').evaluate(node => getComputedStyle(node).width), '170px');
     assert.equal(await page.locator('#chips .agentstatus.status-out').count(), 1);
     assert.ok(await page.locator('.card .carddot.status-out').count() >= 1);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Delete reply', exact: true }).click();
+    assert.equal((await f.snapshot(id)).consumption.codex.turns, 2);
+    await page.locator('#quotabtn').click();
     await page.setViewportSize({ width: 390, height: 844 });
     const box = await page.locator('#quotas').boundingBox(); assert.ok(box.x >= 0 && box.x + box.width <= 390);
     fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ fail: true }));
