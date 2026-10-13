@@ -495,11 +495,7 @@ fn snapshot_selected(root: &Path, config: &Config, selected: Option<&[String]>) 
             } else if d.installation == "missing" {
                 d.readiness = "blocked".into();
                 d.reason = "Agent CLI not available".into();
-                d.action = if context == "sandbox" {
-                    "aic sandbox build".into()
-                } else {
-                    installation_url(&cfg.binary).into()
-                };
+                d.action = installation_action(&cfg.binary, context, host);
             } else if d.authentication == "login_required" {
                 d.readiness = "blocked".into();
                 d.reason = "Login required".into();
@@ -537,6 +533,14 @@ pub fn installation_url(binary: &str) -> &'static str {
         "https://github.com/google-antigravity/antigravity-cli"
     } else {
         "https://code.claude.com/docs/en/setup"
+    }
+}
+
+fn installation_action(binary: &str, context: &str, installed_on_host: bool) -> String {
+    if context == "sandbox" && installed_on_host {
+        "aic sandbox build".into()
+    } else {
+        installation_url(binary).into()
     }
 }
 /// Classification produces only fixed public strings; vendor output stays private.
@@ -799,6 +803,21 @@ mod tests {
         assert_eq!(classify_error("HTTP 429").0, "execution");
         assert_eq!(classify_error("token expired").0, "authentication");
         assert_eq!(classify_error("network error").0, "network");
+    }
+    #[test]
+    fn missing_agent_recommends_install_before_rebuilding_sandbox() {
+        assert_eq!(
+            installation_action("codex", "sandbox", false),
+            "https://developers.openai.com/codex/cli/"
+        );
+        assert_eq!(
+            installation_action("codex", "sandbox", true),
+            "aic sandbox build"
+        );
+        assert_eq!(
+            installation_action("agy", "host", false),
+            "https://github.com/google-antigravity/antigravity-cli"
+        );
     }
     #[test]
     fn execution_failure_restores_test_action_after_success() {

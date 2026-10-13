@@ -25,12 +25,12 @@ pub const DEFAULT_CLAUDE_VERSION: &str = "2.1.287";
 /// from a recent host runnable, and a static musl build runs anywhere.
 pub fn sandbox_dockerfile(include_agy: bool, include_codex: bool) -> String {
     let agy = if include_agy {
-        "COPY agy /usr/local/bin/agy\n"
+        "COPY --chmod=0755 agy /usr/local/bin/agy\n"
     } else {
         ""
     };
     let codex = if include_codex {
-        "COPY codex /usr/local/bin/codex\nCOPY codex-code-mode-host /usr/local/bin/codex-code-mode-host\n"
+        "COPY --chmod=0755 codex /usr/local/bin/codex\nCOPY --chmod=0755 codex-code-mode-host /usr/local/bin/codex-code-mode-host\n"
     } else {
         ""
     };
@@ -58,14 +58,16 @@ mod tests {
         assert!(with.contains("claude-code@${CLAUDE_VERSION}"));
         assert!(with.contains("&& npm cache clean --force"));
         assert_eq!(with.lines().filter(|line| line.starts_with("RUN ")).count(), 1);
-        assert!(with.contains("COPY agy /usr/local/bin/agy"));
-        assert!(with.contains("COPY codex /usr/local/bin/codex"));
-        assert!(with.contains("COPY codex-code-mode-host /usr/local/bin/codex-code-mode-host"));
+        assert!(with.contains("COPY --chmod=0755 agy /usr/local/bin/agy"));
+        assert!(with.contains("COPY --chmod=0755 codex /usr/local/bin/codex"));
+        assert!(with.contains(
+            "COPY --chmod=0755 codex-code-mode-host /usr/local/bin/codex-code-mode-host"
+        ));
         assert!(with.contains("chmod 1777 /home/aic"));
         assert!(with.starts_with("FROM docker.io/library/node:22-trixie-slim\n"));
         // aic is mounted at run time, not baked in.
         assert!(!with.contains("aic /usr/local/bin/aic"));
-        assert!(!sandbox_dockerfile(false, false).contains("COPY agy"));
-        assert!(!sandbox_dockerfile(false, false).contains("COPY codex"));
+        assert!(!sandbox_dockerfile(false, false).contains("agy /usr/local/bin/agy"));
+        assert!(!sandbox_dockerfile(false, false).contains("codex /usr/local/bin/codex"));
     }
 }
