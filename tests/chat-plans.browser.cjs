@@ -19,7 +19,7 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
   if(linked)c.plan_binding=clone(bindings.get('source'));
   const plans=new Map([['alpha',makePlan('alpha')],['beta',makePlan('beta')],['other',makePlan('other','/repo-other')]]);
   const f={saved:{state:{convs:[c],current:c.id,layout:'auto'},drafts:{}},requests:[],plans,bindings,runs:new Map(),
-    fail:null,old,errors:[],revision:1,managed:linked,used:new Set()};
+    fail:null,missingLoop:false,old,errors:[],revision:1,managed:linked,used:new Set()};
   const send=(res,status,data) => {res.writeHead(status,{'Content-Type':typeof data==='string'?'text/plain':'application/json'});res.end(typeof data==='string'?data:JSON.stringify(data));};
   const git=checkout=>({repository:'repo',checkout,branch:'main',sha:'abc123',label:'main'});
   const server=http.createServer(async(req,res)=>{
@@ -43,6 +43,18 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
         if(runRoute[2]==='stop'){run.state='stopped';run.events.push({type:'done',ok:false,error:'Stopped.',stopped:true,seq:run.events.length+1});return send(res,202,{id:runRoute[1],state:'stopping'});}
         if(runRoute[2]==='force')return send(res,202,{id:runRoute[1],state:'forcing'});
         const after=Number(url.searchParams.get('after')||0);return send(res,200,{id:runRoute[1],state:run.state,events:run.events.filter(event=>event.seq>after)});
+      }
+      if(/^\/api\/chat\/loops\/[^/]+\/implementer$/.test(url.pathname)){
+        if(f.missingLoop)return send(res,404,'loop not found');
+        const conversation=f.saved.state.convs.find(item=>item.id===body.conversation_id);
+        const loop=conversation?.engineeringLoop;
+        const selected=conversation?.participants.find(item=>item.name===body.participant);
+        if(!loop)return send(res,404,'loop not found');
+        if(!selected||selected.inactive||!selected.write||selected.name===loop.reviewer)return send(res,409,'invalid implementer');
+        return send(res,200,{
+          state:'running',phase:'implementing',round:2,turns:1,max_rounds:3,max_turns:6,mode:'review_first',
+          implementer:selected.name,reviewer:loop.reviewer,current:selected.name,reason:null,
+        });
       }
       if(/^\/api\/chat\/loops\/[^/]+\/stop$/.test(url.pathname))return send(res,202,{state:'stopped'});
       if(/^\/api\/chat\/loops\/[^/]+\/round$/.test(url.pathname))return send(res,202,body.decision==='approve'
@@ -128,6 +140,10 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
           if(body.engineering_loop.objective.startsWith('Review '))reply='Implemented. <!-- aic-loop {"action":"review","target":"Reviewer"} -->';
         }
         if(body.engineering_loop?.phase==='reviewing'){
+          if(body.engineering_loop.objective==='Approve existing work')reply='Approved. <!-- aic-loop {"verdict":"approved"} -->';
+          if(body.engineering_loop.objective==='Needs an implementer')reply=body.engineering_loop.turns===0
+            ?'Changes needed. <!-- aic-loop {"verdict":"changes_requested"} -->'
+            :'Approved after the fix. <!-- aic-loop {"verdict":"approved"} -->';
           if(body.engineering_loop.objective==='Review without target')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested"} -->';
           if(body.engineering_loop.objective==='Review wrong target')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested","target":"Other"} -->';
           if(body.engineering_loop.objective==='Review at limit')reply='Changes needed. <!-- aic-loop {"verdict":"changes_requested","target":"Dev"} -->';
@@ -373,7 +389,7 @@ test('Loop Engineering selects a reviewer by role, persists progress and stops e
     assert.match(await t.page.locator('#engineeringloopstatus').innerText(),/Round 1\/3 · Paused · Reviewer/);
     const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat').map(request=>request.body);
     assert.equal(turns.length,2);assert.equal(turns[0].participant,'Dev');assert.equal(turns[1].participant,'Reviewer');
-    assert.equal(turns[0].engineering_loop.id,loop.id);assert.match(turns[1].system,/structured verdict/);
+    assert.equal(turns[0].engineering_loop.id,loop.id);assert.equal(turns[0].engineering_loop.reviewer,'Reviewer');assert.match(turns[1].system,/machine-readable directive/);
     await t.page.locator('#engineeringloopstop').click();
     assert.equal(await t.page.locator('#engineeringloop').isHidden(),true);
     assert.ok(t.f.requests.some(request=>request.method==='POST'&&request.path.endsWith('/stop')&&request.path.includes('/api/chat/loops/')));
@@ -381,40 +397,111 @@ test('Loop Engineering selects a reviewer by role, persists progress and stops e
   }finally{await t.close();}
 });
 
-test('Loop Engineering pauses instead of choosing a reviewer when the handoff is missing',options,async()=>{
-  const t=await setup({team:true});try{
-    await t.page.locator('#input').fill('/loop Missing handoff');await t.page.locator('#send').click();
-    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+test('/review starts a review-first Engineering Loop with one participant',options,async()=>{
+  const t=await setup();try{
+    await t.page.locator('#input').fill('/review Approve existing work');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='approved');
     const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
-    assert.equal(loop.turns,1);assert.equal(loop.phase,'implementing');assert.equal(loop.reviewer,null);
-    assert.match(loop.reason,/valid handoff/);
-    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
-    assert.equal(turns.length,1);assert.equal(turns[0].body.participant,'Dev');
+    assert.equal(loop.mode,'review_first');assert.equal(loop.phase,'reviewing');
+    assert.equal(loop.reviewer,'Dev');assert.equal(loop.implementer,null);
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat').map(request=>request.body);
+    assert.equal(turns.length,1);assert.equal(turns[0].participant,'Dev');assert.equal(turns[0].engineering_loop.mode,'review_first');
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
-test('Loop Engineering rejects replacing an explicitly selected reviewer',options,async()=>{
+test('review-first waits for a writable implementer when changes are requested',options,async()=>{
+  const t=await setup();try{
+    await t.page.locator('#input').fill('/loop review Needs an implementer');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='awaiting_implementer');
+    assert.equal(await t.page.locator('#engineeringloopassignment').isVisible(),true);
+    assert.equal(await t.page.locator('#engineeringloopassign').isDisabled(),true);
+    await t.page.evaluate(()=>{
+      cur().participants.push({name:'Fixer',agent:'codex',role:'Developer',write:true,model:'',effort:'',session:'',seen:0});
+      save();render();
+    });
+    await t.page.locator('#engineeringloopimplementer').selectOption('Fixer');
+    await t.page.locator('#engineeringloopassign').click();
+    await t.page.waitForFunction(()=>cur().log.some(entry=>entry.from==='Fixer'));
+    const posts=t.f.requests.filter(request=>request.method==='POST');
+    const statePost=posts.findIndex(request=>request.path==='/api/chat/state'&&request.body.state.convs
+      .some(conversation=>conversation.participants.some(participant=>participant.name==='Fixer')));
+    const implementerPost=posts.findIndex(request=>request.path.endsWith('/implementer')&&request.body.participant==='Fixer');
+    assert.ok(statePost>=0);assert.ok(implementerPost>statePost);
+    assert.ok(posts.some(request=>request.path==='/api/chat'&&request.body.participant==='Fixer'));
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('review-first preserves implementer selection state when its durable loop is missing',options,async()=>{
+  const t=await setup();try{
+    await t.page.locator('#input').fill('/review Needs an implementer');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='awaiting_implementer');
+    await t.page.evaluate(()=>{
+      cur().participants.push({name:'Fixer',agent:'codex',role:'Developer',write:true,model:'',effort:'',session:'',seen:0});
+      save();render();
+    });
+    t.f.missingLoop=true;
+    await t.page.locator('#engineeringloopimplementer').selectOption('Fixer');
+    await t.page.locator('#engineeringloopassign').click();
+    await t.page.waitForFunction(()=>document.querySelector('#engineeringloopassign').textContent==='Continue');
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.state,'awaiting_implementer');assert.equal(loop.implementer,null);
+    assert.equal(t.f.requests.filter(request=>request.path==='/api/chat'&&request.body.participant==='Fixer').length,0);
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering starts mandatory review when the implementer omits a handoff',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.locator('#input').fill('/loop Missing handoff');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.turns,2);assert.equal(loop.phase,'reviewing');assert.equal(loop.reviewer,'Reviewer');
+    assert.match(loop.reason,/structured verdict/);
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
+    assert.deepEqual(turns.map(turn=>turn.body.participant),['Dev','Reviewer']);
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering never selects a read-only recipient as implementer',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.evaluate(()=>{
+      const c=cur(),reviewer=c.participants.find(participant=>participant.name==='Reviewer');
+      reviewer.write=false;c.sendTo=['Reviewer'];save();render();
+    });
+    await t.page.locator('#input').fill('/loop Keep the writer as implementer');await t.page.locator('#send').click();
+    await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+    const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
+    assert.equal(loop.implementer,'Dev');assert.equal(loop.reviewer,'Reviewer');
+    const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
+    assert.deepEqual(turns.map(turn=>turn.body.participant),['Dev','Reviewer']);
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('Loop Engineering ignores implementer attempts to replace the selected reviewer',options,async()=>{
   const t=await setup({team:true});try{
     await t.page.locator('#input').fill('/loop @Dev @Reviewer Change reviewer');await t.page.locator('#send').click();
     await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
     const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
-    assert.equal(loop.turns,1);assert.equal(loop.phase,'implementing');assert.equal(loop.reviewer,'Reviewer');
-    assert.match(loop.reason,/changed the selected reviewer/);
+    assert.equal(loop.turns,2);assert.equal(loop.phase,'reviewing');assert.equal(loop.reviewer,'Reviewer');
+    assert.match(loop.reason,/structured verdict/);
     const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
-    assert.equal(turns.length,1);assert.equal(turns[0].body.participant,'Dev');
+    assert.deepEqual(turns.map(turn=>turn.body.participant),['Dev','Reviewer']);
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 
 for(const [objective,label] of [['Review without target','missing'],['Review wrong target','incorrect']]){
-  test(`Loop Engineering pauses when changes_requested has a ${label} target`,options,async()=>{
+  test(`Loop Engineering routes changes_requested with a ${label} target to its stored implementer`,options,async()=>{
     const t=await setup({team:true});try{
+      await t.page.evaluate(()=>{loopMaxRounds=1});
       await t.page.locator('#input').fill(`/loop @Dev @Reviewer ${objective}`);await t.page.locator('#send').click();
-      await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='paused');
+      await t.page.waitForFunction(()=>cur().engineeringLoop?.state==='awaiting_round_approval');
       const loop=await t.page.evaluate(()=>structuredClone(cur().engineeringLoop));
       assert.equal(loop.turns,2);assert.equal(loop.round,1);assert.equal(loop.phase,'reviewing');
-      assert.match(loop.reason,/invalid participant/);
       const turns=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
       assert.deepEqual(turns.map(request=>request.body.participant),['Dev','Reviewer']);
       assert.deepEqual(t.errors,[]);

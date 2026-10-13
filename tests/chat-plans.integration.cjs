@@ -116,7 +116,7 @@ if(args.includes('single word READY')){send({type:'item.completed',item:{type:'a
 send({type:'thread.started',thread_id:'loop-session'});
 const text=args.includes('You are the reviewer')
   ?(args.includes('Request changes')?'Changes. <!-- aic-loop {"verdict":"changes_requested","target":"Impl"} -->':'Approved. <!-- aic-loop {"verdict":"approved"} -->')
-  :'Implemented. <!-- aic-loop {"action":"review","target":"Review"} -->';
+  :'Implemented without selecting or calling a reviewer.';
 send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.completed'});
 `,{mode:0o755});
   execFileSync(path.resolve(process.env.AIC_TEST_BINARY),['agent','test','codex','--yes'],{cwd:f.root,env:{...process.env,AIC_CONFIG_DIR:path.join(f.root,'config'),AIC_IN_SANDBOX:'1'}});
@@ -125,12 +125,12 @@ send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.
     {name:'Review',agent:'codex',write:false,session:'',seen:0,role:'Reviewer'},
   ],log:[],round:0,checkout:null,updated:Date.now()};
   await send(f,'/api/chat/state',{state:{convs:[conversation],current:'loop-chat'},drafts:{}});
-  const initial={id:'loop-http',state:'running',phase:'implementing',round:1,turns:0,maxRounds:2,maxTurns:4,implementer:'Impl',reviewer:null,current:'Impl',objective:'Build the feature'};
+  const initial={id:'loop-http',state:'running',phase:'implementing',round:1,turns:0,maxRounds:2,maxTurns:4,implementer:'Impl',reviewer:'Review',current:'Impl',objective:'Build the feature'};
   const implemented=await send(f,'/api/chat',{run_id:'loop-http-1',conversation_id:'loop-chat',participant:'Impl',agent:'codex',prompt:'Start the loop',write:true,engineering_loop:initial});
-  assert.match(implemented,/aic-loop/);
+  assert.match(implemented,/without selecting/);
   let snapshot=await send(f,'/api/chat/loops/loop-http');
   assert.equal(snapshot.state,'running');assert.equal(snapshot.phase,'reviewing');assert.equal(snapshot.turns,1);assert.equal(snapshot.current,'Review');
-  const review={...initial,phase:'reviewing',turns:1,reviewer:'Review',current:'Review'};
+  const review={...initial,phase:'reviewing',turns:1,current:'Review'};
   const reviewed=await send(f,'/api/chat',{run_id:'loop-http-2',conversation_id:'loop-chat',participant:'Review',agent:'codex',session_id:'loop-session',prompt:'Review the implementation',write:false,engineering_loop:review});
   assert.match(reviewed,/approved/);
   snapshot=await send(f,'/api/chat/loops/loop-http');
@@ -146,6 +146,16 @@ send({type:'item.completed',item:{type:'agent_message',text}});send({type:'turn.
   await send(f,'/api/chat/loops/loop-round-http/round',{conversation_id:'other',decision:'approve'},409);
   const extra=await send(f,'/api/chat/loops/loop-round-http/round',{conversation_id:'loop-chat',decision:'approve'});
   assert.equal(extra.state,'running');assert.equal(extra.round,2);assert.equal(extra.max_rounds,2);assert.equal(extra.max_turns,4);
+
+  const reviewFirst={id:'review-first-http',mode:'review_first',state:'running',phase:'reviewing',round:1,turns:0,
+    maxRounds:2,maxTurns:4,implementer:null,reviewer:'Review',current:'Review',objective:'Review existing implementation'};
+  await send(f,'/api/chat',{run_id:'review-first-http-1',conversation_id:'loop-chat',participant:'Review',agent:'codex',
+    prompt:'Request changes to existing implementation',write:false,engineering_loop:reviewFirst});
+  snapshot=await send(f,'/api/chat/loops/review-first-http');
+  assert.equal(snapshot.state,'awaiting_implementer');assert.equal(snapshot.implementer,null);assert.equal(snapshot.mode,'review_first');
+  await send(f,'/api/chat/loops/review-first-http/implementer',{conversation_id:'loop-chat',participant:'Review'},409);
+  const selected=await send(f,'/api/chat/loops/review-first-http/implementer',{conversation_id:'loop-chat',participant:'Impl'});
+  assert.equal(selected.state,'running');assert.equal(selected.phase,'implementing');assert.equal(selected.round,2);assert.equal(selected.current,'Impl');
  }finally{await f.close();}
 });
 
