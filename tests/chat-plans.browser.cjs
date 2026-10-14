@@ -186,6 +186,47 @@ async function chooser(page,mode='existing'){
 async function link(page,id){await chooser(page);await page.locator('#existingplan').selectOption(id);await page.locator('#planapply').click();await page.waitForSelector('#plandialog',{state:'hidden'});await page.waitForFunction(()=>document.querySelector('#planlabel').textContent.startsWith('Plan '));}
 async function reply(page,text){await page.locator('#input').fill(text);await page.locator('#send').click();await page.waitForFunction(()=>cur().log.some(e=>e.text==='Fixture reply'&&!e.pending));}
 
+test('reply layout and three chat widths stay independent and persist globally',options,async()=>{
+  const t=await setup({history:true},{width:1536,height:900});try{
+    const side=t.page.getByRole('button',{name:'Replies side by side',exact:true});
+    const stack=t.page.getByRole('button',{name:'Replies stacked',exact:true});
+    const width=t.page.locator('#layout .chatwidth');
+    assert.equal(await side.count(),1,'side-by-side remains available with one participant');
+    assert.equal(await stack.count(),1,'stacked remains available with one participant');
+    assert.equal(await width.getAttribute('data-level'),'1');
+    assert.equal(await side.getAttribute('aria-pressed'),'true');
+    assert.equal(await t.page.locator('.expandbtn').count(),1);
+    assert.equal(await t.page.locator('.user .to').innerText(),'TO: Dev','legacy messages addressed to everyone list the participants');
+    assert.equal(await t.page.locator('.user').evaluate(node=>getComputedStyle(node).borderRightWidth),'3px');
+
+    await stack.click();
+    assert.equal(await stack.getAttribute('aria-pressed'),'true');
+    assert.equal(await t.page.locator('.expandbtn').count(),0,'stacked replies have no per-message expansion control');
+    const stacked=await t.page.locator('.wrap, .user, .row.solo').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().width));
+    assert.ok(stacked.every(value=>Math.abs(value-stacked[0])<1),'stacked user messages and lone replies fill the same conversation column');
+
+    const widths=[],composerWidths=[];
+    widths.push(await t.page.locator('.wrap').evaluate(node=>node.getBoundingClientRect().width));
+    composerWidths.push(await t.page.locator('#form').evaluate(node=>node.getBoundingClientRect().width));
+    await width.click();widths.push(await t.page.locator('.wrap').evaluate(node=>node.getBoundingClientRect().width));
+    composerWidths.push(await t.page.locator('#form').evaluate(node=>node.getBoundingClientRect().width));
+    assert.equal(await width.getAttribute('data-level'),'2');
+    await width.click();widths.push(await t.page.locator('.wrap').evaluate(node=>node.getBoundingClientRect().width));
+    composerWidths.push(await t.page.locator('#form').evaluate(node=>node.getBoundingClientRect().width));
+    assert.equal(await width.getAttribute('data-level'),'3');
+    assert.ok(widths[0]<widths[1]&&widths[1]<widths[2],`chat area grows at every level: ${widths.join(', ')}`);
+    assert.ok(composerWidths[0]<composerWidths[1]&&composerWidths[1]<composerWidths[2],`composer grows at every level: ${composerWidths.join(', ')}`);
+    assert.equal(await side.getAttribute('aria-pressed'),'false','width changes do not alter reply layout');
+
+    await t.page.waitForFunction(async()=>{const saved=await(await fetch('/api/chat/state')).json();return saved.state?.layout==='stack'&&saved.state?.chatWidth===3;});
+    await t.page.reload();await t.page.waitForSelector('#chips .chip');
+    assert.equal(await t.page.getByRole('button',{name:'Replies stacked',exact:true}).getAttribute('aria-pressed'),'true');
+    assert.equal(await t.page.locator('#layout .chatwidth').getAttribute('data-level'),'3');
+    assert.equal(await t.page.locator('.expandbtn').count(),0);
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
 test('free conversation writes without a plan; Cancel and Esc never create/link plans',options,async()=>{
   const t=await setup();try{
     assert.equal(await t.page.locator('dialog[open]').count(),0);
@@ -197,6 +238,7 @@ test('free conversation writes without a plan; Cancel and Esc never create/link 
     await chooser(t.page);await t.page.locator('#existingplan').selectOption('alpha');await t.page.keyboard.press('Escape');
     assert.equal(mutationRequests(t.f).length,0);assert.equal(await t.page.locator('#input').inputValue(),'My unsent draft');
     await reply(t.page,'Free work');const request=t.f.requests.find(r=>r.path==='/api/chat').body;
+    assert.deepEqual((await current(t.page)).log.findLast(entry=>entry.from==='you').to,['Dev']);
     assert.equal(request.write,true);assert.equal(request.plan_id,undefined);assert.equal(request.task_id,undefined);assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
