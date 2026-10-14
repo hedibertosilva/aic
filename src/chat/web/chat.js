@@ -8,7 +8,7 @@ const DRAFTS_KEY = "aic-chat-drafts";
 const DRAFT_PASTES_KEY = "aic-chat-draft-pastes";
 const CACHE_REPO_KEY = "aic-chat-cache-repo-v1";
 const THEME_KEY = "aic-chat-theme";
-let state = { convs: [], current: null, layout: "auto" };
+let state = { convs: [], current: null, layout: "columns", chatWidth: 1 };
 let drafts = {}; // conversation id -> unsent text, saved apart from the (big) state
 let draftPastes = {}; // conversation id -> text hidden behind movable paste markers
 let meta = { agents: [], details: {}, default: "", repo: "", sandboxed: false };
@@ -136,6 +136,8 @@ function normalizeState() {
   if (!Array.isArray(state.convs)) state.convs = [];
   if (state.stack) state.layout = "stack";
   delete state.stack;
+  if (state.layout !== "stack" && state.layout !== "columns") state.layout = "columns";
+  state.chatWidth = Number.isInteger(state.chatWidth) && state.chatWidth >= 1 && state.chatWidth <= 3 ? state.chatWidth : 1;
   state.convs.forEach((c) => {
     if (c.pinned !== true) delete c.pinned;
     if (c.plan_binding) hydratePlanBinding(c, c.plan_binding);
@@ -1145,16 +1147,25 @@ function renderBar() {
   add.disabled = !c || !meta.agents.length;
 
   const lay = $("layout"); lay.textContent = "";
-  if (c && c.participants.length > 1) {
+  if (c && c.participants.length) {
     const opt = (mode, kind, label) => {
-      const b = iconBtn(kind, label + (state.layout === mode ? " (click again for automatic)" : ""), () => {
-        state.layout = state.layout === mode ? "auto" : mode; save(); renderBar(); renderLog(true);
+      const b = iconBtn(kind, label, () => {
+        if (state.layout === mode) return;
+        state.layout = mode; save(); renderBar(); renderLog(true);
       });
       b.setAttribute("aria-pressed", String(state.layout === mode));
       lay.appendChild(b);
     };
     opt("columns", "columns", "Replies side by side");
     opt("stack", "stack", "Replies stacked");
+    const level = state.chatWidth;
+    const next = level === 3 ? 1 : level + 1;
+    const width = iconBtn("expand", `Chat area width: level ${level} of 3. Change to level ${next}`, () => {
+      state.chatWidth = next; save(); renderBar(); renderLog(true);
+    });
+    width.classList.add("chatwidth");
+    width.dataset.level = String(level);
+    lay.appendChild(width);
   }
 }
 
@@ -1189,7 +1200,7 @@ const expanded = new Map(); // "conversation:round" -> participant name
 const expKey = (c, round) => c.id + ":" + round;
 const isExpanded = (c, e) => expanded.get(expKey(c, e.round)) === e.from;
 function applyFocus(c, r) {
-  const who = expanded.get(expKey(c, r.round)), on = !!who && r.cards.some((x) => x.name === who);
+  const who = expanded.get(expKey(c, r.round)), on = state.layout !== "stack" && !!who && r.cards.some((x) => x.name === who);
   r.el.classList.toggle("focus", on);
   r.cards.forEach((x) => {
     x.node.classList.toggle("expanded", on && x.name === who);
@@ -1231,7 +1242,7 @@ function paintCard(c, e) {
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
+  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), state.layout, isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
     applyParticipantColour(k.card, hueFor(c, e.from));
     k.head.textContent = "";
     const identity = el("span", "cardidentity");
@@ -1245,9 +1256,12 @@ function paintCard(c, e) {
     if (context.childElementCount) k.head.appendChild(context);
     const tools = el("span", "cardtools");
     if (e.pending) tools.appendChild(iconBtn("stop", "Stop " + e.from, () => stopEntry(c, e)));
-    const on = isExpanded(c, e), ex = iconBtn(on ? "collapse" : "expand", on ? "Collapse reply" : "Expand reply", () => toggleExpand(c, e));
-    ex.classList.add("expandbtn"); ex.setAttribute("aria-expanded", String(on));
-    tools.appendChild(ex); k.head.appendChild(tools);
+    if (state.layout !== "stack") {
+      const on = isExpanded(c, e), ex = iconBtn(on ? "collapse" : "expand", on ? "Collapse reply" : "Expand reply", () => toggleExpand(c, e));
+      ex.classList.add("expandbtn"); ex.setAttribute("aria-expanded", String(on));
+      tools.appendChild(ex);
+    }
+    k.head.appendChild(tools);
   }
 
   if (changed("status", [e.pending, e.activity || "", !!e.text, e.waiting || null])) {
@@ -1363,7 +1377,10 @@ function userBubble(c, e) {
   const u = el("div", "user");
   const fill = () => {
     u.textContent = "";
-    if (e.to) u.appendChild(el("span", "to", "TO · " + e.to.join(", ")));
+    // New entries retain their exact recipients. Legacy entries omitted `to`
+    // to mean everyone, so use the conversation's participant names for them.
+    const to = e.to?.length ? e.to : c.participants.map((p) => p.name);
+    u.appendChild(el("span", "to", "TO: " + (to.length ? to.join(", ") : "No participants")));
     const text = el("div", "text");
     renderUserMessage(text, e);
     u.appendChild(text);
@@ -1424,6 +1441,7 @@ const view = { id: null, sig: "", entries: [], wrap: null, after: null, rows: ne
 const logSig = (c) => JSON.stringify([c.participants.map((p) => [p.name, p.agent, p.model, p.write, hueOf(p)]), state.layout]);
 function renderLog(force) {
   const c = cur(), msgs = $("msgs");
+  document.documentElement.dataset.chatWidth = String(state.chatWidth);
   msgs.classList.toggle("stack", state.layout === "stack");
   msgs.classList.toggle("cols", state.layout === "columns");
   if (!c || !c.log.length) { view.id = null; msgs.replaceChildren(emptyState(c)); return; }
@@ -1941,7 +1959,8 @@ async function launch(c, targets, userText, to, opts = {}) {
   c.updated = Date.now();
   if (userText) {
     const first = !c.log.some((e) => e.from === "you");
-    c.log.push({ from: "you", round, text: userText, t0: Date.now(), ...(to ? { to } : {}),
+    const addressedTo = to?.length ? to : targets.map((p) => p.name);
+    c.log.push({ from: "you", round, text: userText, t0: Date.now(), to: addressedTo,
       ...(opts.edited ? { edited: true } : {}), ...(opts.pasted?.length ? { pasted: opts.pasted } : {}) });
     if (first && !c.renamed) c.title = userText.slice(0, 48);
   }
@@ -3135,7 +3154,7 @@ document.addEventListener("keydown", (e) => {
     if (Number.isSafeInteger(saved.revision)) remoteRevision = saved.revision;
     if (saved.state && typeof saved.state === "object" && Array.isArray(saved.state.convs)) {
       const localPastes = draftPastes;
-      state = Object.assign({ convs: [], current: null, layout: "auto" }, saved.state);
+      state = Object.assign({ convs: [], current: null, layout: "columns", chatWidth: 1 }, saved.state);
       const remotePastes = state.pastedDrafts && typeof state.pastedDrafts === "object" && !Array.isArray(state.pastedDrafts) ? state.pastedDrafts : {};
       draftPastes = { ...remotePastes, ...localPastes };
       state.pastedDrafts = draftPastes;

@@ -3,12 +3,20 @@
 /* ---------- tokens ---------- */
 :root {
   --radius: 0px;
+  --chat-max: 1040px; --chat-shell: 1080px;
   --bg: #fafaf9; --panel: #f0efec; --fg: #1c1b1a; --muted: #6b6863; --line: #dcdad5;
   --user: #e4e9f2; --accent: #3b5bdb; --on-accent: #fff; --err: #c92a2a; --code: #ebe9e4; --card: #fff;
   --warn: #a14a00; --warn-bg: #fff3e0;
   --l: 36%; /* lightness of participant colours: dark enough on the light card */
   --shadow: 0 4px 14px rgba(0, 0, 0, .14);
 }
+:root[data-chat-width="2"] {
+  /* Halfway between the standard column and all currently available space.
+     Unlike a fixed max-width, this remains a distinct middle step on ordinary desktops. */
+  --chat-max: calc(50% + min(520px, 50%));
+  --chat-shell: calc(50% + min(540px, 50%));
+}
+:root[data-chat-width="3"] { --chat-max: 100%; --chat-shell: 100%; }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #161615; --panel: #1f1f1d; --fg: #e8e6e1; --muted: #9a978f; --line: #333330;
@@ -198,6 +206,9 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
   border: 1px solid var(--line); border-radius: var(--radius); padding: 2px; }
 #layout:empty { display: none; }
 #layout .icon[aria-pressed="true"] { color: var(--accent); background: var(--panel); }
+#layout .chatwidth { margin-left: 2px; border-left: 1px solid var(--line); }
+#layout .chatwidth[data-level="2"] { color: var(--fg); background: var(--panel); }
+#layout .chatwidth[data-level="3"] { color: var(--accent); background: var(--panel); }
 .wrap { max-width: 1100px; margin: 0 auto; }
 /* A round with 3+ replies breaks out of the 1100px column and spreads to the chat's width, 50px in from each side.
    Only that row changes, and not in the stacked layout; `cqw` is the width of #msgs, whose content box the .wrap is centred in. */
@@ -206,6 +217,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 
 .user { background: var(--user); border-radius: var(--radius); padding: 8px 14px; margin: 0 0 12px auto; max-width: 640px; position: relative;
   overflow-wrap: anywhere; width: fit-content; min-width: 120px; }
+#msgs.stack .user { width: 100%; max-width: none; }
 .user .text { white-space: pre-wrap; }
 .pastedtext { min-width: min(320px, 70vw); margin: 7px 0; background: var(--card); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); white-space: normal; }
 .pastedtextlabel { padding: 9px 11px; color: var(--muted); background: var(--panel); font-size: 11px; font-weight: 650; letter-spacing: .015em; }
@@ -235,6 +247,8 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 @media (max-width: 700px) { #msgs.cols .card.folded > :not(header) { display: none; } #msgs:not(.cols) .expandbtn { display: none; } }
 @media (prefers-reduced-motion: reduce) { .row.focus > .expanded { animation: none; } }
 #msgs.stack .row { display: block; }
+#msgs.stack .row.solo { max-width: none; }
+#msgs.stack .expandbtn { display: none; }
 #msgs.stack .row > * + * { margin-top: 12px; }
 
 .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px 6px;
@@ -878,7 +892,7 @@ main { background: transparent; }
 /* Conversation canvas */
 #view { background: transparent; }
 #msgs { padding: 24px 24px calc(var(--solid, 116px) + var(--composer-space, 0px) + 24px); }
-.wrap { max-width: 1040px; }
+.wrap { max-width: var(--chat-max); }
 #layout { top: 10px; right: 22px; padding: 3px; background: var(--card); border-color: var(--line); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
 #layout .icon { min-height: 28px; }
 .user {
@@ -887,6 +901,7 @@ main { background: transparent; }
   padding: 10px 14px;
   background: var(--user);
   border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--line));
+  border-right: 3px solid var(--accent);
   border-radius: var(--radius);
   box-shadow: 0 1px 0 rgba(15, 23, 42, .03);
 }
@@ -930,7 +945,7 @@ main { background: transparent; }
 /* Composer */
 #composer {
   --lead: 34px;
-  --side: max(20px, calc((100% - 1080px - var(--sb, 0px)) / 2 + 20px));
+  --side: max(20px, calc((100% - var(--chat-shell) - var(--sb, 0px)) / 2 + 20px));
   padding-bottom: 14px;
   position: absolute;
   inset: auto 0 0;
