@@ -365,7 +365,38 @@ function quotaVisualStatus(agent, model, inactive = false) {
   if (!q.fetched_at) return {kind: "unknown", label: "Quota status unavailable"};
   return {kind: "normal", label: "Quota normal"};
 }
-const quotaUsagePercent = (agent, model) => ChatQuotas.percent(ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)))?.used_pct);
+function quotaLimitSnapshot(agent, model) {
+  const window = ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)));
+  if (!ChatQuotas.numeric(window?.used_pct)) return null;
+  return { used_pct: window.used_pct, window_minutes: window.window_minutes, label: window.label, bucket: window.bucket };
+}
+function quotaLimitLabel(agent, model, snapshot) {
+  // Older entries have no snapshot and retain the previous live behavior.
+  const window = snapshot === undefined ? ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model))) : snapshot;
+  const percent = ChatQuotas.percent(window?.used_pct);
+  return percent ? `Limit used: ${percent} · ${ChatQuotas.windowLabel(window)}` : "";
+}
+async function captureQuotaAfterRun(c, entry) {
+  const agent = entry.agent || c.participants.find(p => p.name === entry.from)?.agent;
+  if (!agent) return;
+  const model = entry.model || c.participants.find(p => p.name === entry.from)?.model;
+  const before = quotaOf(agent, quotaModel(agent, model))?.fetched_at;
+  await refreshQuotas(agent, true);
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await fetchQuotaState();
+    const quota = quotaOf(agent, quotaModel(agent, model));
+    if (!quota?.reading) {
+      if (quota?.state !== "read_error" && quota?.fetched_at && quota.fetched_at !== before) {
+        entry.quota_limit = quotaLimitSnapshot(agent, model);
+        save();
+        if (cur() === c) paintCard(c, entry);
+      }
+      return;
+    }
+    await waitFor(250);
+  }
+}
 function quotaStatusDot(status, className) {
   const dot = el("span", className + " status-" + status.kind);
   dot.title = status.label; dot.setAttribute("aria-label", status.label); return dot;
@@ -1217,9 +1248,12 @@ function stamp(e) {
 }
 function usageText(u) {
   if (!u) return ["", ""];
-  const inTok = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+  const cached = (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+  const inTok = (u.input_tokens || 0) + cached;
   const parts = [];
-  if (inTok || u.output_tokens) parts.push(`${fmtK(inTok)} in · ${fmtK(u.output_tokens || 0)} out`);
+  if (inTok || u.output_tokens) {
+    parts.push(`${fmtK(u.input_tokens || 0)} in · ${fmtK(cached)} cached · ${fmtK(u.output_tokens || 0)} out`);
+  }
   if (u.cost_usd != null) parts.push("$" + u.cost_usd.toFixed(u.cost_usd < 1 ? 4 : 2));
   const detail = [
     inTok > 0 && `processed input: ${inTok}`,
@@ -1277,18 +1311,18 @@ function paintCard(c, e) {
   const k = cardParts.get(e); if (!k) return;
   const p = c.participants.find((x) => x.name === e.from);
   const turnAgent = e.agent || p?.agent, turnModel = e.agent ? e.model : p?.model;
-  const quotaStatus = quotaVisualStatus(turnAgent, turnModel, p?.inactive), quotaPercent = quotaUsagePercent(turnAgent, turnModel);
+  const quotaStatus = quotaVisualStatus(turnAgent, turnModel, p?.inactive), quotaLimit = quotaLimitLabel(turnAgent, turnModel, e.quota_limit);
   const changed = (part, key) => { const s = JSON.stringify(key); if (k.keys[part] === s) return false; k.keys[part] = s; return true; };
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), state.layout, isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
+  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), state.layout, isExpanded(c, e), quotaStatus.kind, quotaLimit])) {
     applyParticipantColour(k.card, hueFor(c, e.from));
     k.head.textContent = "";
     const identity = el("span", "cardidentity");
     identity.appendChild(quotaStatusDot(quotaStatus, "carddot"));
     identity.appendChild(el("span", "name", e.from));
-    if (turnAgent) identity.appendChild(el("small", "cardmeta", cap(turnAgent) + (quotaPercent ? " · " + quotaPercent : "")));
+    if (turnAgent) identity.appendChild(el("small", "cardmeta", cap(turnAgent) + (quotaLimit ? " · " + quotaLimit : "")));
     k.head.appendChild(identity);
     const context = el("span", "cardcontext");
     if (p?.write) context.appendChild(writeBadge());
@@ -1360,7 +1394,7 @@ function paintCard(c, e) {
       const tools = el("span", "hovertools");
       if (e.text && !e.error) tools.appendChild(iconBtn("copy", "Copy reply", function () { copyText(e.text, this); }));
       if (canRegen) tools.appendChild(iconBtn("retry", e.error ? "Try again" : "Regenerate", () => regenerate(c, e, p)));
-      if (!busy(c)) tools.appendChild(iconBtn("trash", "Delete reply", () => deleteEntry(c, e)));
+      if (canDeleteEntry(c, e)) tools.appendChild(iconBtn("trash", "Delete reply", () => deleteEntry(c, e)));
       k.foot.append(m, tools);
     }
   }
@@ -1467,8 +1501,11 @@ function resendEdited(c, e, text) {
   if (problem) { toast(problem); renderLog(true); return; }
   launch(c, targets, text, e.to || null, { edited: true });
 }
+function canDeleteEntry(c, e) {
+  return !busy(c) || (!!e.stopped && !e.pending);
+}
 function deleteEntry(c, e) {
-  if (busy(c)) { toast("Wait for the replies to finish."); return; }
+  if (!canDeleteEntry(c, e)) { toast("Wait for the replies to finish."); return; }
   const undo = removeEntry(c, e);
   save(); renderLog(true); renderComposer();
   toast(e.from === "you" ? "Message deleted" : `Reply from ${e.from} deleted`, () => { undo(); save(); renderLog(true); renderComposer(); });
@@ -2013,7 +2050,8 @@ async function launch(c, targets, userText, to, opts = {}) {
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
     const runId = globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
-    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}), ...(opts.loopTurn && c.engineeringLoop ? {loop_id:c.engineeringLoop.id} : {}) };
+    const model = j.p.model || meta.details?.[j.p.agent]?.model || "";
+    j.entry = { from: j.p.name, agent: j.p.agent, model, quota_limit: null, round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}), ...(opts.loopTurn && c.engineeringLoop ? {loop_id:c.engineeringLoop.id} : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -2061,12 +2099,13 @@ async function regenerate(c, e, p) {
 async function stopEntry(c, entry) {
   const p = c.participants.find(participant => participant.name === entry.from);
   const ctl = p && running.get(runKey(c, p));
-  if (!entry.run_id) { ctl?.abort(); return; }
+  if (!entry.run_id) { entry.stopped = true; ctl?.abort(); return; }
   try {
     const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '/stop', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
     });
     if (!response.ok && response.status !== 404) throw new Error(await response.text());
+    entry.stopped = true;
     ctl?.abort();
   } catch (error) { toast('Could not stop the execution: ' + (error.message || error)); }
 }
@@ -2199,7 +2238,7 @@ function finishRunUI(c, p, entry, key) {
     if (view.lastUser && !busy(c)) view.lastUser._fill();
   }
   render();
-  fetchQuotaState();
+  captureQuotaAfterRun(c, entry);
   if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
   if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
   else announce(`${p.name} finished.`);

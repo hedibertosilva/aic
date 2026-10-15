@@ -51,10 +51,12 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     assert.equal(await page.locator('#pquota').count(), 0);
     assert.match(await page.locator('.participantenvironment').innerText(), /Environment/);
     assert.equal(await page.locator('#psave').isEnabled(), true); await page.locator('#pcancel').click();
+    fs.writeFileSync(path.join(f.root, 'quota.json'), JSON.stringify({ pct: 83 }));
     await page.locator('#input').fill('hello fixture'); await page.locator('#send').click();
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('aic-chat-v2')).convs[0].log.some(e => e.agent === 'codex' && e.usage));
     await page.waitForFunction(() => !document.querySelector('.card .status:not([hidden])'));
-    assert.equal(await page.locator('.card .cardmeta').first().innerText(), 'Codex · 80%');
+    await page.waitForFunction(() => document.querySelector('.card .cardmeta')?.textContent.includes('83%'));
+    assert.equal(await page.locator('.card .cardmeta').first().innerText(), 'Codex · Limit used: 83% · 5h');
     const id = await page.evaluate(() => JSON.parse(localStorage.getItem('aic-chat-v2')).current);
     await page.locator('#quotabtn').click();
     await page.waitForFunction(() => document.querySelector('#quotas').textContent.includes('100 in'));
@@ -63,7 +65,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('gemini');
     assert.equal(await page.locator('#pquota').count(), 0);
     await page.locator('#psave').click();
-    assert.equal(await page.locator('.card header .cardmeta').first().innerText(), 'Codex · 80%');
+    assert.equal(await page.locator('.card header .cardmeta').first().innerText(), 'Codex · Limit used: 83% · 5h');
     await page.locator('#chips .chip').click(); await page.locator('#pagent').selectOption('codex');
     await page.locator('#psave').click();
     await page.locator('#list .conv.active .more').click();
@@ -88,6 +90,7 @@ test('chat quota panel, alerts, selector and conversation consumption', { skip: 
     assert.equal(await page.locator('#chips .chip').evaluate(node => getComputedStyle(node).width), '170px');
     assert.equal(await page.locator('#chips .agentstatus.status-out').count(), 1);
     assert.ok(await page.locator('.card .carddot.status-out').count() >= 1);
+    assert.equal(await page.locator('.card .cardmeta').first().innerText(), 'Codex · Limit used: 83% · 5h');
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Delete reply', exact: true }).click();
     assert.equal((await f.snapshot(id)).consumption.codex.turns, 2);

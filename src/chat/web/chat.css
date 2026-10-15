@@ -218,6 +218,7 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 .user { background: var(--user); border-radius: var(--radius); padding: 8px 14px; margin: 0 0 12px auto; max-width: 640px; position: relative;
   overflow-wrap: anywhere; width: fit-content; min-width: 120px; }
 #msgs.stack .user { width: 100%; max-width: none; }
+#msgs.stack .user textarea { width: 100%; }
 .user .text { white-space: pre-wrap; }
 .pastedtext { min-width: min(320px, 70vw); margin: 7px 0; background: var(--card); border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line)); white-space: normal; }
 .pastedtextlabel { padding: 9px 11px; color: var(--muted); background: var(--panel); font-size: 11px; font-weight: 650; letter-spacing: .015em; }

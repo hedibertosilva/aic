@@ -218,6 +218,13 @@ test('reply layout and three chat widths stay independent and persist globally',
     assert.equal(await t.page.locator('.expandbtn').count(),0,'stacked replies have no per-message expansion control');
     const stacked=await t.page.locator('.wrap, .user, .row.solo').evaluateAll(nodes=>nodes.map(node=>node.getBoundingClientRect().width));
     assert.ok(stacked.every(value=>Math.abs(value-stacked[0])<1),'stacked user messages and lone replies fill the same conversation column');
+    await t.page.getByRole('button',{name:'Edit and Resend'}).click();
+    const editWidths=await t.page.locator('.user').evaluate(node=>{
+      const textarea=node.querySelector('textarea'),style=getComputedStyle(node);
+      return {actual:textarea.getBoundingClientRect().width,available:node.clientWidth-parseFloat(style.paddingLeft)-parseFloat(style.paddingRight)};
+    });
+    assert.ok(Math.abs(editWidths.actual-editWidths.available)<1,`stacked message editor fills the available width: ${editWidths.actual} of ${editWidths.available}`);
+    await t.page.getByRole('button',{name:'Cancel'}).click();
 
     const widths=[],composerWidths=[];
     widths.push(await t.page.locator('.wrap').evaluate(node=>node.getBoundingClientRect().width));
@@ -433,6 +440,22 @@ test('refresh reconnects to an in-flight run and replays only missing events',op
     const posts=t.f.requests.filter(request=>request.method==='POST'&&request.path==='/api/chat');
     assert.equal(posts.length,1,'reload must reconnect instead of starting another provider turn');
     assert.ok(t.f.requests.some(request=>request.method==='GET'&&request.path==='/api/chat/runs/'+runId));
+    assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('a stopped participant reply can be deleted while other replies continue',options,async()=>{
+  const t=await setup({team:true});try{
+    await t.page.locator('#input').fill('lock-wait');await t.page.locator('#send').click();
+    await t.page.getByRole('button',{name:'Stop Dev',exact:true}).click();
+    await t.page.waitForFunction(()=>{
+      const c=cur(),stopped=c.log.find(entry=>entry.from==='Dev');
+      return stopped?.stopped&&!stopped.pending&&c.log.some(entry=>entry.pending);
+    });
+    const stoppedCard=t.page.locator('.card').filter({has:t.page.locator('.name',{hasText:'Dev'})});
+    await stoppedCard.getByRole('button',{name:'Delete reply',exact:true}).click();
+    assert.equal(await t.page.evaluate(()=>cur().log.some(entry=>entry.from==='Dev')),false);
+    assert.ok(await t.page.evaluate(()=>cur().log.some(entry=>entry.pending)),'other participant replies keep running');
     assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
