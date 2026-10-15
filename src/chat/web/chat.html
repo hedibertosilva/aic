@@ -58,6 +58,11 @@
             <p class="note">Change its working checkout for this conversation only. Participant sessions restart and visible history stays. Global preferences stay unchanged.</p>
             <button id="worktreebtn" type="button">Change Checkout</button>
           </section>
+          <section class="contextpopovercard pathscard">
+            <div class="pathscardhead"><strong>Additional paths</strong><span id="pathscount">Not loaded</span></div>
+            <p class="note">Give this conversation access to other repositories or directories. Read-only is the default.</p>
+            <button id="pathsbtn" type="button">Manage Paths</button>
+          </section>
         </div>
       </div>
     </details>
@@ -317,6 +322,26 @@
 
   <div class="configfooter worktreefooter">
     <div class="buttons"><button id="worktreecancel" type="button">Cancel</button><span class="grow"></span><button id="worktreeconfirm" type="button" class="primary">Change Checkout</button></div>
+  </div>
+</dialog>
+<dialog id="pathsdialog" aria-labelledby="pathstitle" aria-describedby="pathsdescription">
+  <div class="confighead">
+    <div><h2 id="pathstitle">Additional paths</h2><p id="pathsdescription">Paths available to agents in this conversation.</p></div>
+  </div>
+  <div class="configbody pathsbody">
+    <div id="pathswarning" class="configscope pathswarning" role="note" hidden>
+      <strong>Allow write access?</strong>
+      <span>Participants with edit access will be able to modify <code id="pathsconfirmvalue"></code>. Reviewers remain read-only.</span>
+    </div>
+    <section id="pathssection" class="configsection" aria-labelledby="pathssectiontitle">
+      <h3 id="pathssectiontitle">This conversation</h3>
+      <div id="pathsrows" class="configcard pathsrows"></div>
+      <p class="fieldhint">Use <code>/path add &lt;path&gt;</code> or <code>/path add-rw &lt;path&gt;</code> to add one.</p>
+    </section>
+    <p class="note err" id="pathserror" role="alert" hidden></p>
+  </div>
+  <div class="configfooter pathsfooter">
+    <div class="buttons"><button id="pathscancel" type="button">Close</button><span class="grow"></span><button id="pathsconfirm" type="button" class="primary" hidden>Allow Write Access</button></div>
   </div>
 </dialog>
 <dialog id="branchdialog" aria-labelledby="branchtitle" aria-describedby="branchdescription">

@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde_json::Value;
 
 use crate::git;
-use crate::sandbox::{Access, RunSpec, Sandbox};
+use crate::sandbox::{Access, AdditionalPath, RunSpec, Sandbox};
 
 /// What a `CliAgent::run` call should do.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +47,8 @@ pub struct RunOpts {
     pub stream: bool,
     /// Environment entries supplied only to this invocation.
     pub env: Vec<(String, String)>,
+    /// Server-validated conversation paths available alongside `cwd`.
+    pub additional_paths: Vec<AdditionalPath>,
     /// Let a sandboxed invocation reach services on the host loopback.
     pub host_network: bool,
 }
@@ -284,7 +286,7 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
                 workdir: cwd.to_path_buf(), access: Access::ReadOnly,
                 interactive: false, agent: self.binary_stem().to_string(),
                 args: args.iter().map(|a| a.to_string()).collect(), name: container.clone(),
-                env: Vec::new(), host_network: false,
+                env: Vec::new(), additional_paths: Vec::new(), host_network: false,
             })?,
             None => { let mut cmd = Command::new(&self.binary); cmd.args(args).current_dir(cwd); cmd }
         };
@@ -338,6 +340,7 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
             agent: self.binary_stem().to_string(),
             args: argv.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
             env: opts.env.clone(),
+            additional_paths: opts.additional_paths.clone(),
             host_network: opts.host_network,
             name,
         };
@@ -351,9 +354,10 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
     fn push_args(&self, cmd: &mut Command, opts: &RunOpts) {
         if self.is_codex() {
             cmd.arg("exec");
-            if let Some(id) = &opts.resume {
-                cmd.arg("resume").arg(id);
-            }
+            // `resume` is an `exec` subcommand with a smaller option set.
+            // Keep every option owned by `exec` before the subcommand;
+            // otherwise options such as `--add-dir` and `--sandbox` are
+            // parsed as resume options and Codex exits before emitting JSON.
             cmd.arg("--json");
             if let Some(model) = opts.model.as_ref().or(self.model.as_ref()) {
                 cmd.arg("--model").arg(model);
@@ -367,6 +371,12 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
                 cmd.args(["--sandbox", "read-only"]);
             } else {
                 cmd.args(["--sandbox", "workspace-write", "--approve-for-me"]);
+            }
+            for path in &opts.additional_paths {
+                cmd.arg("--add-dir").arg(&path.path);
+            }
+            if let Some(id) = &opts.resume {
+                cmd.arg("resume").arg(id);
             }
             let prompt = if let Some(schema) = &opts.json_schema {
                 format!("{}\n\nReturn only a JSON value that conforms exactly to this JSON Schema:\n{}", opts.prompt, schema)
@@ -407,6 +417,11 @@ rebuild the image with it on the host PATH (`aic sandbox build`) or configure a 
         }
         if let Some(effort) = opts.effort.as_ref().or(self.effort.as_ref()) {
             cmd.arg("--effort").arg(effort);
+        }
+        if !self.is_agy() {
+            for path in &opts.additional_paths {
+                cmd.arg("--add-dir").arg(&path.path);
+            }
         }
         if opts.skip_permissions {
             cmd.arg("--dangerously-skip-permissions");
@@ -656,6 +671,83 @@ mod tests {
         let mut gemini_cmd = Command::new("agy");
         CliAgent::new("gemini", "agy").push_args(&mut gemini_cmd, &opts);
         assert!(!args_of(&gemini_cmd).iter().any(|a| a == "--append-system-prompt"));
+    }
+
+    #[test]
+    fn additional_paths_are_declared_to_codex_and_claude() {
+        let opts = RunOpts {
+            prompt: "inspect both repositories".to_string(),
+            additional_paths: vec![AdditionalPath {
+                path: "/work/api".into(),
+                access: Access::ReadOnly,
+            }],
+            ..Default::default()
+        };
+        for binary in ["codex", "claude"] {
+            let mut cmd = Command::new(binary);
+            CliAgent::new(binary, binary).push_args(&mut cmd, &opts);
+            assert!(args_of(&cmd)
+                .windows(2)
+                .any(|w| w == ["--add-dir", "/work/api"]));
+        }
+        let mut agy = Command::new("agy");
+        CliAgent::new("agy", "agy").push_args(&mut agy, &opts);
+        assert!(!args_of(&agy).iter().any(|arg| arg == "--add-dir"));
+    }
+
+    #[test]
+    fn codex_exec_options_precede_resume_subcommand() {
+        let opts = RunOpts {
+            prompt: "inspect both repositories".to_string(),
+            model: Some("gpt-test".to_string()),
+            effort: Some("medium".to_string()),
+            skip_permissions: true,
+            resume: Some("session-id".to_string()),
+            additional_paths: vec![AdditionalPath {
+                path: "/work/api".into(),
+                access: Access::ReadOnly,
+            }],
+            ..Default::default()
+        };
+        let mut cmd = Command::new("codex");
+        CliAgent::new("codex", "codex").push_args(&mut cmd, &opts);
+        let args = args_of(&cmd);
+        let resume = args.iter().position(|arg| arg == "resume").unwrap();
+
+        for option in [
+            "--json",
+            "--model",
+            "-c",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--add-dir",
+        ] {
+            assert!(
+                args.iter().position(|arg| arg == option).unwrap() < resume,
+                "{option} must be parsed by codex exec: {args:?}"
+            );
+        }
+        assert_eq!(&args[resume..resume + 2], ["resume", "session-id"]);
+        assert_eq!(args.last().unwrap(), "inspect both repositories");
+    }
+
+    #[test]
+    fn codex_sandbox_option_precedes_resume_subcommand() {
+        let opts = RunOpts {
+            prompt: "inspect".to_string(),
+            read_only: true,
+            resume: Some("session-id".to_string()),
+            ..Default::default()
+        };
+        let mut cmd = Command::new("codex");
+        CliAgent::new("codex", "codex").push_args(&mut cmd, &opts);
+        let args = args_of(&cmd);
+        let sandbox = args.iter().position(|arg| arg == "--sandbox").unwrap();
+        let resume = args.iter().position(|arg| arg == "resume").unwrap();
+        assert!(
+            sandbox < resume,
+            "--sandbox must be parsed by codex exec: {args:?}"
+        );
+        assert_eq!(args[sandbox + 1], "read-only");
     }
 
     #[test]

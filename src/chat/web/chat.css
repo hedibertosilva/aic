@@ -507,10 +507,10 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 
 /* Environment and Git context */
 #readydialog { width: min(920px, calc(100vw - 32px)); background: var(--bg); }
-#readydialog, #worktreedialog, #branchdialog { padding: 20px 24px; overflow-wrap: anywhere; }
-#readydialog > * + *, #worktreedialog > * + *, #branchdialog > * + * { margin-top: 14px; }
-#readydialog h2, #worktreedialog h2, #branchdialog h2 { margin: 0; font-size: 17px; }
-#readydialog .buttons, #worktreedialog .buttons, #branchdialog .buttons { flex-wrap: wrap; }
+#readydialog, #worktreedialog, #pathsdialog, #branchdialog { padding: 20px 24px; overflow-wrap: anywhere; }
+#readydialog > * + *, #worktreedialog > * + *, #pathsdialog > * + *, #branchdialog > * + * { margin-top: 14px; }
+#readydialog h2, #worktreedialog h2, #pathsdialog h2, #branchdialog h2 { margin: 0; font-size: 17px; }
+#readydialog .buttons, #worktreedialog .buttons, #pathsdialog .buttons, #branchdialog .buttons { flex-wrap: wrap; }
 .readyhead { display: flex; align-items: flex-start; gap: 16px; }
 .readyhead > div { min-width: 0; }
 .readyhead p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
@@ -560,6 +560,9 @@ legend { font-size: 13px; color: var(--muted); padding: 0 0 5px; }
 .contextpopoverbody { padding: 12px; background: var(--bg); }
 .contextpopovercard { margin: 0; padding: 12px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
 #conversationadvanced .contextpopovercard .note { margin: 8px 0 12px; }
+#conversationadvanced .contextpopovercard + .contextpopovercard { margin-top: 10px; }
+.pathscardhead { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.pathscardhead span { color: var(--muted); font-size: 10px; }
 #planorigin dl.contextpopovercard > div { display: grid; grid-template-columns: minmax(100px, auto) minmax(0, 1fr); gap: 16px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 #planorigin dl.contextpopovercard > div:first-child { padding-top: 0; }
 #planorigin dl.contextpopovercard > div:last-child { padding-bottom: 0; border-bottom: 0; }
@@ -1156,10 +1159,23 @@ dialog::backdrop { background: rgba(15, 23, 42, .46); backdrop-filter: blur(2px)
 .worktreecard { padding: 14px; }
 .worktreecard select { width: 100%; min-height: 38px; color: var(--fg); background: var(--bg); border-color: var(--line); }
 .worktreefooter { padding-top: 0; }
+#pathsdialog { width: min(680px, calc(100vw - 24px)); background: var(--bg); }
+#pathsdialog .confighead p { max-width: 58ch; }
+.pathsbody { gap: 16px; }
+.pathswarning code { overflow-wrap: anywhere; }
+.pathsrows { padding: 0; overflow: hidden; }
+.pathsrow { min-width: 0; padding: 11px 12px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--line); }
+.pathsrow:last-child { border-bottom: 0; }
+.pathsrow code { min-width: 0; flex: 1; overflow-wrap: anywhere; font-size: 11px; }
+.pathsaccess { min-width: 28px; padding: 2px 5px; flex: none; color: var(--muted); border: 1px solid var(--line); border-radius: 3px; font-size: 9px; font-weight: 700; text-align: center; text-transform: uppercase; }
+.pathsaccess.rw { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, var(--line)); }
+.pathsremove { min-height: 28px; padding: 3px 8px; flex: none; font-size: 10px; }
+.pathsempty { margin: 0; padding: 16px; color: var(--muted); font-size: 12px; text-align: center; }
+.pathsfooter { padding-top: 0; }
 @media (max-width: 480px) {
-  .worktreefooter .buttons { align-items: stretch; flex-direction: column-reverse; }
-  .worktreefooter .buttons .grow { display: none; }
-  .worktreefooter .buttons button { width: 100%; }
+  .worktreefooter .buttons, .pathsfooter .buttons { align-items: stretch; flex-direction: column-reverse; }
+  .worktreefooter .buttons .grow, .pathsfooter .buttons .grow { display: none; }
+  .worktreefooter .buttons button, .pathsfooter .buttons button { width: 100%; }
 }
 
 /* Branch changes emphasize the references that changed, not the shared path. */

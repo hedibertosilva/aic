@@ -18,17 +18,18 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
   const bindings=new Map([['source',{conversation_id:'source',checkout:'/repo',plan_slug:linked?'alpha':null,version:linked?1:0,selections:{},origin:null}]]);
   if(linked)c.plan_binding=clone(bindings.get('source'));
   const plans=new Map([['alpha',makePlan('alpha')],['beta',makePlan('beta')],['other',makePlan('other','/repo-other')]]);
-  const f={saved:{state:{convs:[c],current:c.id,layout:'auto'},drafts:{}},requests:[],plans,bindings,runs:new Map(),
+  const paths=new Map([['source',[]]]);
+  const f={saved:{state:{convs:[c],current:c.id,layout:'auto'},drafts:{}},requests:[],plans,bindings,paths,runs:new Map(),
     fail:null,missingLoop:false,old,errors:[],revision:1,managed:linked,used:new Set()};
   const send=(res,status,data) => {res.writeHead(status,{'Content-Type':typeof data==='string'?'text/plain':'application/json'});res.end(typeof data==='string'?data:JSON.stringify(data));};
   const git=checkout=>({repository:'repo',checkout,branch:'main',sha:'abc123',label:'main'});
   const server=http.createServer(async(req,res)=>{
     try{
       const url=new URL(req.url,'http://localhost');let body=null;
-      if(req.method==='POST'){let text='';for await(const chunk of req)text+=chunk;body=JSON.parse(text);}
+      if(req.method!=='GET'){let text='';for await(const chunk of req)text+=chunk;if(text)body=JSON.parse(text);}
       f.requests.push({method:req.method,path:url.pathname,body});
       if(f.fail===url.pathname)return send(res,503,'Fixture storage unavailable');
-      if(url.pathname==='/api/agents')return send(res,200,{agents:['codex'],details:{codex:{kind:'codex',model:'',models:[]}},default:'codex',repo:url.searchParams.get('checkout')||'/repo',sandboxed:false});
+      if(url.pathname==='/api/agents')return send(res,200,{agents:['codex'],details:{codex:{kind:'codex',model:'',models:[]}},default:'codex',repo:url.searchParams.get('checkout')||'/repo',sandboxed:true});
       if(url.pathname==='/api/skills')return send(res,200,[{name:'write',requires_write:true,description:'Writes files'}]);
       if(url.pathname==='/api/quotas')return send(res,200,{agents:[],consumption:{}});
       if(url.pathname==='/api/chat/preflight'||url.pathname==='/api/diagnostics')return send(res,200,{default_agent:'codex',git:git(body?.checkout||url.searchParams.get('checkout')||'/repo'),repository:{state:'ready'},runtime:{state:'not_required'},image:{state:'not_required'},agents:[{agent:'codex',readiness:'ready'}]});
@@ -67,6 +68,19 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
       if(conversationRoute){
         const [,name,action]=conversationRoute;
         if(f.old)return send(res,404,'Not found');
+        if(action==='paths'){
+          const items=paths.get(name)||[];
+          if(req.method==='GET')return send(res,200,{paths:items});
+          if(req.method==='POST'){
+            if(body.access==='rw'&&body.confirmed!==true)return send(res,409,{error:'Writable path access requires explicit confirmation'});
+            const item={path:body.path,access:body.access||'ro'},index=items.findIndex(entry=>entry.path===item.path);
+            if(index<0)items.push(item);else items[index]=item;paths.set(name,items);return send(res,200,item);
+          }
+          if(req.method==='DELETE'){
+            const index=items.findIndex(entry=>entry.path===body.path);if(index<0)return send(res,404,{error:'Path is not mounted in this conversation'});
+            items.splice(index,1);return send(res,200,{path:body.path,removed:true});
+          }
+        }
         const binding=bindings.get(name)||{conversation_id:name,plan_slug:null,version:0,checkout:'/repo',selections:{},origin:null};
         if(!body)return send(res,200,binding);
         if(action!=='fork'&&binding.version!==body.version)return send(res,409,'Binding changed');
@@ -91,7 +105,7 @@ async function fixture({linked=false, history=false, old=false, team=false}={}) 
         next.id=id;next.plan_binding=nextBinding;
         next.participants.forEach(p=>{p.session='';p.seen=next.log.length;});
         next.checkout=checkout;
-        if(forked){next.title='Fork: '+source.title;nextBinding.origin={conversation_id:source.id,previous_plan:binding.plan_slug,current_plan:slug,message_count:source.log.length,checkout:binding.checkout};f.saved.state.convs.unshift(next);}
+        if(forked){next.title='Fork: '+source.title;nextBinding.origin={conversation_id:source.id,previous_plan:binding.plan_slug,current_plan:slug,message_count:source.log.length,checkout:binding.checkout};f.saved.state.convs.unshift(next);paths.set(id,clone(paths.get(name)||[]));}
         else Object.assign(source,next);
         bindings.set(id,nextBinding);f.managed=true;f.revision++;return send(res,200,{binding:nextBinding,conversation:next,forked,revision:f.revision});
       }
@@ -240,6 +254,36 @@ test('free conversation writes without a plan; Cancel and Esc never create/link 
     await reply(t.page,'Free work');const request=t.f.requests.find(r=>r.path==='/api/chat').body;
     assert.deepEqual((await current(t.page)).log.findLast(entry=>entry.from==='you').to,['Dev']);
     assert.equal(request.write,true);assert.equal(request.plan_id,undefined);assert.equal(request.task_id,undefined);assert.deepEqual(t.errors,[]);
+  }finally{await t.close();}
+});
+
+test('native path commands stay out of chat, confirm writes and autocomplete removals',options,async()=>{
+  const t=await setup();try{
+    const input=t.page.locator('#input'),send=t.page.locator('#send');
+    await input.fill('/path add /repo with spaces');await send.click();
+    await t.page.waitForFunction(()=>document.querySelector('#input').value==='');
+    assert.deepEqual(t.f.paths.get('source'),[{path:'/repo with spaces',access:'ro'}]);
+    assert.equal((await current(t.page)).log.length,0,'native commands are not chat messages');
+
+    await input.fill('/path add-rw /writable repo');await send.click();
+    await t.page.waitForSelector('#pathsdialog[open]');
+    assert.equal(await input.inputValue(),'/path add-rw /writable repo','the draft stays until confirmation succeeds');
+    assert.match(await t.page.locator('#pathswarning').innerText(),/writable repo/);
+    await t.page.locator('#pathsconfirm').click();await t.page.waitForSelector('#pathsdialog',{state:'hidden'});
+    assert.deepEqual(t.f.paths.get('source'),[{path:'/repo with spaces',access:'ro'},{path:'/writable repo',access:'rw'}]);
+    const write=t.f.requests.findLast(request=>request.method==='POST'&&request.path.endsWith('/paths'));
+    assert.equal(write.body.confirmed,true);
+
+    await input.fill('/path remove ');await t.page.waitForSelector('#ac.open .opt');
+    assert.deepEqual(await t.page.locator('#ac .opt b').allTextContents(),['/repo with spaces','/writable repo']);
+    await t.page.locator('#ac .opt').first().click();assert.equal(await input.inputValue(),'/path remove /repo with spaces');
+    await send.click();await t.page.waitForFunction(()=>document.querySelector('#input').value==='');
+    assert.deepEqual(t.f.paths.get('source'),[{path:'/writable repo',access:'rw'}]);
+
+    await input.fill('/path list');await send.click();await t.page.waitForSelector('#pathsdialog[open]');
+    assert.equal(await t.page.locator('#pathsrows .pathsrow code').innerText(),'/writable repo');
+    assert.equal(await t.page.locator('#pathsrows .pathsaccess').innerText(),'rw');
+    assert.equal((await current(t.page)).log.length,0);assert.deepEqual(t.errors,[]);
   }finally{await t.close();}
 });
 

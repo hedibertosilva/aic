@@ -64,6 +64,14 @@ pub enum Access {
     ReadOnly,
 }
 
+/// A server-validated host directory granted to one conversation. It is
+/// mounted at the same absolute path inside the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdditionalPath {
+    pub path: PathBuf,
+    pub access: Access,
+}
+
 /// Per-invocation inputs to `Sandbox::run_args`.
 #[derive(Debug, Clone)]
 pub struct RunSpec {
@@ -82,6 +90,8 @@ pub struct RunSpec {
     pub args: Vec<String>,
     /// Environment entries supplied only for this invocation.
     pub env: Vec<(String, String)>,
+    /// Conversation-scoped paths, separate from global configured mounts.
+    pub additional_paths: Vec<AdditionalPath>,
     /// Share the host network so this invocation can reach a service bound
     /// to the host loopback interface.
     pub host_network: bool,
@@ -279,6 +289,16 @@ impl Sandbox {
                 args.push(format!("{g}:{g}{suffix}"));
             }
         }
+        for additional in &spec.additional_paths {
+            let path = path_str(&additional.path);
+            let suffix = if additional.access == Access::ReadOnly {
+                ":ro"
+            } else {
+                ""
+            };
+            args.push("-v".into());
+            args.push(format!("{path}:{path}{suffix}"));
+        }
 
         let gitconfig = self.host_home.join(".gitconfig");
         if gitconfig.exists() {
@@ -394,6 +414,7 @@ fn login_spec(repo_root: &Path, agent: &str) -> RunSpec {
         agent: agent.to_string(),
         args: Vec::new(),
         env: Vec::new(),
+        additional_paths: Vec::new(),
         host_network: false,
         name: None,
     }
@@ -433,6 +454,7 @@ mod tests {
             agent: "claude".into(),
             args: vec!["-p".into(), "hi".into()],
             env: Vec::new(),
+            additional_paths: Vec::new(),
             host_network: false,
             name: None,
         }
@@ -484,6 +506,24 @@ mod tests {
         s.access = Access::ReadWrite;
         let rw = sandbox(SandboxKind::Docker).run_args(&s);
         assert!(has_pair(&rw, "-v", "/main/.git:/main/.git"));
+    }
+
+    #[test]
+    fn conversation_paths_keep_their_individual_access() {
+        let mut s = spec(Access::ReadWrite, false);
+        s.additional_paths = vec![
+            AdditionalPath {
+                path: "/work/docs".into(),
+                access: Access::ReadOnly,
+            },
+            AdditionalPath {
+                path: "/work/api".into(),
+                access: Access::ReadWrite,
+            },
+        ];
+        let args = sandbox(SandboxKind::Docker).run_args(&s);
+        assert!(has_pair(&args, "-v", "/work/docs:/work/docs:ro"));
+        assert!(has_pair(&args, "-v", "/work/api:/work/api"));
     }
 
     #[test]

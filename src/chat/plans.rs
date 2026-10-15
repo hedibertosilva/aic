@@ -143,6 +143,7 @@ pub struct Binding {
 }
 
 pub fn init(db: &Connection) -> Result<()> {
+    super::paths::init(db)?;
     let has_revision = db
         .prepare("PRAGMA table_info(chat_state)")?
         .query_map([], |r| r.get::<_, String>(1))?
@@ -728,6 +729,7 @@ pub fn save_snapshot(
         };
         if !names.contains(name) {
             not_busy(&tx, name)?;
+            super::paths::delete(&tx, name)?;
             tx.execute(
                 "DELETE FROM chat_plan_bindings WHERE conversation_id=?1",
                 [name],
@@ -811,6 +813,7 @@ fn change_binding(
     let mut c = source.clone();
     if fork {
         let new_id = id(tx)?;
+        super::paths::copy(tx, name, &new_id)?;
         c["id"] = json!(new_id);
         c["title"] = json!(format!(
             "Fork: {}",
@@ -831,6 +834,7 @@ fn change_binding(
         b.version = 0;
     }
     b.checkout = root.clone();
+    super::paths::remove_overlapping(tx, &b.conversation_id, Path::new(&root))?;
     b.plan_slug = plan;
     b.selections.clear();
     put_binding(tx, &mut b)?;
@@ -1194,6 +1198,7 @@ pub fn route(
                         .unwrap()
                         .retain(|c| c["id"] != name);
                     drafts.as_object_mut().unwrap().remove(name);
+                    super::paths::delete(&tx, name)?;
                     tx.execute(
                         "DELETE FROM chat_plan_bindings WHERE conversation_id=?1",
                         [name],
