@@ -800,19 +800,137 @@ fn begin_engineering_loop_turn(
     Ok(())
 }
 
-fn engineering_loop_directive(text: &str) -> Option<serde_json::Value> {
-    let marker = "<!--";
+fn normalize_engineering_loop_verdict(raw: &str) -> Option<&'static str> {
+    let normalized = raw.trim().to_lowercase().replace('-', "_").replace(' ', "_");
+    match normalized.as_str() {
+        "approved" | "aprovado" | "aprovada" => Some("approved"),
+        "changes_requested"
+        | "change_requested"
+        | "request_changes"
+        | "alterações_solicitadas"
+        | "alteracoes_solicitadas"
+        | "mudanças_solicitadas"
+        | "mudancas_solicitadas" => Some("changes_requested"),
+        _ => None,
+    }
+}
+
+fn normalized_engineering_loop_verdict(value: &serde_json::Value) -> Option<&'static str> {
+    let object = value.as_object()?;
+    let raw = object.iter().find_map(|(key, value)| {
+        if key.eq_ignore_ascii_case("verdict") { value.as_str() } else { None }
+    })?;
+    normalize_engineering_loop_verdict(raw)
+}
+
+fn merge_engineering_loop_verdict(
+    found: &mut Option<&'static str>,
+    candidate: &'static str,
+) -> bool {
+    if found.is_some_and(|current| current != candidate) {
+        return false
+    }
+    *found = Some(candidate);
+    true
+}
+
+fn json_engineering_loop_verdict(text: &str) -> Option<&'static str> {
+    let mut found = None;
+    for (start, ch) in text.char_indices() {
+        if ch != '{' {
+            continue
+        }
+        let mut values = serde_json::Deserializer::from_str(&text[start..])
+            .into_iter::<serde_json::Value>();
+        let Some(Ok(value)) = values.next() else {
+            continue
+        };
+        let Some(candidate) = normalized_engineering_loop_verdict(&value) else {
+            continue
+        };
+        if !merge_engineering_loop_verdict(&mut found, candidate) {
+            return None
+        }
+    }
+    found
+}
+
+fn engineering_loop_directive(text: &str) -> Option<&'static str> {
+    // Prefer the documented marker, but tolerate capitalization and spacing
+    // differences produced by different agents.
     let mut rest = text;
-    while let Some(start) = rest.find(marker) {
-        rest = &rest[start + marker.len()..];
-        let Some(end) = rest.find("-->") else { return None };
+    let mut tagged = None;
+    while let Some(start) = rest.find("<!--") {
+        rest = &rest[start + 4..];
+        let Some(end) = rest.find("-->") else {
+            break
+        };
         let body = rest[..end].trim();
-        if let Some(json) = body.strip_prefix("aic-loop") {
-            return serde_json::from_str(json.trim()).ok();
+        if body.get(..8).is_some_and(|prefix| prefix.eq_ignore_ascii_case("aic-loop")) {
+            if let Some(candidate) = json_engineering_loop_verdict(&body[8..])
+                && !merge_engineering_loop_verdict(&mut tagged, candidate)
+            {
+                return None;
+            }
         }
         rest = &rest[end + 3..];
     }
-    None
+    if tagged.is_some() {
+        return tagged
+    }
+
+    // Some CLIs preserve the JSON but wrap it in a Markdown code block or
+    // omit the HTML comment. It is still an explicit, machine-readable
+    // verdict, so do not pause an otherwise valid review for presentation.
+    if let Some(verdict) = json_engineering_loop_verdict(text) {
+        return Some(verdict)
+    }
+
+    // A final `Verdict: approved` line is another common structured form.
+    let mut labelled = None;
+    for line in text.lines() {
+        let line = line
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, '*' | '_' | '`' | '-' | ' '));
+        let Some(separator) = line.find(':').or_else(|| line.find('=')) else {
+            continue
+        };
+        let (key, raw) = line.split_at(separator);
+        let raw = &raw[1..];
+        if !key.trim().trim_matches(|ch: char| matches!(ch, '*' | '_' | '`'))
+            .eq_ignore_ascii_case("verdict")
+        {
+            continue
+        }
+        let raw = raw
+            .trim()
+            .trim_matches(|ch: char| matches!(ch, '*' | '_' | '`' | '.' | ' '));
+        let Some(candidate) = normalize_engineering_loop_verdict(raw) else {
+            continue
+        };
+        if !merge_engineering_loop_verdict(&mut labelled, candidate) {
+            return None
+        }
+    }
+    if labelled.is_some() {
+        return labelled
+    }
+
+    // Finally accept an explicit standalone decision. This covers reviewers
+    // that obey the semantic instruction but drop all protocol decoration.
+    let mut standalone = None;
+    for line in text.lines() {
+        let raw = line.trim().trim_matches(|ch: char| {
+            matches!(ch, '*' | '_' | '`' | '#' | '-' | ':' | '.' | ' ')
+        });
+        let Some(candidate) = normalize_engineering_loop_verdict(raw) else {
+            continue
+        };
+        if !merge_engineering_loop_verdict(&mut standalone, candidate) {
+            return None
+        }
+    }
+    standalone
 }
 
 fn engineering_loop_system(request: &EngineeringLoopRequest) -> String {
@@ -853,7 +971,7 @@ fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: 
         Ok(())
     };
     if !ok { return finish("paused", "The current participant failed") }
-    let directive = engineering_loop_directive(output);
+    let verdict = engineering_loop_directive(output);
     if record.phase == "implementing" {
         if turns >= record.max_turns { return finish("limit_reached", "Turn limit reached") }
         let Some(target) = record.reviewer.as_deref() else {
@@ -870,7 +988,7 @@ fn finish_engineering_loop_turn(app: &App, loop_id: &str, run_id: &str, output: 
         )?;
         return Ok(())
     }
-    match directive.as_ref().and_then(|value| value["verdict"].as_str()) {
+    match verdict {
         Some("approved") => finish("approved", "Approved by reviewer"),
         Some("changes_requested") => {
             if record.implementer.is_none() {
@@ -2762,6 +2880,35 @@ mod tests {
             id: id.into(), mode: "standard".into(), state: "running".into(), phase: phase.into(), round, turns,
             max_rounds: 3, max_turns: 6, implementer: Some("Impl".into()),
             reviewer: reviewer.map(str::to_owned), current: current.into(), objective: "Build it".into(),
+        }
+    }
+
+    #[test]
+    fn engineering_loop_accepts_equivalent_structured_verdict_formats() {
+        let cases = [
+            ("Done. <!-- aic-loop {\"verdict\":\"approved\"} -->", "approved"),
+            ("Done. <!-- AIC-LOOP { \"Verdict\": \"APPROVED\" } -->", "approved"),
+            ("```json\n{\"verdict\":\"changes requested\"}\n```", "changes_requested"),
+            ("Review complete.\n\n**Verdict:** `approved`", "approved"),
+            ("Review complete.\nverdict = request-changes", "changes_requested"),
+            ("Review complete.\n\n## Approved", "approved"),
+            ("Revisão concluída.\n\n**ALTERAÇÕES SOLICITADAS.**", "changes_requested"),
+        ];
+        for (output, expected) in cases {
+            assert_eq!(engineering_loop_directive(output), Some(expected), "{output}");
+        }
+    }
+
+    #[test]
+    fn engineering_loop_rejects_missing_invalid_or_conflicting_verdicts() {
+        let cases = [
+            "The implementation looks approved to me.",
+            "<!-- aic-loop {\"verdict\":\"maybe\"} -->",
+            "{\"verdict\":\"approved\"}\n{\"verdict\":\"changes_requested\"}",
+            "Verdict: approved\nVerdict: changes requested",
+        ];
+        for output in cases {
+            assert_eq!(engineering_loop_directive(output), None, "{output}");
         }
     }
 

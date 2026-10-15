@@ -44,6 +44,13 @@ test('expired windows preserve percentages and reading errors preserve age', () 
   assert.equal(Q.critical(q).used_pct, 100);
   assert.equal(Q.resetText({}), 'reset time unknown');
 });
+test('a failed refresh does not grey out a recent successful reading', () => {
+  const now = Date.parse('2026-10-03T15:00:00Z');
+  const recent = { state: 'read_error', windows: [{ used_pct: 34, resets_at: '2026-10-03T18:00:00Z' }], fetched_at: '2026-10-03T14:59:00Z' };
+  assert.deepEqual(Q.visualStatus(recent, false, now), { kind: 'normal', label: 'Quota normal; latest refresh failed' });
+  recent.fetched_at = '2026-10-03T14:30:00Z';
+  assert.deepEqual(Q.visualStatus(recent, false, now), { kind: 'stale', label: 'Quota status is outdated' });
+});
 test('expired windows stop after two automatic retries and reset with a new window', () => {
   const attempts = new Map(), now = Date.parse('2026-10-03T15:00:00Z');
   const status = { windows: [{ id: 'codex/primary', resets_at: '2026-10-03T14:00:00Z' }] };

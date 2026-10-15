@@ -352,18 +352,7 @@ function writeBadge() {
 const quotaOf = (agent, model) => { const q = quotaData.agents.find(q => q.agent === agent); return q && model ? ChatQuotas.scoped(q, model) : q; };
 const quotaModel = (agent, model) => model || meta.details?.[agent]?.model || "";
 function quotaVisualStatus(agent, model, inactive = false) {
-  if (inactive) return {kind: "inactive", label: "Participant inactive"};
-  const q = quotaOf(agent, quotaModel(agent, model)), level = ChatQuotas.level(q);
-  if (!q) return {kind: "unknown", label: "Quota status unavailable"};
-  if (level === "out") return {kind: "out", label: "Quota exhausted"};
-  if (level === "warn") return {kind: "warn", label: "Near usage limit"};
-  if (ChatQuotas.stale(q) || ChatQuotas.expired(q) || q.state === "read_error") return {kind: "stale", label: "Quota status is outdated"};
-  const primary = ChatQuotas.primary(q);
-  if (!primary || !ChatQuotas.numeric(primary.used_pct)) {
-    return q.reading ? {kind: "unknown", label: "Checking quota"} : {kind: "unavailable", label: "Quota unavailable"};
-  }
-  if (!q.fetched_at) return {kind: "unknown", label: "Quota status unavailable"};
-  return {kind: "normal", label: "Quota normal"};
+  return ChatQuotas.visualStatus(quotaOf(agent, quotaModel(agent, model)), inactive);
 }
 function quotaLimitSnapshot(agent, model) {
   const window = ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)));
@@ -380,20 +369,23 @@ async function captureQuotaAfterRun(c, entry) {
   const agent = entry.agent || c.participants.find(p => p.name === entry.from)?.agent;
   if (!agent) return;
   const model = entry.model || c.participants.find(p => p.name === entry.from)?.model;
-  const before = quotaOf(agent, quotaModel(agent, model))?.fetched_at;
-  await refreshQuotas(agent, true);
+  const previous = quotaOf(agent, quotaModel(agent, model));
+  const beforeFetched = previous?.fetched_at, beforeAttempted = previous?.attempted_at;
   const deadline = Date.now() + 15000;
   while (Date.now() < deadline) {
     await fetchQuotaState();
     const quota = quotaOf(agent, quotaModel(agent, model));
-    if (!quota?.reading) {
-      if (quota?.state !== "read_error" && quota?.fetched_at && quota.fetched_at !== before) {
-        entry.quota_limit = quotaLimitSnapshot(agent, model);
-        save();
-        if (cur() === c) paintCard(c, entry);
-      }
+    if (quota?.state !== "read_error" && quota?.fetched_at && quota.fetched_at !== beforeFetched) {
+      entry.quota_limit = quotaLimitSnapshot(agent, model);
+      save();
+      if (cur() === c) paintCard(c, entry);
       return;
     }
+    // The backend owns the post-run refresh. A changed attempt timestamp means
+    // that refresh completed with an error; keep the previous snapshot and stop
+    // polling. If it has not started yet, allow the backend a short scheduling
+    // window instead of issuing a duplicate refresh from the browser.
+    if (!quota?.reading && quota?.attempted_at && quota.attempted_at !== beforeAttempted) return;
     await waitFor(250);
   }
 }

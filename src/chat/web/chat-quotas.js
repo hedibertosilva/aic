@@ -79,6 +79,24 @@ const ChatQuotas = (() => {
   }
   const stale = (q, now = Date.now()) => Number.isFinite(time(q?.fetched_at)) && now - time(q.fetched_at) > 15 * 60000;
   const expired = (q, now = Date.now()) => (q?.windows || []).some(w => Number.isFinite(time(w.resets_at)) && time(w.resets_at) <= now);
+  function visualStatus(q, inactive = false, now = Date.now()) {
+    if (inactive) return { kind: "inactive", label: "Participant inactive" };
+    if (!q) return { kind: "unknown", label: "Quota status unavailable" };
+    const l = level(q);
+    if (l === "out") return { kind: "out", label: "Quota exhausted" };
+    if (l === "warn") return { kind: "warn", label: "Near usage limit" };
+    // A failed refresh keeps the last successful reading. Do not turn every
+    // participant/reply grey while that reading is still current; the quota
+    // panel separately exposes the failed attempt and its error.
+    if (stale(q, now) || expired(q, now)) return { kind: "stale", label: "Quota status is outdated" };
+    const w = primary(q);
+    if (!w || !numeric(w.used_pct)) {
+      return q.reading ? { kind: "unknown", label: "Checking quota" }
+        : { kind: "unavailable", label: "Quota unavailable" };
+    }
+    if (!q.fetched_at) return { kind: "unknown", label: "Quota status unavailable" };
+    return { kind: "normal", label: q.state === "read_error" ? "Quota normal; latest refresh failed" : "Quota normal" };
+  }
   function shouldRetryExpired(q, attempts, now = Date.now(), max = 2, interval = 60000) {
     const keys = (q?.windows || []).filter(w => Number.isFinite(time(w.resets_at)) && time(w.resets_at) <= now)
       .map(w => `${w.id || w.label || "window"}\n${w.resets_at}`);
@@ -95,6 +113,6 @@ const ChatQuotas = (() => {
     });
     return true;
   }
-  return { numeric, percent, windowLabel, windowLevel, critical, primary, level, scoped, resetText, updated, summary, consumptionText, stale, expired, shouldRetryExpired };
+  return { numeric, percent, windowLabel, windowLevel, critical, primary, level, scoped, resetText, updated, summary, consumptionText, stale, expired, visualStatus, shouldRetryExpired };
 })();
 if (typeof module !== "undefined") module.exports = ChatQuotas;
