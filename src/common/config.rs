@@ -127,6 +127,9 @@ pub struct SandboxConfig {
     pub bind_agents: bool,
     /// Extra `host:container[:ro]` binds (caches, toolchains).
     pub mounts: Vec<String>,
+    /// Extra host roots from which conversation-scoped paths may be added.
+    /// The parent of the repository opened by aic is always allowed.
+    pub path_roots: Vec<String>,
     /// Names of host environment variables forwarded into the sandbox.
     pub env: Vec<String>,
 }
@@ -138,6 +141,7 @@ impl Default for SandboxConfig {
             image: DEFAULT_SANDBOX_IMAGE.to_string(),
             bind_agents: false,
             mounts: Vec::new(),
+            path_roots: Vec::new(),
             env: Vec::new(),
         }
     }
@@ -214,6 +218,7 @@ const LEGACY_KEYS: &[(&str, &str, &str)] = &[
     ("sandbox_image", "sandbox", "image"),
     ("sandbox_bind_agents", "sandbox", "bind_agents"),
     ("sandbox_mounts", "sandbox", "mounts"),
+    ("sandbox_path_roots", "sandbox", "path_roots"),
     ("sandbox_env", "sandbox", "env"),
 ];
 
@@ -415,7 +420,7 @@ mod tests {
             "executor = 'codex'\nreviewer = 'claude'\nmode = 'auto'\nmax_rounds = 5\n\
              permission_mode = 'plan'\nskip_permissions = true\n\
              sandbox = 'podman'\nsandbox_image = 'img'\nsandbox_bind_agents = true\n\
-             sandbox_mounts = ['/a:/b']\nsandbox_env = ['K']\n\
+             sandbox_mounts = ['/a:/b']\nsandbox_path_roots = ['/work']\nsandbox_env = ['K']\n\
              default_base_branch = 'dev'\ngit_diff_exclude_patterns = ['x']\n\
              [agents.claude]\nbinary = 'custom-claude'\n",
         )
@@ -432,6 +437,7 @@ mod tests {
         assert_eq!(config.sandbox.image, "img");
         assert!(config.sandbox.bind_agents);
         assert_eq!(config.sandbox.mounts, vec!["/a:/b"]);
+        assert_eq!(config.sandbox.path_roots, vec!["/work"]);
         assert_eq!(config.sandbox.env, vec!["K"]);
         assert_eq!(config.agent("claude").unwrap().binary, "custom-claude");
     }

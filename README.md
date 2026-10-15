@@ -117,6 +117,10 @@ participants.
 - Use `/fresh` to restart selected sessions without replaying history, or
   `/fresh @name` to reset a participant without changing the **To:** selection;
   `/clear` clears the conversation; `/fork` creates an alternative branch.
+- With the Docker or Podman sandbox, use `/path add <path>` for read-only
+  access to another directory, `/path add-rw <path>` for confirmed write
+  access, `/path remove <path>` to revoke it, and `/path list` to review paths
+  granted only to this conversation.
 - Skills appear when you type `/`. Send a skill to exactly one participant.
   That participant must support skills and have editing enabled when the skill
   writes files; `agy` cannot run skills.
@@ -138,6 +142,21 @@ The sandbox mounts the checkout for the agent, keeps reviewers read-only and
 limits access to the rest of the host. Network access and required credentials
 remain available; review external prompts and files before running agents with
 write permission.
+
+Inside a conversation, `/path add <directory>` grants read-only access to an
+additional repository or directory, `/path add-rw <directory>` grants writers
+read-write access, `/path remove <directory>` revokes future access, and
+`/path list` shows the current grants. Paths must be below the parent of the
+repository that started aic, or below an extra root configured explicitly:
+
+```toml
+[sandbox]
+path_roots = ["/srv/projects", "/work/clients"]
+```
+
+These grants require Docker or Podman, apply only to the current conversation,
+and take effect on its next agent execution. Review-only participants always
+receive read-only mounts.
 
 On networks that inspect TLS with a private certificate authority, reuse the
 host's trusted CA bundle inside the sandbox. For Debian and Ubuntu hosts, add

@@ -143,6 +143,7 @@ pub fn exec_interactive(
             agent: binary_stem(binary).to_string(),
             args: cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect(),
             env: Vec::new(),
+            additional_paths: Vec::new(),
             host_network: false,
             name: None,
         };

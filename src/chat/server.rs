@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 
 use crate::agent::{AgentProcess, CliAgent, Killer, RunOpts};
 use crate::chat::store::{self as chat, ChatEvent};
-use crate::chat::plans;
+use crate::chat::{paths, plans};
 use crate::{consumption, quotas, diagnostics};
 use crate::config::{Config, SandboxKind};
 use crate::sandbox::Sandbox;
@@ -503,6 +503,7 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
         [],
     );
     consumption::init(&db)?;
+    paths::init(&db)?;
     plans::init(&db)?;
     Ok(db)
 }
@@ -1216,6 +1217,68 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     }
 
     let path = request.url().split('?').next().unwrap_or("/").to_string();
+    if let Some(id) = path
+        .strip_prefix("/api/conversations/")
+        .and_then(|rest| rest.strip_suffix("/paths"))
+        .filter(|id| !id.is_empty() && !id.contains('/'))
+    {
+        let sandbox_runtime = current_config(app).sandbox.runtime;
+        // Host path policy is global-only: a repository override must never
+        // be able to widen its own view of the host filesystem.
+        let path_roots = Config::load_global()?.sandbox.path_roots;
+        let json = header_value(&request, "Content-Type")
+            .is_some_and(|value| value.starts_with("application/json"));
+        if !same_origin(&request) || (request.method() != &Method::Get && !json) {
+            return respond_text(request, 403, "text/plain", "forbidden");
+        }
+        if request.method() != &Method::Get && sandbox_runtime == SandboxKind::None {
+            return respond_text(
+                request,
+                409,
+                "application/json",
+                serde_json::json!({
+                    "error":"Conversation paths require the Docker or Podman sandbox",
+                    "code":409
+                })
+                .to_string(),
+            );
+        }
+        let mut body = String::new();
+        if request.method() != &Method::Get {
+            request.as_reader().take(MAX_BODY + 1).read_to_string(&mut body)?;
+            if body.len() as u64 > MAX_BODY {
+                return respond_text(request, 413, "text/plain", "Path request is too large");
+            }
+        }
+        let payload = if body.is_empty() {
+            serde_json::json!({})
+        } else {
+            match serde_json::from_str(&body) {
+                Ok(value) => value,
+                Err(_) => return respond_text(request, 400, "text/plain", "Invalid path request"),
+            }
+        };
+        let result = {
+            let db = app.chat_db.lock().expect("chat database lock poisoned");
+            match request.method() {
+                &Method::Get => paths::list(&db, &app.repo_root, id)
+                    .map(|items| serde_json::json!({"paths":items})),
+                &Method::Post => paths::add(
+                    &db,
+                    &app.repo_root,
+                    id,
+                    &payload,
+                    &path_roots,
+                ),
+                &Method::Delete => paths::remove(&db, &app.repo_root, id, &payload),
+                _ => Err(plans::ApiError(404, "Unknown path operation").into()),
+            }
+        };
+        return match result {
+            Ok(body) => respond_text(request, 200, "application/json", body.to_string()),
+            Err(error) => plan_error(request, error),
+        };
+    }
     if path == "/api/plans" || path.starts_with("/api/plans/") || path.starts_with("/api/conversations/") {
         if !same_origin(&request) || (request.method() != &Method::Get && !header_value(&request, "Content-Type").is_some_and(|c| c.starts_with("application/json"))) {
             return respond_text(request, 403, "text/plain", "forbidden");
@@ -2051,6 +2114,52 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         Ok(turn) => TurnGuard { app: Arc::clone(app), turn, success: false },
         Err(e) => return plan_error(request, e),
     };
+    req.write = guard.turn.write;
+    let sandboxed = config.sandbox.runtime != SandboxKind::None;
+    let conversation = req.conversation_id.clone().filter(|s| !s.is_empty());
+    let (additional_paths, path_note) = if let Some(id) =
+        conversation.as_deref().filter(|_| sandboxed)
+    {
+        let global_path_roots = Config::load_global()?.sandbox.path_roots;
+        let db = app.chat_db.lock().expect("chat database lock poisoned");
+        let grants = match paths::list(&db, &app.repo_root, id) {
+            Ok(grants) => grants,
+            Err(error) => return plan_error(request, error),
+        };
+        let effective = match paths::effective(
+            &db,
+            id,
+            req.write,
+            &app.repo_root,
+            &global_path_roots,
+        ) {
+            Ok(paths) => paths,
+            Err(error) => return plan_error(request, error),
+        };
+        let note = if grants.is_empty() {
+            "No additional conversation paths are mounted. The selected checkout remains the primary working directory."
+                .to_string()
+        } else {
+            let entries = grants
+                .into_iter()
+                .map(|grant| {
+                    let access = if req.write && grant.access == "rw" {
+                        "read-write"
+                    } else {
+                        "read-only"
+                    };
+                    format!("{} ({access})", grant.path)
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Additional conversation paths: {entries}. The selected checkout remains the primary working directory."
+            )
+        };
+        (effective, Some(note))
+    } else {
+        (Vec::new(), None)
+    };
     if let Some(id) = &run_id {
         if let Err(err) = create_chat_run(app, id, req.conversation_id.as_deref(), req.participant.as_deref()) {
             eprintln!("creating chat run failed: {err:#}");
@@ -2075,12 +2184,9 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
             return respond_text(request, 409, "text/plain", format!("Loop Engineering rejected: {err:#}"));
         }
     }
-    req.write = guard.turn.write;
-    let sandboxed = config.sandbox.runtime != SandboxKind::None;
     let resume = req.session_id.filter(|s| !s.is_empty());
     let mut native_session = resume.clone();
     let was_resumed = resume.is_some();
-    let conversation = req.conversation_id.filter(|s| !s.is_empty());
     let agent_name = req.agent.clone();
     let engineering_loop_id = req.engineering_loop.as_ref().map(|engineering_loop| engineering_loop.id.clone());
     let mut accounted = false;
@@ -2101,8 +2207,14 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         "The current chat server is available as $AIC_CHAT_API and the selected checkout as $AIC_CHAT_CHECKOUT. Create plan tasks through HTTP POST to $AIC_CHAT_API/api/plans/{slug}/tasks with Content-Type: application/json and a body containing checkout, title and the current plan version. Read the current version with GET first, then use the updated version returned by each POST for the next task. Do not start another aic chat server."
     ));
     let engineering_loop_note = req.engineering_loop.as_ref().map(engineering_loop_system);
-    let system = [Some(access_note), req.system.as_deref().filter(|s| !s.trim().is_empty()),
-        engineering_loop_note.as_deref(), (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
+    let system = [
+        Some(access_note),
+        path_note.as_deref(),
+        req.system.as_deref().filter(|s| !s.trim().is_empty()),
+        engineering_loop_note.as_deref(),
+        (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()),
+        plan_api_note.as_deref(),
+    ]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -2115,12 +2227,22 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
         // session then remembers.
         if resume.is_none() {
             prompt = format!("{system}\n\n{prompt}");
-        } else if engineering_loop_note.is_some() || !guard.turn.system.is_empty() {
+        } else if engineering_loop_note.is_some()
+            || !guard.turn.system.is_empty()
+            || path_note.is_some()
+        {
             // Selected tasks and loop phases may change between turns of a
             // native session. Re-send server-owned framing on every such turn.
-            let current_context = [engineering_loop_note.as_deref(),
-                (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()), plan_api_note.as_deref()]
-                .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+            let current_context = [
+                path_note.as_deref(),
+                engineering_loop_note.as_deref(),
+                (!guard.turn.system.is_empty()).then_some(guard.turn.system.as_str()),
+                plan_api_note.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n\n");
             prompt = format!("{access_note}\n\n{current_context}\n\n{prompt}");
         }
         system_prompt = None;
@@ -2150,6 +2272,7 @@ fn chat_turn(app: &Arc<App>, request: Request, mut req: ChatRequest) -> Result<(
             ("AIC_CHAT_API".into(), app.api_url.clone()),
             ("AIC_CHAT_CHECKOUT".into(), work_root.to_string_lossy().into_owned()),
         ],
+        additional_paths,
         host_network: sandboxed,
         ..Default::default()
     };

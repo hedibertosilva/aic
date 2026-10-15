@@ -24,6 +24,9 @@ const quotaExpanded = new Set(), quotaLevels = new Map(), quotaExpiryAttempts = 
 const quotaManualReads = new Set();
 let quotaRefreshPending = false;
 let loopMaxRounds = 3;
+const conversationPaths = new Map(); // conversation id -> server-owned [{path, access}]
+const conversationPathsLoading = new Set();
+let pendingPathWrite = null;
 
 /* ---------- small helpers ---------- */
 function el(tag, cls, text) {
@@ -104,6 +107,43 @@ const agentVisible = name => name === meta.default || !(state.hiddenAgents || []
 const visibleAgentNames = () => meta.agents.filter(agentVisible);
 const visibleReadiness = () => readiness ? { ...readiness, agents: (readiness.agents || []).filter(a => agentVisible(a.agent)) } : readiness;
 const visibleParticipants = () => (cur()?.participants || []).filter(p => agentVisible(p.agent));
+
+const pathsRoute = c => `/api/conversations/${encodeURIComponent(c.id)}/paths`;
+function normalizePaths(value) {
+  const items = Array.isArray(value) ? value : Array.isArray(value?.paths) ? value.paths : Array.isArray(value?.mounts) ? value.mounts : [];
+  return items.map(item => ({
+    path: String(item?.path || item?.source || item?.source_path || item?.host_path || ''),
+    access: String(item?.access || item?.mode || 'ro').toLowerCase() === 'rw' ? 'rw' : 'ro',
+  })).filter(item => item.path);
+}
+async function pathRequest(c, method = 'GET', body) {
+  const response = await fetch(pathsRoute(c), {
+    method, headers: body ? {'Content-Type':'application/json'} : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = text;
+    try { message = JSON.parse(text).error || text; } catch {}
+    throw new Error(message || 'Could not update additional paths.');
+  }
+  const result = text ? JSON.parse(text) : null;
+  if (method === 'GET') conversationPaths.set(c.id, normalizePaths(result));
+  else if (result && (Array.isArray(result) || Array.isArray(result.paths))) conversationPaths.set(c.id, normalizePaths(result));
+  else await refreshConversationPaths(c);
+  updatePathsSummary(c);
+  return result;
+}
+async function refreshConversationPaths(c) {
+  return pathRequest(c);
+}
+function updatePathsSummary(c = cur()) {
+  if (!c || cur() !== c) return;
+  $('pathsbtn').disabled = !meta.sandboxed;
+  $('pathsbtn').title = meta.sandboxed ? '' : 'Additional paths require Docker or Podman';
+  const paths = conversationPaths.get(c.id);
+  $('pathscount').textContent = !meta.sandboxed ? 'Requires sandbox' : !paths ? 'Not loaded' : paths.length ? `${paths.length} path${paths.length === 1 ? '' : 's'}` : 'None';
+}
 
 /* ---------- persistence ---------- */
 // localStorage is retained only as an offline/startup cache. The local aic
@@ -325,7 +365,38 @@ function quotaVisualStatus(agent, model, inactive = false) {
   if (!q.fetched_at) return {kind: "unknown", label: "Quota status unavailable"};
   return {kind: "normal", label: "Quota normal"};
 }
-const quotaUsagePercent = (agent, model) => ChatQuotas.percent(ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)))?.used_pct);
+function quotaLimitSnapshot(agent, model) {
+  const window = ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)));
+  if (!ChatQuotas.numeric(window?.used_pct)) return null;
+  return { used_pct: window.used_pct, window_minutes: window.window_minutes, label: window.label, bucket: window.bucket };
+}
+function quotaLimitLabel(agent, model, snapshot) {
+  // Older entries have no snapshot and retain the previous live behavior.
+  const window = snapshot === undefined ? ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model))) : snapshot;
+  const percent = ChatQuotas.percent(window?.used_pct);
+  return percent ? `Limit used: ${percent} · ${ChatQuotas.windowLabel(window)}` : "";
+}
+async function captureQuotaAfterRun(c, entry) {
+  const agent = entry.agent || c.participants.find(p => p.name === entry.from)?.agent;
+  if (!agent) return;
+  const model = entry.model || c.participants.find(p => p.name === entry.from)?.model;
+  const before = quotaOf(agent, quotaModel(agent, model))?.fetched_at;
+  await refreshQuotas(agent, true);
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    await fetchQuotaState();
+    const quota = quotaOf(agent, quotaModel(agent, model));
+    if (!quota?.reading) {
+      if (quota?.state !== "read_error" && quota?.fetched_at && quota.fetched_at !== before) {
+        entry.quota_limit = quotaLimitSnapshot(agent, model);
+        save();
+        if (cur() === c) paintCard(c, entry);
+      }
+      return;
+    }
+    await waitFor(250);
+  }
+}
 function quotaStatusDot(status, className) {
   const dot = el("span", className + " status-" + status.kind);
   dot.title = status.label; dot.setAttribute("aria-label", status.label); return dot;
@@ -568,7 +639,7 @@ async function copyConversation(source, withHistory) {
   if (withHistory) c.planOrigin = { conversation_id: source.id, previous_plan_id: source.planBinding?.plan_id || null, message_count: log.length };
   // Planned forks must preserve the server-owned link, never just copy a
   // browser preference. A reusable agent group starts as a free conversation.
-  if (withHistory && source.planBinding?.plan_id) {
+  if (withHistory && source.planBinding) {
     try {
       await flushChatForPlanMutation();
       const result = await planRequest(conversationPlanRoute(source, 'fork'), {
@@ -1177,9 +1248,12 @@ function stamp(e) {
 }
 function usageText(u) {
   if (!u) return ["", ""];
-  const inTok = (u.input_tokens || 0) + (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+  const cached = (u.cache_read_tokens || 0) + (u.cache_write_tokens || 0);
+  const inTok = (u.input_tokens || 0) + cached;
   const parts = [];
-  if (inTok || u.output_tokens) parts.push(`${fmtK(inTok)} in · ${fmtK(u.output_tokens || 0)} out`);
+  if (inTok || u.output_tokens) {
+    parts.push(`${fmtK(u.input_tokens || 0)} in · ${fmtK(cached)} cached · ${fmtK(u.output_tokens || 0)} out`);
+  }
   if (u.cost_usd != null) parts.push("$" + u.cost_usd.toFixed(u.cost_usd < 1 ? 4 : 2));
   const detail = [
     inTok > 0 && `processed input: ${inTok}`,
@@ -1237,18 +1311,18 @@ function paintCard(c, e) {
   const k = cardParts.get(e); if (!k) return;
   const p = c.participants.find((x) => x.name === e.from);
   const turnAgent = e.agent || p?.agent, turnModel = e.agent ? e.model : p?.model;
-  const quotaStatus = quotaVisualStatus(turnAgent, turnModel, p?.inactive), quotaPercent = quotaUsagePercent(turnAgent, turnModel);
+  const quotaStatus = quotaVisualStatus(turnAgent, turnModel, p?.inactive), quotaLimit = quotaLimitLabel(turnAgent, turnModel, e.quota_limit);
   const changed = (part, key) => { const s = JSON.stringify(key); if (k.keys[part] === s) return false; k.keys[part] = s; return true; };
   k.card.classList.toggle("error", !!e.error && !e.soft);
   k.card.classList.toggle("soft", !!e.error && !!e.soft);
 
-  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), state.layout, isExpanded(c, e), quotaStatus.kind, quotaPercent])) {
+  if (changed("head", [turnAgent, turnModel, p?.write, e.skill, e.pending, hueFor(c, e.from), state.layout, isExpanded(c, e), quotaStatus.kind, quotaLimit])) {
     applyParticipantColour(k.card, hueFor(c, e.from));
     k.head.textContent = "";
     const identity = el("span", "cardidentity");
     identity.appendChild(quotaStatusDot(quotaStatus, "carddot"));
     identity.appendChild(el("span", "name", e.from));
-    if (turnAgent) identity.appendChild(el("small", "cardmeta", cap(turnAgent) + (quotaPercent ? " · " + quotaPercent : "")));
+    if (turnAgent) identity.appendChild(el("small", "cardmeta", cap(turnAgent) + (quotaLimit ? " · " + quotaLimit : "")));
     k.head.appendChild(identity);
     const context = el("span", "cardcontext");
     if (p?.write) context.appendChild(writeBadge());
@@ -1320,7 +1394,7 @@ function paintCard(c, e) {
       const tools = el("span", "hovertools");
       if (e.text && !e.error) tools.appendChild(iconBtn("copy", "Copy reply", function () { copyText(e.text, this); }));
       if (canRegen) tools.appendChild(iconBtn("retry", e.error ? "Try again" : "Regenerate", () => regenerate(c, e, p)));
-      if (!busy(c)) tools.appendChild(iconBtn("trash", "Delete reply", () => deleteEntry(c, e)));
+      if (canDeleteEntry(c, e)) tools.appendChild(iconBtn("trash", "Delete reply", () => deleteEntry(c, e)));
       k.foot.append(m, tools);
     }
   }
@@ -1427,8 +1501,11 @@ function resendEdited(c, e, text) {
   if (problem) { toast(problem); renderLog(true); return; }
   launch(c, targets, text, e.to || null, { edited: true });
 }
+function canDeleteEntry(c, e) {
+  return !busy(c) || (!!e.stopped && !e.pending);
+}
 function deleteEntry(c, e) {
-  if (busy(c)) { toast("Wait for the replies to finish."); return; }
+  if (!canDeleteEntry(c, e)) { toast("Wait for the replies to finish."); return; }
   const undo = removeEntry(c, e);
   save(); renderLog(true); renderComposer();
   toast(e.from === "you" ? "Message deleted" : `Reply from ${e.from} deleted`, () => { undo(); save(); renderLog(true); renderComposer(); });
@@ -1779,7 +1856,7 @@ $("engineeringloopassign").onclick = async () => {
 };
 function renderHint() {
   const c = cur(), hint = $("hint"), text = $("input").value.trim();
-  let msg = "Enter sends · Shift+Enter new line · @ mentions · /review · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
+  let msg = "Enter sends · Shift+Enter new line · @ mentions · /review · /path · /fork · /fresh · /clear" + (skills.length ? " · / skills" : ""), warn = false;
   if (c && busy(c)) msg = "Replies are coming in. Esc or ■ stops them; you can keep typing.";
   else if (c) {
     const body = text.replace(/^((?:@[\w-]+\s+)+)/, "");
@@ -1822,7 +1899,7 @@ function setTitle() {
 }
 function render(scrollEnd) {
   renderSidebar(); renderBar(); renderLog(); renderComposer(); setTitle();
-  renderQuotas(); renderEnvironmentStatus(); renderPlanContext();
+  renderQuotas(); renderEnvironmentStatus(); renderPlanContext(); updatePathsSummary();
   if (scrollEnd) toEnd();
 }
 
@@ -1973,7 +2050,8 @@ async function launch(c, targets, userText, to, opts = {}) {
   jobs.forEach((j) => { j.p.seen = opts.until ?? c.log.length; });
   jobs.forEach((j) => {
     const runId = globalThis.crypto?.randomUUID?.() || (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
-    j.entry = { from: j.p.name, agent: j.p.agent, model: j.p.model || meta.details?.[j.p.agent]?.model || "", round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}), ...(opts.loopTurn && c.engineeringLoop ? {loop_id:c.engineeringLoop.id} : {}) };
+    const model = j.p.model || meta.details?.[j.p.agent]?.model || "";
+    j.entry = { from: j.p.name, agent: j.p.agent, model, quota_limit: null, round, text: "", pending: true, run_id: runId, event_seq: 0, t0: Date.now(), seen0: j.oldSeen, actions: [], ...(j.skill ? { skill: j.skill } : {}), ...(j.planRun ? {plan_id: c.planBinding.plan_id} : {}), ...(opts.loopTurn && c.engineeringLoop ? {loop_id:c.engineeringLoop.id} : {}) };
     c.log.push(j.entry);
     running.set(runKey(c, j.p), new AbortController());
   });
@@ -2021,12 +2099,13 @@ async function regenerate(c, e, p) {
 async function stopEntry(c, entry) {
   const p = c.participants.find(participant => participant.name === entry.from);
   const ctl = p && running.get(runKey(c, p));
-  if (!entry.run_id) { ctl?.abort(); return; }
+  if (!entry.run_id) { entry.stopped = true; ctl?.abort(); return; }
   try {
     const response = await fetch('/api/chat/runs/' + encodeURIComponent(entry.run_id) + '/stop', {
       method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}',
     });
     if (!response.ok && response.status !== 404) throw new Error(await response.text());
+    entry.stopped = true;
     ctl?.abort();
   } catch (error) { toast('Could not stop the execution: ' + (error.message || error)); }
 }
@@ -2159,7 +2238,7 @@ function finishRunUI(c, p, entry, key) {
     if (view.lastUser && !busy(c)) view.lastUser._fill();
   }
   render();
-  fetchQuotaState();
+  captureQuotaAfterRun(c, entry);
   if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
   if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
   else announce(`${p.name} finished.`);
@@ -2496,6 +2575,108 @@ function normalizeMarkerLine(input) {
   input.setSelectionRange(caret, caret);
 }
 function clearInput(c) { hist.idx = -1; $("input").value = ""; drafts[c.id] = ""; delete draftPastes[c.id]; saveDraftsSoon(); c.toFromText = false; autosize(); acClose(); }
+function renderPathsDialog(c) {
+  const rows = $('pathsrows'); rows.textContent = '';
+  const paths = conversationPaths.get(c.id) || [];
+  if (!paths.length) rows.appendChild(el('p', 'pathsempty', 'No additional paths.'));
+  for (const item of paths) {
+    const row = el('div', 'pathsrow');
+    const code = el('code', '', item.path); code.title = item.path;
+    const access = el('span', 'pathsaccess ' + item.access, item.access); access.title = item.access === 'rw' ? 'Read and write for editors' : 'Read-only';
+    const remove = el('button', 'pathsremove', 'Remove'); remove.type = 'button';
+    remove.onclick = async () => {
+      if (busy(c)) { toast('Wait for replies to finish before removing a path.'); return; }
+      remove.disabled = true; $('pathserror').hidden = true;
+      try {
+        await flushChatForPlanMutation();
+        await pathRequest(c, 'DELETE', {path:item.path, fresh:false});
+        renderPathsDialog(c); toast(`Removed ${item.path} from future executions.`);
+      } catch (error) { $('pathserror').textContent = error.message; $('pathserror').hidden = false; }
+      finally { remove.disabled = false; }
+    };
+    row.append(code, access, remove); rows.appendChild(row);
+  }
+  updatePathsSummary(c);
+}
+async function openPathsDialog(c, options = {}) {
+  if (!c) return;
+  $('conversationadvanced').open = false; $('pathserror').hidden = true;
+  pendingPathWrite = options.write ? {c, path:options.path, command:options.command} : null;
+  $('pathswarning').hidden = !pendingPathWrite;
+  $('pathssection').hidden = !!pendingPathWrite;
+  $('pathsconfirm').hidden = !pendingPathWrite;
+  $('pathscancel').textContent = pendingPathWrite ? 'Cancel' : 'Close';
+  let loaded = true;
+  if (pendingPathWrite) $('pathsconfirmvalue').textContent = options.path;
+  else {
+    try { await refreshConversationPaths(c); }
+    catch (error) { loaded = false; $('pathserror').textContent = error.message; $('pathserror').hidden = false; }
+    renderPathsDialog(c);
+  }
+  $('pathsdialog').showModal(); $('pathscancel').focus();
+  return loaded;
+}
+function parsePathCommand(text) {
+  const match = text.match(/^\/path(?:\s+([\s\S]*))?$/i);
+  if (!match) return null;
+  const tail = (match[1] || '').trim();
+  if (!tail) return {action:'list', path:''};
+  const split = tail.match(/^(\S+)(?:\s+([\s\S]*))?$/);
+  const action = split[1].toLowerCase(), value = (split[2] || '').trim();
+  if (action === 'list') return {action, path:value};
+  if (action === 'add' || action === 'add-rw') return {action, path:value};
+  if (action === 'remove') {
+    const fresh = value === '--fresh' || value.startsWith('--fresh ');
+    return {action, fresh, path:(fresh ? value.slice(7) : value).trim()};
+  }
+  return {error:'Use /path add <path>, /path add-rw <path>, /path remove [--fresh] <path>, or /path list.'};
+}
+async function handlePathCommand(c, command, parsed) {
+  if (!meta.sandboxed) { toast('Additional paths require the Docker or Podman sandbox. Your draft is preserved.'); return; }
+  if (busy(c)) { toast('Wait for replies to finish before changing additional paths. Your draft is preserved.'); return; }
+  if (parsed.error) { toast(parsed.error); return; }
+  try { await flushChatForPlanMutation(); }
+  catch (error) { toast(error.message); return; }
+  if (parsed.action === 'list') {
+    if (parsed.path) { toast('/path list does not take a path.'); return; }
+    if (await openPathsDialog(c)) clearInput(c); return;
+  }
+  if (!parsed.path) { toast(`Add a path after /path ${parsed.action}.`); return; }
+  if (parsed.action === 'add-rw') { await openPathsDialog(c, {write:true, path:parsed.path, command}); return; }
+  try {
+    if (parsed.action === 'add') {
+      const result = await pathRequest(c, 'POST', {path:parsed.path, access:'ro'});
+      clearInput(c); toast(`Added ${result?.path || parsed.path} as read-only.`);
+    } else {
+      const result = await pathRequest(c, 'DELETE', {path:parsed.path, fresh:!!parsed.fresh});
+      if (parsed.fresh) c.participants.forEach(p => { p.session = ''; p.seen = c.log.length; p.freshContext = true; });
+      clearInput(c); saveSoon();
+      toast(`Removed ${result?.path || parsed.path} from future executions${parsed.fresh ? ' and restarted participant sessions' : ''}.`);
+    }
+  } catch (error) { toast(error.message + ' Your draft is preserved.'); }
+}
+$('pathscancel').onclick = () => { if (!pendingPathWrite?.saving) $('pathsdialog').close(); };
+$('pathsdialog').onclick = event => { if (event.target === event.currentTarget && !pendingPathWrite?.saving) $('pathsdialog').close(); };
+$('pathsdialog').oncancel = event => { if (pendingPathWrite?.saving) event.preventDefault(); };
+$('pathsdialog').onclose = () => { pendingPathWrite = null; };
+$('pathsconfirm').onclick = async () => {
+  const pending = pendingPathWrite;
+  if (!pending || busy(pending.c)) return;
+  pending.saving = true;
+  $('pathsconfirm').disabled = true; $('pathserror').hidden = true;
+  try {
+    await flushChatForPlanMutation();
+    const result = await pathRequest(pending.c, 'POST', {path:pending.path, access:'rw', confirmed:true});
+    if (cur() === pending.c && $('input').value.trim() === pending.command) clearInput(pending.c);
+    $('pathsdialog').close(); toast(`Added ${result?.path || pending.path} with write access for editors.`);
+  } catch (error) { $('pathserror').textContent = error.message + ' Your draft is preserved.'; $('pathserror').hidden = false; }
+  finally { if (pendingPathWrite === pending) pending.saving = false; $('pathsconfirm').disabled = false; }
+};
+$('pathsbtn').onclick = async () => {
+  const c = cur(); if (!c) return;
+  try { await flushChatForPlanMutation(); await openPathsDialog(c); }
+  catch (error) { toast(error.message); }
+};
 async function startEngineeringLoop(c, text) {
   if (["running", "paused", "awaiting_round_approval", "awaiting_implementer"].includes(c.engineeringLoop?.state)) { toast("Stop the current Loop Engineering before starting another."); return; }
   const reviewAlias = /^\/review\b/i.test(text);
@@ -2586,6 +2767,11 @@ $("form").onsubmit = async (e) => {
     clearConversation(c);
     return;
   }
+  const pathCommand = parsePathCommand(text);
+  if (pathCommand) {
+    await handlePathCommand(c, text, pathCommand);
+    return;
+  }
   const m = (text + " ").match(/^((?:@[\w-]+\s+)+)([\s\S]*)$/);
   let body = text;
   if (m) {
@@ -2596,6 +2782,7 @@ $("form").onsubmit = async (e) => {
     if (off.length) { toast(off.join(", ") + (off.length > 1 ? " are" : " is") + " disabled. Enable " + (off.length > 1 ? "them" : "it") + " in the participant's settings first."); return; }
     body = m[2].trim();
   }
+  if (parsePathCommand(body)) { toast('/path applies to the whole conversation. Remove participant mentions and try again.'); return; }
   const targets = recipients(c, text);
   const fresh = freshCommandTargets(c, body, targets);
   if (fresh) {
@@ -2627,6 +2814,7 @@ $("form").onsubmit = async (e) => {
 let acItems = [], acSel = 0;
 const MENTION_Q = /(^|[^\w-])@([\w-]*)$/;
 const SKILL_Q = /^((?:@[\w-]+\s+)*)\/([\w:.-]*)$/;
+const PATH_Q = /^\/path\s+(\S*)(?:\s+([\s\S]*))?$/i;
 let escapedMention = null;
 function acClose() { acItems = []; $("ac").classList.remove("open"); $("input").removeAttribute("aria-activedescendant"); }
 function mentionQuery(before) {
@@ -2656,6 +2844,27 @@ function acUpdate() {
       ? [{ type: "@", value: "all", label: "@all", sub: "Everyone in this conversation" }] : [];
     acItems = [...everyone, ...active(c).filter((p) => !used.includes(p.name) && p.name.toLowerCase().startsWith(q))
       .map((p) => ({ type: "@", value: p.name, label: "@" + p.name, sub: cap(p.agent) + (p.role ? " · " + p.role : "") }))];
+  } else if (c && (m = before.match(PATH_Q))) {
+    const action = m[1].toLowerCase(), value = m[2];
+    const actions = [
+      {value:'add', arg:'<path>', sub:'Add read-only path'},
+      {value:'add-rw', arg:'<path>', sub:'Add path with write access for editors'},
+      {value:'remove', arg:'[--fresh] <path>', sub:'Remove a path from future executions'},
+      {value:'list', sub:'Show this conversation\'s additional paths'},
+    ];
+    if (value === undefined) {
+      acItems = actions.filter(item => item.value.startsWith(action)).map(item => ({type:'path-action', label:'/path ' + item.value, off:meta.sandboxed ? '' : 'requires Docker or Podman', ...item}));
+    } else if (action === 'remove') {
+      if (!conversationPaths.has(c.id) && !conversationPathsLoading.has(c.id) && meta.sandboxed) {
+        conversationPathsLoading.add(c.id);
+        refreshConversationPaths(c).catch(() => {}).finally(() => { conversationPathsLoading.delete(c.id); if (cur() === c) acUpdate(); });
+      }
+      const fresh = value.startsWith('--fresh '), query = (fresh ? value.slice(8) : value).toLowerCase();
+      acItems = (conversationPaths.get(c.id) || []).filter(item => item.path.toLowerCase().includes(query)).map(item => ({
+        type:'path-value', value:item.path, label:item.path, prefix:fresh ? '/path remove --fresh ' : '/path remove ',
+        sub:`${item.access.toUpperCase()} · ${fresh ? 'remove and restart sessions' : 'remove from future executions'}`,
+      }));
+    }
   } else if (c && (m = before.match(SKILL_Q))) {
     const q = m[2].toLowerCase();
     const allAgy = recipients(c).length > 0 && recipients(c).every((p) => kindOf(p) === "agy");
@@ -2664,7 +2873,8 @@ function acUpdate() {
     const clear = { type: "/", value: "clear", label: "/clear", sub: "Clear the conversation and reset the context" };
     const loop = { type: "/", value: "loop", label: "/loop", arg: "[@implementer] [@reviewer] <objective>", sub: "Iterate implementation and review until approval" };
     const review = { type: "/", value: "review", label: "/review", arg: "[@reviewer] [@implementer] <objective>", sub: "Start an Engineering Loop by reviewing existing work" };
-    acItems = [fork, fresh, clear, loop, review, ...skills.filter((s) => s.name.toLowerCase().includes(q))
+    const path = { type: "/", value: "path", label: "/path", arg: "add|add-rw|remove|list", sub: "Manage this conversation's additional paths", off:m[1] ? 'conversation command; remove participant mentions' : meta.sandboxed ? '' : 'requires Docker or Podman' };
+    acItems = [fork, fresh, clear, loop, review, path, ...skills.filter((s) => s.name.toLowerCase().includes(q))
       .sort((a, b) => b.name.toLowerCase().startsWith(q) - a.name.toLowerCase().startsWith(q))
       .map((s) => ({ type: "/", value: s.name, label: "/" + s.name, arg: s.argument_hint,
         off: skillProblem(s.name, recipients(c)),
@@ -2689,6 +2899,11 @@ function acUpdate() {
 function acPick(idx) {
   const i = $("input"), it = acItems[idx];
   if (!it || it.off) return;
+  if (it.type === 'path-action' || it.type === 'path-value') {
+    const before = it.type === 'path-action' ? `/path ${it.value} ` : it.prefix + it.value;
+    i.value = before + i.value.slice(i.selectionStart); i.selectionStart = i.selectionEnd = before.length;
+    acSel = 0; onInput(); return;
+  }
   const re = it.type === "@" ? /@[\w-]*$/ : /\/[\w:.-]*$/;
   const before = i.value.slice(0, i.selectionStart).replace(re, it.type + it.value + " ");
   i.value = before + i.value.slice(i.selectionStart);
@@ -3429,7 +3644,13 @@ async function preparePlanSend(c) {
   }
 }
 $('planlink').onclick = () => openPlanDialog();
-$('conversationadvanced').ontoggle = () => { if ($('conversationadvanced').open) $('planorigin').open = false; };
+$('conversationadvanced').ontoggle = () => {
+  if (!$('conversationadvanced').open) return;
+  $('planorigin').open = false;
+  const c = cur(); if (!c || conversationPaths.has(c.id) || conversationPathsLoading.has(c.id) || !meta.sandboxed) return;
+  conversationPathsLoading.add(c.id);
+  refreshConversationPaths(c).catch(() => {}).finally(() => { conversationPathsLoading.delete(c.id); updatePathsSummary(c); });
+};
 $('planorigin').ontoggle = () => { if ($('planorigin').open) $('conversationadvanced').open = false; };
 $('advancedclose').onclick = () => { $('conversationadvanced').open = false; $('conversationadvanced').querySelector('summary').focus(); };
 $('historyclose').onclick = () => { $('planorigin').open = false; $('planorigin').querySelector('summary').focus(); };
