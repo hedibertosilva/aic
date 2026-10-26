@@ -354,6 +354,9 @@ const quotaModel = (agent, model) => model || meta.details?.[agent]?.model || ""
 function quotaVisualStatus(agent, model, inactive = false) {
   return ChatQuotas.visualStatus(quotaOf(agent, quotaModel(agent, model)), inactive);
 }
+function agentVisualStatus(agent, model, inactive = false) {
+  return ChatOnboarding.agentStatus(readiness, agent, quotaVisualStatus(agent, model, inactive), inactive);
+}
 function quotaLimitSnapshot(agent, model) {
   const window = ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)));
   if (!ChatQuotas.numeric(window?.used_pct)) return null;
@@ -1189,7 +1192,7 @@ function renderBar() {
     if (p.inactive) chip.setAttribute("aria-label", p.name + ", inactive");
     const identity = el("span", "chipidentity");
     const nameLine = el("span", "chipnameline");
-    nameLine.append(quotaStatusDot(quotaVisualStatus(p.agent, p.model, p.inactive), "agentstatus"), el("span", "chipname", p.name));
+    nameLine.append(quotaStatusDot(agentVisualStatus(p.agent, p.model, p.inactive), "agentstatus"), el("span", "chipname", p.name));
     identity.appendChild(nameLine);
     identity.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     chip.appendChild(identity);
@@ -2231,6 +2234,10 @@ function finishRunUI(c, p, entry, key) {
   }
   render();
   captureQuotaAfterRun(c, entry);
+  // Provider failures update the backend diagnostic cache. Pull that state
+  // immediately so the participant indicator and Environment agree. A user
+  // stop is deliberately soft and must not downgrade readiness.
+  if (entry.error && !entry.soft) refreshReadiness(c, {targets:[p]}).catch(() => {});
   if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
   if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
   else announce(`${p.name} finished.`);

@@ -16,6 +16,15 @@ test('only ready agents are selectable even with several configured integrations
   const many={agents:[...report.agents,{agent:'gemini',readiness:'ready'}]};
   assert.deepEqual(policy.selection(many,'').ready,['codex','gemini']);
 });
+test('participant status follows Environment readiness before quota status', () => {
+  const quota = {kind:'normal',label:'Quota normal'};
+  assert.deepEqual(policy.agentStatus(report,'claude',quota), {kind:'unavailable',label:'Agent blocked'});
+  const unknown = {agents:[{agent:'codex',readiness:'unknown',reason:'Run a real availability test'}]};
+  assert.deepEqual(policy.agentStatus(unknown,'codex',quota), {kind:'unknown',label:'Run a real availability test'});
+  assert.equal(policy.agentStatus(report,'codex',quota), quota);
+  const inactive = {kind:'inactive',label:'Inactive'};
+  assert.equal(policy.agentStatus(report,'claude',inactive,true), inactive, 'inactive remains an explicit participant state');
+});
 test('Environment counts infrastructure, default and participant agents, ignoring optional integrations and quota', () => {
   const current = { repository: {state:'ready'}, runtime: {state:'ready'}, image: {state:'not_required'},
     agents: [...report.agents, {agent:'gemini',readiness:'unknown'}] };

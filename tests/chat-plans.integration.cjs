@@ -232,6 +232,8 @@ else finish('Fixture reply');
   assert.equal(holderStopped.status,202);
   const first=await firstResponse;assert.equal(first.status,200);
   assert.match(await first.text(),/Stopped/);
+  const afterStop=await (await f.request('/api/diagnostics')).json();
+  assert.equal(afterStop.agents.find(agent=>agent.agent==='codex').readiness,'ready','user cancellation does not invalidate a successful agent test');
   const secondResult=await secondResponse;assert.equal(secondResult.status,200);
   const second=await secondResult.text();assert.match(second,/Second writer done/);
   assert.ok(fs.existsSync(path.join(f.root,'writer-two-started')),'cancelling the holder releases the next queued writer');

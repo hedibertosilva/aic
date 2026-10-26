@@ -212,6 +212,20 @@ test('reply layout and three chat widths stay independent and persist globally',
     assert.equal(await t.page.locator('.expandbtn').count(),1);
     assert.equal(await t.page.locator('.user .to').innerText(),'TO: Dev','legacy messages addressed to everyone list the participants');
     assert.equal(await t.page.locator('.user').evaluate(node=>getComputedStyle(node).borderRightWidth),'3px');
+    const sideBySideRatio=()=>t.page.locator('.row').evaluate(node=>node.getBoundingClientRect().width/node.parentElement.getBoundingClientRect().width);
+    const sideBySideLeftOffset=()=>t.page.locator('.row').evaluate(node=>node.getBoundingClientRect().left-node.parentElement.getBoundingClientRect().left);
+    assert.ok(Math.abs(await sideBySideRatio()-.75)<.01,'side-by-side replies consume 75% of chat width level 1');
+    assert.ok(Math.abs(await sideBySideLeftOffset())<1,'side-by-side replies align to the left');
+
+    await width.click();
+    assert.equal(await width.getAttribute('data-level'),'2');
+    assert.ok(Math.abs(await sideBySideRatio()-.75)<.01,'side-by-side replies consume 75% of chat width level 2');
+    await width.click();
+    assert.equal(await width.getAttribute('data-level'),'3');
+    assert.ok(Math.abs(await sideBySideRatio()-.75)<.01,'side-by-side replies consume 75% of chat width level 3');
+
+    await width.click();
+    assert.equal(await width.getAttribute('data-level'),'1');
 
     await stack.click();
     assert.equal(await stack.getAttribute('aria-pressed'),'true');

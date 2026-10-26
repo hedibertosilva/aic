@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 
 static CACHE_LOCK: Mutex<()> = Mutex::new(());
 static PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-const TTL: i64 = 24 * 60 * 60;
 const OUTPUT_LIMIT: u64 = 1 << 20;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -373,7 +372,7 @@ pub fn snapshot_agents(root: &Path, config: &Config, agents: &[String]) -> Diagn
 
 /// Validate only the requested agents against their last real test. This path
 /// checks runtime/image identity and local metadata, without auth CLI calls or
-/// starting probe containers. A missing/expired test still blocks execution.
+/// starting probe containers. A missing or invalidated test still blocks execution.
 pub fn for_send(root: &Path, config: &Config, agents: &[String]) -> Diagnostic {
     snapshot_selected(root, config, Some(agents), false)
 }
@@ -471,12 +470,15 @@ fn snapshot_selected(
                 origin: "passive".into(),
                 context: context.into(),
             };
-            if let Some(record) = cache.tests.get(name).filter(|r| {
-                r.signature == signature(config, name, &image_id)
-                    && r.result
-                        .tested_at
-                        .is_some_and(|t| now >= t && now - t < TTL)
-            }) {
+            // A successful real run remains evidence for this exact execution
+            // environment until the signature changes or a later run records a
+            // real failure. Expiring it by wall clock forced a paid provider call
+            // every day without learning anything new about the environment.
+            if let Some(record) = cache
+                .tests
+                .get(name)
+                .filter(|r| r.signature == signature(config, name, &image_id))
+            {
                 let passive_auth = d.authentication.clone();
                 let installation = d.installation.clone();
                 let host = d.host_installation.clone();

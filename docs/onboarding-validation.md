@@ -42,7 +42,8 @@ screenshots were inspected for the conversation disclosure and selection warning
 the disclosure's mobile bounds were verified within the viewport.
 Integration tests count auth/container invocations: preflight and sends perform
 no auth probes or diagnostic container launches, validate only recipients, and
-reject expired tests, changed binaries/images and unregistered paths. Existing
+reject changed binaries/images and unregistered paths. Cached successes do not
+expire solely because time passed. Existing
 quota, consumption and import tests remain included.
 
 During the initial distribution validation, static musl binaries were built for

@@ -21,7 +21,7 @@ test('diagnostic schema, paid consent, cached setup and config invalidation', {s
   d=JSON.parse(cli(f,['doctor','--json']).stdout);assert.equal(d.agents.find(a=>a.agent==='codex').readiness,'unknown');
   assert.equal(cli(f,['agent','test','codex','--yes']).status,0);
   const data=JSON.parse(fs.readFileSync(cache,'utf8'));data.tests.codex.result.tested_at-=90000;fs.writeFileSync(cache,JSON.stringify(data));
-  assert.equal(JSON.parse(cli(f,['doctor','--json']).stdout).agents.find(a=>a.agent==='codex').readiness,'unknown');
+  assert.equal(JSON.parse(cli(f,['doctor','--json']).stdout).agents.find(a=>a.agent==='codex').readiness,'ready','a successful test does not expire merely with time');
   assert.equal(cli(f,['agent','test','unknown','--yes']).status,1);
   const env=cli(f,['agent','test','codex','--yes'],{AIC_IN_SANDBOX:'0'});assert.equal(env.status,0);
   const configFile=path.join(f.root,'config/config.toml');let config=fs.readFileSync(configFile,'utf8');fs.writeFileSync(configFile,config.replace(/runtime = "none"/,'runtime = "docker"').replace(/sandbox="none"/,'sandbox="docker"'));
@@ -117,13 +117,13 @@ test('send preflight validates recipients and cache without auth probes or chang
   await f.request('/api/chat',{agent:'codex',prompt:'still works'});
   let response=await fetch(f.base+'/api/chat/preflight',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agents:['unknown']})});assert.equal(response.status,400);
   response=await fetch(f.base+'/api/chat/preflight',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://evil.example'},body:JSON.stringify({agents:['codex']})});assert.equal(response.status,403);
-  // Changed binary, expired test, and missing executable must all block cached sends.
+  // Changed binaries and missing executables block cached sends; age alone does not.
   fs.appendFileSync(path.join(f.root,'codex'),'\n// upgrade\n');
   report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'unknown');
   response=await fetch(f.base+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent:'codex',prompt:'blocked'})});assert.equal(response.status,409);
   assert.equal(cli(f,['agent','test','codex','--yes']).status,0);
   const cacheFile=path.join(f.root,'.aic/diagnostics/tests.json'),data=JSON.parse(fs.readFileSync(cacheFile,'utf8'));data.tests.codex.result.tested_at-=90000;fs.writeFileSync(cacheFile,JSON.stringify(data));
-  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'unknown');
+  report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'ready');
   fs.chmodSync(path.join(f.root,'codex'),0o644);
   report=await (await f.request('/api/chat/preflight',{agents:['codex']})).json();assert.equal(report.agents[0].readiness,'blocked');
  }finally{await f.close();}

@@ -74,8 +74,9 @@ then send the first message. An unavailable agent is never silently replaced.
 | Chat does not open | Use `aic chat --no-open` and open the printed URL. |
 
 `aic doctor --json` produces a diagnostic for automation. Tests are stored in
-`.aic/diagnostics/tests.json`, expire after 24 hours and do not store
-credentials, responses or provider stderr.
+`.aic/diagnostics/tests.json`, remain valid while the execution environment is
+unchanged and do not store credentials, responses or provider stderr. A later
+quota or execution failure blocks the agent; cancelling a run does not.
 
 ## Security and local data
 
