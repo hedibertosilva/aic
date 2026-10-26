@@ -216,6 +216,10 @@ test('reply layout and three chat widths stay independent and persist globally',
     const sideBySideLeftOffset=()=>t.page.locator('.row').evaluate(node=>node.getBoundingClientRect().left-node.parentElement.getBoundingClientRect().left);
     assert.ok(Math.abs(await sideBySideRatio()-.75)<.01,'side-by-side replies consume 75% of chat width level 1');
     assert.ok(Math.abs(await sideBySideLeftOffset())<1,'side-by-side replies align to the left');
+    await t.page.getByRole('button',{name:'Expand reply',exact:true}).click();
+    assert.ok(Math.abs(await sideBySideRatio()-1)<.01,'an expanded side-by-side reply fills the selected chat width');
+    await t.page.getByRole('button',{name:'Collapse reply',exact:true}).click();
+    assert.ok(Math.abs(await sideBySideRatio()-.75)<.01,'a collapsed side-by-side reply returns to 75%');
 
     await width.click();
     assert.equal(await width.getAttribute('data-level'),'2');
