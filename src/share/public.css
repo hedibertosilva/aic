@@ -5,24 +5,18 @@
 .shareapp:not([hidden]) { width: 100%; height: 100%; display: flex; overflow: hidden; }
 .sharepage aside > header { min-height: 58px; }
 .sharepage aside > header .badge { justify-self: end; }
-.shareheading { padding: 14px 20px 10px; display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); }
-.shareheading strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.shareheading span, #updated { color: var(--muted); font-size: 10px; }
-#conversations { min-height: 0; padding: 0 8px 12px; overflow-y: auto; flex: 1; }
-#conversations button { width: 100%; min-width: 0; padding: 8px 10px; display: flex; align-items: center; gap: 9px; color: var(--fg); background: transparent; border: 0; text-align: left; }
-#conversations button::before { width: 7px; height: 7px; flex: none; content: ""; background: var(--muted); border-radius: 50%; }
-#conversations button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#conversations button:hover { background: color-mix(in srgb, var(--fg) 6%, transparent); }
-#conversations button.active { color: var(--accent); background: var(--accent-soft); font-weight: 650; }
-#conversations button.active::before { background: var(--accent); }
-#sharefooter { margin: 0 16px; padding: 12px 0 16px; border-top: 1px solid var(--line); }
-#sharefooter button { width: 100%; color: var(--muted); background: var(--card); }
+#updated { color: var(--muted); font-size: 10px; }
+#sharefooter { margin: 8px 20px 10px; padding: 10px 10px 10px 12px; display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow-sm); }
+#sharefooter > div { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+#sharefooter strong, #sharefooter span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sharefooter strong { font-size: 12px; }
+#sharefooter span { color: var(--muted); font-size: 10px; }
+#sharefooter button { padding: 4px 8px; flex: none; color: var(--muted); background: var(--bg); font-size: 11px; }
 .sharepage main > #bar { min-height: 58px; }
 .sharepage #chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .sharepage .chip { cursor: default; }
 .sharepage .chip:hover { border-color: var(--line); background: var(--card); }
 .sharemode { align-self: center; }
-.sharedtitle { min-width: 0; overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .sharepage #view { min-height: 0; }
 .sharepage #msgs { padding-bottom: 24px; }
 .sharepage .user { cursor: default; }
