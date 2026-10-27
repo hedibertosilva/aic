@@ -15,9 +15,9 @@
         <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
         <span class="badge">Read only</span>
       </header>
-      <div class="shareheading"><strong id="share-title">Shared conversations</strong><span>Shared with you</span></div>
-      <nav id="conversations"></nav>
-      <footer id="sharefooter"><button id="logout" type="button">Lock sharing</button></footer>
+      <div id="searchbar"><input type="search" id="search" placeholder="Search" aria-label="Search shared conversations" autocomplete="off"></div>
+      <nav id="list"></nav>
+      <footer id="sharefooter"><div><strong id="share-title">Shared conversations</strong><span>Shared with you</span></div><button id="logout" type="button">Lock</button></footer>
     </aside>
     <div id="scrim"></div>
     <main>
@@ -29,7 +29,6 @@
         <button id="themebtn" class="icon" type="button" aria-label="Use dark theme" title="Use dark theme"></button>
       </div>
       <div id="contextbar" aria-label="Shared conversation status">
-        <span id="conversation-title" class="sharedtitle"></span>
         <span class="grow"></span>
         <span id="updated"></span>
       </div>
@@ -55,7 +54,7 @@
       </div>
       <div class="configfooter">
         <p id="error" class="note err" role="alert" hidden></p>
-        <div class="buttons"><span class="grow"></span><button id="unlock-button" class="primary" type="submit">Open sharing</button></div>
+        <div class="buttons"><span class="grow"></span><button id="unlock-button" class="primary" type="submit">Open Sharing</button></div>
       </div>
     </form>
   </dialog>
