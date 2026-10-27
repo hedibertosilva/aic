@@ -1142,38 +1142,44 @@ async function openShareDialog(c) {
   try { await refreshShares(); } catch (error) { $("sharebody").replaceChildren(el("p", "shareerror", error.message)); }
 }
 function shareButton(label, action, cls = "") { const button=el("button",cls,label); button.type="button"; button.onclick=action; return button; }
+function defaultShareName() {
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short" }).format(new Date());
+}
 function renderShareDialog() {
   const root=$("sharebody"); root.textContent="";
   if (!shareData?.configured) {
-    const section=el("section","sharesection");
-    section.append(el("h3","","Connect a sharing server"),el("p","","Enter the public relay URL and the publisher token printed by aic server start."));
+    const section=el("section","sharesection"), card=el("div","sharecard");
+    section.append(el("h3","","Sharing server"));
+    card.append(el("p","","Enter the public relay URL and the publisher token printed by aic server start."));
     const urlLabel=el("label","sharefield","Server URL"), url=el("input"); url.type="url"; url.placeholder="https://share.example.com"; url.value=shareData?.relay_url||""; urlLabel.append(url);
     const tokenLabel=el("label","sharefield","Publisher token"), token=el("input"); token.type="password"; token.autocomplete="off"; tokenLabel.append(token);
+    const fields=el("div","sharefields"); fields.append(urlLabel,tokenLabel); card.append(fields);
     const error=el("p","shareerror"); error.hidden=true;
     const buttons=el("div","sharebuttons"); buttons.append(shareButton("Connect",async()=>{error.hidden=true;try{await shareRequest("/config","POST",{relay_url:url.value,publisher_token:token.value});await refreshShares();}catch(err){error.textContent=err.message;error.hidden=false;}},"primary"));
-    section.append(urlLabel,tokenLabel,error,buttons); root.append(section); return;
+    card.append(error,buttons); section.append(card); root.append(section); return;
   }
   if (shareCredentials) {
     const credentials=el("section","sharepassword");
     credentials.append(el("strong","","Save this password now — it cannot be recovered."),el("code","",shareCredentials.password));
     const buttons=el("div","sharebuttons");
-    if(shareCredentials.url) buttons.append(shareButton("Copy link",()=>copyText(shareCredentials.url)));
+    if(shareCredentials.url) buttons.append(shareButton("Copy Link",()=>copyText(shareCredentials.url)));
     buttons.append(shareButton("Copy password",()=>copyText(shareCredentials.password)));
     credentials.append(buttons); root.append(credentials);
   }
-  const editor=el("section","sharesection"), editing=shareEditing && (shareData.shares||[]).find(item=>item.shared_id===shareEditing);
-  editor.append(el("h3","",editing?"Edit sharing":"Create sharing"));
-  const nameLabel=el("label","sharefield","Name (optional)"), name=el("input"); name.maxLength=120; name.value=editing?.name||shareSeed?.title||""; nameLabel.append(name); editor.append(nameLabel);
+  const editor=el("section","sharesection"), editorCard=el("div","sharecard"), editing=shareEditing && (shareData.shares||[]).find(item=>item.shared_id===shareEditing);
+  editor.append(el("h3","",editing?"Edit Sharing":"Create Sharing"));
+  const nameLabel=el("label","sharefield","Name (optional)"), name=el("input"); name.maxLength=120; name.value=editing?.name||defaultShareName(); nameLabel.append(name);
   const expiryLabel=el("label","sharefield","Expires (optional)"), expiry=el("input"); expiry.type="datetime-local";
-  if(editing?.expires_at){const date=new Date(editing.expires_at);expiry.value=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);} expiryLabel.append(expiry); editor.append(expiryLabel);
+  if(editing?.expires_at){const date=new Date(editing.expires_at);expiry.value=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);} expiryLabel.append(expiry);
+  const fields=el("div","sharefields"); fields.append(nameLabel,expiryLabel); editorCard.append(fields);
   const choices=el("div","shareconversations");
   const selected=new Set(editing?.conversation_ids || (shareSeed?[shareSeed.id]:[]));
   for(const conversation of state.convs){const label=el("label","sharecheck"),check=el("input");check.type="checkbox";check.value=conversation.id;check.checked=selected.has(conversation.id);label.append(check,document.createTextNode(conversation.title));choices.append(label);}
-  editor.append(el("strong","","Conversations"),choices);
+  editorCard.append(el("strong","","Conversations"),choices);
   const error=el("p","shareerror"); error.hidden=true;
   const buttons=el("div","sharebuttons");
-  if(editing) buttons.append(shareButton("Cancel edit",()=>{shareEditing=null;renderShareDialog()}));
-  buttons.append(shareButton(editing?"Save changes":"Create sharing",async()=>{
+  if(editing) buttons.append(shareButton("Cancel Edit",()=>{shareEditing=null;renderShareDialog()}));
+  buttons.append(shareButton(editing?"Save Changes":"Create Sharing",async()=>{
     error.hidden=true;
     const conversation_ids=[...choices.querySelectorAll("input:checked")].map(input=>input.value);
     if(!conversation_ids.length){error.textContent="Select at least one conversation.";error.hidden=false;return;}
@@ -1186,7 +1192,7 @@ function renderShareDialog() {
       shareEditing=null; shareData=await shareRequest(); renderShareDialog();
     }catch(err){error.textContent=err.message;error.hidden=false;}
   },"primary"));
-  editor.append(error,buttons); root.append(editor);
+  editorCard.append(error,buttons); editor.append(editorCard); root.append(editor);
   const list=el("section","sharesection"); list.append(el("h3","","Active sharing links"));
   const items=el("div","sharelist");
   if(!(shareData.shares||[]).length) items.append(el("p","","No sharing links yet."));
@@ -1195,7 +1201,7 @@ function renderShareDialog() {
     head.append(el("strong","",share.name||"Untitled sharing"),el("span","",`${share.conversation_ids.length} conversation${share.conversation_ids.length===1?"":"s"}`));
     const url=el("div","shareurl",share.url), status=el("p",share.last_error?"shareerror":"",share.last_error?`Sync error: ${share.last_error}`:share.last_synced_at?`Synced ${new Date(share.last_synced_at).toLocaleString()}`:"Waiting for sync");
     const actions=el("div","sharebuttons");
-    actions.append(shareButton("Copy link",()=>copyText(share.url)),shareButton("Edit",()=>{shareEditing=share.shared_id;shareCredentials=null;renderShareDialog()}),shareButton("New password",async()=>{try{const result=await shareRequest(`/${encodeURIComponent(share.shared_id)}/rotate-password`,"POST",{});shareCredentials={password:result.password,url:share.url};renderShareDialog();}catch(err){toast(err.message);}}),shareButton("Revoke",async()=>{if(!confirm("Revoke this sharing link? It will stop working immediately."))return;try{await shareRequest(`/${encodeURIComponent(share.shared_id)}`,"DELETE");shareCredentials=null;await refreshShares();}catch(err){toast(err.message);}},"danger"));
+    actions.append(shareButton("Copy Link",()=>copyText(share.url)),shareButton("Edit",()=>{shareEditing=share.shared_id;shareCredentials=null;renderShareDialog()}),shareButton("New Password",async()=>{try{const result=await shareRequest(`/${encodeURIComponent(share.shared_id)}/rotate-password`,"POST",{});shareCredentials={password:result.password,url:share.url};renderShareDialog();}catch(err){toast(err.message);}}),shareButton("Revoke",async()=>{if(!confirm("Revoke this sharing link? It will stop working immediately."))return;try{await shareRequest(`/${encodeURIComponent(share.shared_id)}`,"DELETE");shareCredentials=null;await refreshShares();}catch(err){toast(err.message);}},"danger"));
     item.append(head,url,status,actions);items.append(item);
   }
   list.append(items);root.append(list);
@@ -3377,12 +3383,14 @@ $("addbtn").appendChild(icon("plus"));
 setIcon($("copyrepo"), "copy");
 setIcon($("branchicon"), "branch");
 setIcon($("planicon"), "plan");
+setIcon($("shareicon"), "share");
 setIcon($("advancedicon"), "settings");
 setIcon($("historyicon"), "history");
 setIcon($("advancedclose"), "close");
 setIcon($("historyclose"), "close");
 $("copyrepo").onclick = () => copyText(meta.repo, $("copyrepo"));
 $("addbtn").onclick = () => openDialog(null);
+$("sharebtn").onclick = () => { const c=cur(); if(c)openShareDialog(c); };
 $("configbtn").appendChild(icon("settings"));
 $("configbtn").onclick = openConfig;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
@@ -3587,6 +3595,7 @@ function showPlanError(message) {
 function renderPlanContext() {
   const c = cur(), linked = !!c?.planBinding?.plan_id, plan = planFor(c);
   $('planlink').hidden = !c;
+  $('sharebtn').hidden = !c;
   $('planlabel').textContent = linked ? (plan?.title || c.planBinding.plan_id) : 'Free conversation';
   $('planlink').title = linked ? 'Change plan' : 'Link or create plan';
   $('planlink').setAttribute('aria-label', $('planlink').title + ': ' + $('planlabel').textContent);
