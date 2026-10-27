@@ -430,6 +430,11 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
         std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
     let db = Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = path.parent() { std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?; }
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     db.busy_timeout(Duration::from_secs(5))?;
     // One compact document is intentional: the web client already has a rich,
     // evolving conversation graph (forks, participant cursors and native CLI
@@ -505,6 +510,7 @@ fn open_chat_db(repo_root: &Path) -> Result<Connection> {
     consumption::init(&db)?;
     paths::init(&db)?;
     plans::init(&db)?;
+    crate::share::local::init(&db)?;
     Ok(db)
 }
 
@@ -1268,7 +1274,13 @@ fn load_chat_state(app: &App) -> Result<serde_json::Value> {
 
 fn save_chat_state(app: &App, req: ChatStateRequest) -> Result<u64> {
     let mut db = app.chat_db.lock().expect("chat database lock poisoned");
-    plans::save_snapshot(&mut db, &app.repo_root, req.state, req.drafts, req.revision)
+    let public_source = req.state.clone();
+    let revision = plans::save_snapshot(&mut db, &app.repo_root, req.state, req.drafts, req.revision)?;
+    drop(db);
+    // Sharing is best-effort and asynchronous: a relay outage must never
+    // prevent or delay local chat persistence.
+    crate::share::local::queue_sync(&app.repo_root,public_source);
+    Ok(revision)
 }
 
 fn header(name: &str, value: &str) -> Header {
@@ -1335,6 +1347,47 @@ fn handle(app: &Arc<App>, mut request: Request) -> Result<()> {
     }
 
     let path = request.url().split('?').next().unwrap_or("/").to_string();
+    if path == "/api/shares" || path.starts_with("/api/shares/") {
+        let json_request = header_value(&request, "Content-Type").is_some_and(|value| value.starts_with("application/json"));
+        if !same_origin(&request)
+            || (request.method() != &Method::Get && request.method() != &Method::Delete && !json_request)
+        {
+            return respond_text(request, 403, "text/plain", "forbidden");
+        }
+        let mut body = String::new();
+        if request.method() != &Method::Get && request.method() != &Method::Delete {
+            request.as_reader().take(MAX_BODY + 1).read_to_string(&mut body)?;
+            if body.len() as u64 > MAX_BODY { return respond_text(request, 413, "text/plain", "Share request is too large"); }
+        }
+        let result = {
+            let db = app.chat_db.lock().expect("chat database lock poisoned");
+            if path == "/api/shares" && request.method() == &Method::Get {
+                crate::share::local::list(&db)
+            } else if path == "/api/shares/config" && request.method() == &Method::Post {
+                serde_json::from_str::<crate::share::local::ConfigureRequest>(&body)
+                    .map_err(anyhow::Error::from).and_then(|payload| crate::share::local::configure(&db,payload))
+            } else if path == "/api/shares" && request.method() == &Method::Post {
+                serde_json::from_str::<crate::share::local::ShareRequest>(&body)
+                    .map_err(anyhow::Error::from).and_then(|payload| crate::share::local::create(&db,payload))
+            } else if let Some(rest) = path.strip_prefix("/api/shares/") {
+                let (id,action)=rest.split_once('/').map_or((rest,""),|(id,action)|(id,action));
+                if id.is_empty() || id.contains('/') {
+                    Err(anyhow!("Invalid share id"))
+                } else if action.is_empty() && request.method() == &Method::Put {
+                    serde_json::from_str::<crate::share::local::ShareRequest>(&body)
+                        .map_err(anyhow::Error::from).and_then(|payload| crate::share::local::update(&db,id,payload))
+                } else if action == "rotate-password" && request.method() == &Method::Post {
+                    crate::share::local::rotate_password(&db,id)
+                } else if action.is_empty() && request.method() == &Method::Delete {
+                    crate::share::local::revoke(&db,id).map(|_|serde_json::json!({"revoked":true}))
+                } else { Err(anyhow!("Unknown share operation")) }
+            } else { Err(anyhow!("Unknown share operation")) }
+        };
+        return match result {
+            Ok(value)=>respond_text(request,200,"application/json",value.to_string()),
+            Err(error)=>respond_text(request,400,"application/json",serde_json::json!({"error":error.to_string()}).to_string()),
+        };
+    }
     if let Some(id) = path
         .strip_prefix("/api/conversations/")
         .and_then(|rest| rest.strip_suffix("/paths"))

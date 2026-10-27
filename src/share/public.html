@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>aic shared conversations</title>
+  <link rel="stylesheet" href="/share.css">
+</head>
+<body>
+  <main id="unlock" class="unlock">
+    <form id="unlock-form" class="panel">
+      <div class="mark">aic</div>
+      <h1>Shared conversations</h1>
+      <p>Enter the password provided by the person who shared this link.</p>
+      <label>Password<input id="password" type="password" autocomplete="current-password" required autofocus></label>
+      <div id="error" class="error" role="alert"></div>
+      <button type="submit">Open</button>
+    </form>
+  </main>
+  <div id="app" class="app" hidden>
+    <aside><header><strong id="share-title">Shared conversations</strong><small>Read only</small></header><nav id="conversations"></nav></aside>
+    <main class="conversation"><header><div><h1 id="conversation-title"></h1><span id="updated"></span></div><button id="logout" type="button">Lock</button></header><section id="messages"></section></main>
+  </div>
+  <script src="/share.js" defer></script>
+</body>
+</html>

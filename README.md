@@ -7,7 +7,8 @@ creating plans and tracking implementation in one conversation.
 
 Everything goes through the providers' CLIs. aic does not create an intermediary
 account or send code to its own service; conversations, plans and state stay in
-the local checkout.
+the local checkout unless you explicitly publish selected conversations through
+the optional read-only sharing server.
 
 ## Why use aic
 
@@ -185,6 +186,7 @@ the configuration.
 | `aic agent status` | Read quota information reported by providers. |
 | `aic init` | Create the local aic structure in the checkout. |
 | `aic chat` | Start the local web chat. |
+| `aic server start --public-url https://share.example.com` | Start the optional read-only sharing relay in a container. |
 | `aic config ...` | View or change defaults. |
 | `aic sandbox build` | Create or update the sandbox image. |
 
@@ -193,5 +195,7 @@ the configuration.
 The [documentation index](docs/README.md) separates user guides from contracts
 and implementation documents. Start with [setup and recovery](docs/onboarding.md),
 [worktrees](docs/worktrees.md) and [plans in chat](docs/chat-plans.md).
+Read [read-only conversation sharing](docs/sharing.md) to deploy a public relay
+and publish selected conversations from the graphical interface.
 
 To develop aic itself, see [building from source](docs/build-from-source.md).

@@ -2,6 +2,13 @@
 (function (root) {
   const policy = {
     ready: (report, name) => !!report?.agents?.some(a => a.agent === name && a.readiness === 'ready'),
+    agentStatus: (report, name, quotaStatus, inactive = false) => {
+      if (inactive) return quotaStatus;
+      const diagnostic = report?.agents?.find(agent => agent.agent === name);
+      if (diagnostic?.readiness === 'blocked') return {kind:'unavailable', label:diagnostic.reason || 'Agent blocked'};
+      if (diagnostic && diagnostic.readiness !== 'ready') return {kind:'unknown', label:diagnostic.reason || 'Agent status unknown'};
+      return quotaStatus;
+    },
     initial: (report, preference) => policy.ready(report, preference) ? preference : '',
     selection: (report, preference) => {
       const ready = (report?.agents || []).filter(a => a.readiness === 'ready').map(a => a.agent);

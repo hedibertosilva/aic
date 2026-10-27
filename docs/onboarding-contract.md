@@ -18,12 +18,12 @@ Unknown authentication must stay unknown; quota errors never imply logout.
 
 Last tests live in `.aic/diagnostics/tests.json`, local to the checkout, written
 atomically with owner-only permissions. No credentials, session IDs, responses,
-stderr or account details are stored. Results expire after 24 hours. Invalidation
-includes binary path/size/modification time, runtime and executable identity,
+stderr or account details are stored. Successful results do not expire merely
+with time. Invalidation includes binary path/size/modification time, runtime and executable identity,
 image content ID, effective agent/sandbox configuration, relevant credential-file
 metadata and fingerprints of relevant provider environment variables (values are
 never persisted or displayed). A real
-execution failure replaces the previous success. Quota exhaustion preserves
+execution failure replaces the previous success; user cancellation does not. Quota exhaustion preserves
 known authentication and independently reports quota exhaustion.
 
 Diagnosis does not generate provider responses. `agent test` requires interactive

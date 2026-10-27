@@ -58,6 +58,7 @@ const ICONS = {
   stack: I('<rect x="4" y="3.5" width="16" height="7.5" rx="1.5"/><rect x="4" y="13" width="16" height="7.5" rx="1.5"/>'),
   comment: I('<path d="M4 5h11a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H9l-4 3v-3H4z"/><path d="M17 9h3v8h-1v3l-3-3h-4"/>'),
   download: I('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>'),
+  share: I('<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.3 10.8l7.4-4.4M8.3 13.2l7.4 4.4"/>'),
   alert: I('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>'),
   rename: I('<path d="M4 20h16"/><path d="M6 16l9.5-9.5 3 3L9 19H6z"/>'),
   pin: I('<path d="M9 3h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 14v7"/>'),
@@ -353,6 +354,9 @@ const quotaOf = (agent, model) => { const q = quotaData.agents.find(q => q.agent
 const quotaModel = (agent, model) => model || meta.details?.[agent]?.model || "";
 function quotaVisualStatus(agent, model, inactive = false) {
   return ChatQuotas.visualStatus(quotaOf(agent, quotaModel(agent, model)), inactive);
+}
+function agentVisualStatus(agent, model, inactive = false) {
+  return ChatOnboarding.agentStatus(readiness, agent, quotaVisualStatus(agent, model, inactive), inactive);
 }
 function quotaLimitSnapshot(agent, model) {
   const window = ChatQuotas.primary(quotaOf(agent, quotaModel(agent, model)));
@@ -1088,6 +1092,7 @@ function convRow(c) {
     item("rename", "Rename", () => openRename(c));
     item("copy", "Clone agents", () => cloneAgents(c));
     item("retry", "Fork conversation", () => forkConversation(c));
+    item("share", "Share read-only", () => openShareDialog(c));
     item("download", "Export as Markdown", () => exportConv(c, "md"));
     item("download", "Export as JSON", () => exportConv(c, "json"));
     item("trash", "Delete", () => removeConv(c), "danger");
@@ -1116,6 +1121,88 @@ function exportConv(c, kind) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+
+/* ---------- read-only sharing ---------- */
+let shareData = null, shareSeed = null, shareEditing = null, shareCredentials = null;
+async function shareRequest(path = "", method = "GET", body) {
+  const response = await fetch("/api/shares" + path, {
+    method, headers: body ? {"Content-Type":"application/json"} : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let value = null; try { value = text ? JSON.parse(text) : null; } catch {}
+  if (!response.ok) throw new Error(value?.error || text || "Sharing request failed.");
+  return value;
+}
+async function refreshShares() { shareData = await shareRequest(); renderShareDialog(); }
+async function openShareDialog(c) {
+  shareSeed = c; shareEditing = null; shareCredentials = null;
+  $("sharebody").replaceChildren(el("p", "note", "Loading sharing settings…"));
+  $("sharedialog").showModal();
+  try { await refreshShares(); } catch (error) { $("sharebody").replaceChildren(el("p", "shareerror", error.message)); }
+}
+function shareButton(label, action, cls = "") { const button=el("button",cls,label); button.type="button"; button.onclick=action; return button; }
+function renderShareDialog() {
+  const root=$("sharebody"); root.textContent="";
+  if (!shareData?.configured) {
+    const section=el("section","sharesection");
+    section.append(el("h3","","Connect a sharing server"),el("p","","Enter the public relay URL and the publisher token printed by aic server start."));
+    const urlLabel=el("label","sharefield","Server URL"), url=el("input"); url.type="url"; url.placeholder="https://share.example.com"; url.value=shareData?.relay_url||""; urlLabel.append(url);
+    const tokenLabel=el("label","sharefield","Publisher token"), token=el("input"); token.type="password"; token.autocomplete="off"; tokenLabel.append(token);
+    const error=el("p","shareerror"); error.hidden=true;
+    const buttons=el("div","sharebuttons"); buttons.append(shareButton("Connect",async()=>{error.hidden=true;try{await shareRequest("/config","POST",{relay_url:url.value,publisher_token:token.value});await refreshShares();}catch(err){error.textContent=err.message;error.hidden=false;}},"primary"));
+    section.append(urlLabel,tokenLabel,error,buttons); root.append(section); return;
+  }
+  if (shareCredentials) {
+    const credentials=el("section","sharepassword");
+    credentials.append(el("strong","","Save this password now — it cannot be recovered."),el("code","",shareCredentials.password));
+    const buttons=el("div","sharebuttons");
+    if(shareCredentials.url) buttons.append(shareButton("Copy link",()=>copyText(shareCredentials.url)));
+    buttons.append(shareButton("Copy password",()=>copyText(shareCredentials.password)));
+    credentials.append(buttons); root.append(credentials);
+  }
+  const editor=el("section","sharesection"), editing=shareEditing && (shareData.shares||[]).find(item=>item.shared_id===shareEditing);
+  editor.append(el("h3","",editing?"Edit sharing":"Create sharing"));
+  const nameLabel=el("label","sharefield","Name (optional)"), name=el("input"); name.maxLength=120; name.value=editing?.name||shareSeed?.title||""; nameLabel.append(name); editor.append(nameLabel);
+  const expiryLabel=el("label","sharefield","Expires (optional)"), expiry=el("input"); expiry.type="datetime-local";
+  if(editing?.expires_at){const date=new Date(editing.expires_at);expiry.value=new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16);} expiryLabel.append(expiry); editor.append(expiryLabel);
+  const choices=el("div","shareconversations");
+  const selected=new Set(editing?.conversation_ids || (shareSeed?[shareSeed.id]:[]));
+  for(const conversation of state.convs){const label=el("label","sharecheck"),check=el("input");check.type="checkbox";check.value=conversation.id;check.checked=selected.has(conversation.id);label.append(check,document.createTextNode(conversation.title));choices.append(label);}
+  editor.append(el("strong","","Conversations"),choices);
+  const error=el("p","shareerror"); error.hidden=true;
+  const buttons=el("div","sharebuttons");
+  if(editing) buttons.append(shareButton("Cancel edit",()=>{shareEditing=null;renderShareDialog()}));
+  buttons.append(shareButton(editing?"Save changes":"Create sharing",async()=>{
+    error.hidden=true;
+    const conversation_ids=[...choices.querySelectorAll("input:checked")].map(input=>input.value);
+    if(!conversation_ids.length){error.textContent="Select at least one conversation.";error.hidden=false;return;}
+    try{
+      await flushChatForPlanMutation();
+      const expires_at=expiry.value?new Date(expiry.value).getTime():null;
+      const payload={name:name.value.trim(),conversation_ids,expires_at};
+      const result=await shareRequest(editing?`/${encodeURIComponent(editing.shared_id)}`:"",editing?"PUT":"POST",payload);
+      if(result?.password) shareCredentials={password:result.password,url:result.url};
+      shareEditing=null; shareData=await shareRequest(); renderShareDialog();
+    }catch(err){error.textContent=err.message;error.hidden=false;}
+  },"primary"));
+  editor.append(error,buttons); root.append(editor);
+  const list=el("section","sharesection"); list.append(el("h3","","Active sharing links"));
+  const items=el("div","sharelist");
+  if(!(shareData.shares||[]).length) items.append(el("p","","No sharing links yet."));
+  for(const share of shareData.shares||[]){
+    const item=el("article","shareitem"), head=el("div","shareitemhead");
+    head.append(el("strong","",share.name||"Untitled sharing"),el("span","",`${share.conversation_ids.length} conversation${share.conversation_ids.length===1?"":"s"}`));
+    const url=el("div","shareurl",share.url), status=el("p",share.last_error?"shareerror":"",share.last_error?`Sync error: ${share.last_error}`:share.last_synced_at?`Synced ${new Date(share.last_synced_at).toLocaleString()}`:"Waiting for sync");
+    const actions=el("div","sharebuttons");
+    actions.append(shareButton("Copy link",()=>copyText(share.url)),shareButton("Edit",()=>{shareEditing=share.shared_id;shareCredentials=null;renderShareDialog()}),shareButton("New password",async()=>{try{const result=await shareRequest(`/${encodeURIComponent(share.shared_id)}/rotate-password`,"POST",{});shareCredentials={password:result.password,url:share.url};renderShareDialog();}catch(err){toast(err.message);}}),shareButton("Revoke",async()=>{if(!confirm("Revoke this sharing link? It will stop working immediately."))return;try{await shareRequest(`/${encodeURIComponent(share.shared_id)}`,"DELETE");shareCredentials=null;await refreshShares();}catch(err){toast(err.message);}},"danger"));
+    item.append(head,url,status,actions);items.append(item);
+  }
+  list.append(items);root.append(list);
+}
+$("shareclose").onclick=()=>$("sharedialog").close();
+$("sharedialog").onclick=event=>{if(event.target===event.currentTarget)$("sharedialog").close();};
+$("sharedialog").onclose=()=>{shareSeed=shareEditing=shareCredentials=null;};
 
 /* ---------- file import ---------- */
 function chooseImport() { $("importfile").click(); }
@@ -1189,7 +1276,7 @@ function renderBar() {
     if (p.inactive) chip.setAttribute("aria-label", p.name + ", inactive");
     const identity = el("span", "chipidentity");
     const nameLine = el("span", "chipnameline");
-    nameLine.append(quotaStatusDot(quotaVisualStatus(p.agent, p.model, p.inactive), "agentstatus"), el("span", "chipname", p.name));
+    nameLine.append(quotaStatusDot(agentVisualStatus(p.agent, p.model, p.inactive), "agentstatus"), el("span", "chipname", p.name));
     identity.appendChild(nameLine);
     identity.appendChild(el("small", "", cap(p.agent) + (p.model ? " · " + cap(p.model) : "")));
     chip.appendChild(identity);
@@ -2231,6 +2318,10 @@ function finishRunUI(c, p, entry, key) {
   }
   render();
   captureQuotaAfterRun(c, entry);
+  // Provider failures update the backend diagnostic cache. Pull that state
+  // immediately so the participant indicator and Environment agree. A user
+  // stop is deliberately soft and must not downgrade readiness.
+  if (entry.error && !entry.soft) refreshReadiness(c, {targets:[p]}).catch(() => {});
   if (c.planBinding?.plan_id && !busy(c)) refreshPlanBinding(c).catch(error => { if (cur() === c) showPlanError(error.message); });
   if (!busy(c)) announce(cur() === c ? "Replies finished." : `Replies finished in “${c.title}”.`);
   else announce(`${p.name} finished.`);

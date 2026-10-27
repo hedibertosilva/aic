@@ -9,6 +9,7 @@ guide to install and start your first chat.
 - [Worktrees](worktrees.md): how the chat identifies and selects checkouts.
 - [Plans in chat](chat-plans.md): plans, tasks, execution and validation.
 - [Conversation import](chat-import.md): importing and exporting history.
+- [Read-only sharing](sharing.md): deploying a relay and publishing selected conversations.
 - [Building from source](build-from-source.md): development and manual installation.
 
 ## Implementation references

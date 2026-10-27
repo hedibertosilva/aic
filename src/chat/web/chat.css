@@ -210,10 +210,10 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 #layout .chatwidth[data-level="2"] { color: var(--fg); background: var(--panel); }
 #layout .chatwidth[data-level="3"] { color: var(--accent); background: var(--panel); }
 .wrap { max-width: 1100px; margin: 0 auto; }
-/* A round with 3+ replies breaks out of the 1100px column and spreads to the chat's width, 50px in from each side.
-   Only that row changes, and not in the stacked layout; `cqw` is the width of #msgs, whose content box the .wrap is centred in. */
+/* Side-by-side replies use three quarters of the selected chat width (levels 1, 2 and 3). */
 #msgs { container-type: inline-size; }
-#msgs:not(.stack) .row.wide { width: max(100%, calc(100cqw - 100px)); margin-inline: calc((100% - max(100%, calc(100cqw - 100px))) / 2); }
+#msgs.cols .row { width: 75%; max-width: none; margin-inline: 0 auto; }
+#msgs.cols .row.focus { width: 100%; }
 
 .user { background: var(--user); border-radius: var(--radius); padding: 8px 14px; margin: 0 0 12px auto; max-width: 640px; position: relative;
   overflow-wrap: anywhere; width: fit-content; min-width: 120px; }
@@ -284,6 +284,30 @@ main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: r
 .after { display: flex; justify-content: center; margin: -4px 0 18px; }
 .after button { border-radius: var(--radius); display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
 .after button:hover { color: var(--fg); border-color: var(--muted); }
+
+/* read-only sharing */
+#sharedialog { width: min(720px, calc(100vw - 24px)); }
+.sharebody { display: grid; gap: 14px; min-height: 120px; }
+.sharesection { padding: 14px; display: grid; gap: 11px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+.sharesection h3 { margin: 0; font-size: 14px; }
+.sharesection p { margin: 0; color: var(--muted); }
+.sharefield { display: grid; gap: 5px; font-size: 12px; font-weight: 650; }
+.sharefield input { width: 100%; }
+.shareconversations { max-height: 210px; overflow: auto; display: grid; gap: 5px; }
+.sharecheck { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--line); border-radius: var(--radius); font-weight: 500; }
+.sharecheck input { width: auto; }
+.sharebuttons { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.sharebuttons .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.sharebuttons .danger { color: var(--err); }
+.sharelist { display: grid; gap: 8px; }
+.shareitem { padding: 11px; border: 1px solid var(--line); border-radius: var(--radius); }
+.shareitemhead { display: flex; gap: 8px; align-items: baseline; }
+.shareitemhead strong { flex: 1; }
+.shareitemhead span { color: var(--muted); font-size: 11px; }
+.shareurl { margin: 6px 0; overflow: hidden; color: var(--accent); font: 11px ui-monospace,monospace; text-overflow: ellipsis; white-space: nowrap; }
+.sharepassword { padding: 12px; background: var(--accent-soft); border: 1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); border-radius: var(--radius); }
+.sharepassword code { display: block; margin-top: 5px; font-size: 14px; overflow-wrap: anywhere; user-select: all; }
+.shareerror { color: var(--err) !important; }
 
 /* empty state */
 #empty { width: min(100%, 820px); margin: clamp(32px, 8vh, 88px) auto 0; padding-bottom: 32px; }

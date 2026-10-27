@@ -1,5 +1,6 @@
 use clap::error::ErrorKind;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 use crate::config::Mode;
 
@@ -97,6 +98,61 @@ pub enum Commands {
     Config {
         #[command(subcommand)]
         command: Option<ConfigCommands>,
+    },
+    /// Run and manage the public read-only conversation sharing server.
+    Server {
+        #[command(subcommand)]
+        command: ServerCommands,
+    },
+    /// Internal entrypoint used by the public sharing container.
+    #[command(hide = true)]
+    ShareRelay {
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        #[arg(long, default_value = "/data")]
+        data_dir: PathBuf,
+        #[arg(long)]
+        public_url: String,
+        #[arg(long, env = "AIC_SHARE_ADMIN_TOKEN", hide_env_values = true)]
+        admin_token: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ServerCommands {
+    /// Start the sharing relay in a Docker or Podman container.
+    Start {
+        /// Browser-facing base URL, normally provided by a TLS reverse proxy.
+        #[arg(long)]
+        public_url: String,
+        /// Host address on which the container port is published.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8787)]
+        port: u16,
+        /// Persistent relay data directory (default: ./.aic-share).
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Container runtime: docker or podman.
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+    },
+    /// Stop and remove the sharing relay container. Persistent data is kept.
+    Stop {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+    },
+    /// Show the sharing relay container status.
+    Status {
+        #[arg(long, default_value = "docker")]
+        runtime: String,
+    },
+    /// Print the publisher token needed by a local aic installation.
+    Token {
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
 }
 
