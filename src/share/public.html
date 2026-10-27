@@ -4,23 +4,61 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>aic shared conversations</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/chat.css">
   <link rel="stylesheet" href="/share.css">
 </head>
-<body>
-  <main id="unlock" class="unlock">
-    <form id="unlock-form" class="panel">
-      <div class="mark">aic</div>
-      <h1>Shared conversations</h1>
-      <p>Enter the password provided by the person who shared this link.</p>
-      <label>Password<input id="password" type="password" autocomplete="current-password" required autofocus></label>
-      <div id="error" class="error" role="alert"></div>
-      <button type="submit">Open</button>
-    </form>
-  </main>
-  <div id="app" class="app" hidden>
-    <aside><header><strong id="share-title">Shared conversations</strong><small>Read only</small></header><nav id="conversations"></nav></aside>
-    <main class="conversation"><header><div><h1 id="conversation-title"></h1><span id="updated"></span></div><button id="logout" type="button">Lock</button></header><section id="messages"></section></main>
+<body class="sharepage">
+  <div id="app" class="shareapp" hidden>
+    <aside aria-label="Shared conversations">
+      <header>
+        <div class="brand"><img src="/favicon.svg" alt="" width="20" height="20"> aic chat</div>
+        <span class="badge">Read only</span>
+      </header>
+      <div class="shareheading"><strong id="share-title">Shared conversations</strong><span>Shared with you</span></div>
+      <nav id="conversations"></nav>
+      <footer id="sharefooter"><button id="logout" type="button">Lock sharing</button></footer>
+    </aside>
+    <div id="scrim"></div>
+    <main>
+      <div id="bar">
+        <button id="menu" class="icon" type="button" aria-label="Shared conversations"></button>
+        <span id="chips"></span>
+        <span class="grow"></span>
+        <span class="badge sharemode">Read only</span>
+        <button id="themebtn" class="icon" type="button" aria-label="Use dark theme" title="Use dark theme"></button>
+      </div>
+      <div id="contextbar" aria-label="Shared conversation status">
+        <span id="conversation-title" class="sharedtitle"></span>
+        <span class="grow"></span>
+        <span id="updated"></span>
+      </div>
+      <div id="view">
+        <div id="layout" role="group" aria-label="Reply layout"></div>
+        <div id="msgs" aria-label="Messages"></div>
+      </div>
+    </main>
   </div>
+
+  <dialog id="unlock" aria-labelledby="unlock-title" aria-describedby="unlock-description">
+    <form id="unlock-form">
+      <div class="confighead">
+        <div><h2 id="unlock-title">Shared conversations</h2><p id="unlock-description">Enter the password provided by the person who shared this link.</p></div>
+      </div>
+      <div class="configbody">
+        <section class="configsection" aria-labelledby="access-title">
+          <h3 id="access-title">Access</h3>
+          <div class="configcard unlockcard">
+            <label class="configfield" for="password">Password<input id="password" type="password" autocomplete="current-password" required></label>
+          </div>
+        </section>
+      </div>
+      <div class="configfooter">
+        <p id="error" class="note err" role="alert" hidden></p>
+        <div class="buttons"><span class="grow"></span><button id="unlock-button" class="primary" type="submit">Open sharing</button></div>
+      </div>
+    </form>
+  </dialog>
   <script src="/share.js" defer></script>
 </body>
 </html>

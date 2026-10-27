@@ -49,6 +49,7 @@
   <div id="contextbar" aria-label="Current conversation context">
     <span class="contextitem branchcontext"><span id="branchicon" class="contexticon"></span><span id="contextbranch"></span></span>
     <button id="planlink" class="contextitem" type="button"><span id="planicon" class="contexticon"></span><span id="planlabel">Free conversation</span></button>
+    <button id="sharebtn" class="contextitem" type="button"><span id="shareicon" class="contexticon"></span><span>Share</span></button>
     <details id="conversationadvanced">
       <summary><span id="advancedicon" class="contexticon"></span><span class="contextsummarylabel">Advanced</span></summary>
       <div class="conversationoptions contextpopover">
@@ -119,11 +120,11 @@
 </main>
 
 <dialog id="sharedialog" aria-labelledby="sharetitle">
-  <div class="phead">
+  <div class="confighead">
     <div><h2 id="sharetitle">Read-only sharing</h2><p>Publish selected conversations through your sharing server.</p></div>
   </div>
-  <div id="sharebody" class="sharebody"></div>
-  <div class="actions"><button id="shareclose" type="button">Close</button></div>
+  <div id="sharebody" class="configbody sharebody"></div>
+  <div class="configfooter sharefooter"><div class="buttons"><span class="grow"></span><button id="shareclose" type="button">Close</button></div></div>
 </dialog>
 
 <dialog id="pdialog" aria-labelledby="ptitle">

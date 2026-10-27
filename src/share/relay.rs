@@ -20,6 +20,8 @@ use tiny_http::{Header, Method, Request, Response, StatusCode};
 const HTML: &str = include_str!("public.html");
 const CSS: &str = include_str!("public.css");
 const JS: &str = include_str!("public.js");
+const CHAT_CSS: &str = include_str!("../chat/web/chat.css");
+const FAVICON: &str = include_str!("../chat/web/favicon.svg");
 const MAX_BODY: u64 = 64 << 20;
 const SESSION_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const ATTEMPT_WINDOW_MS: i64 = 10 * 60 * 1000;
@@ -274,6 +276,12 @@ fn handle(app: &App, request: Request) -> Result<()> {
     let path = request.url().split('?').next().unwrap_or("/").to_string();
     if path == "/share.css" && request.method() == &Method::Get {
         return response(request, 200, "text/css; charset=utf-8", CSS, &[]);
+    }
+    if path == "/chat.css" && request.method() == &Method::Get {
+        return response(request, 200, "text/css; charset=utf-8", CHAT_CSS, &[]);
+    }
+    if path == "/favicon.svg" && request.method() == &Method::Get {
+        return response(request, 200, "image/svg+xml", FAVICON, &[]);
     }
     if path == "/share.js" && request.method() == &Method::Get {
         return response(
