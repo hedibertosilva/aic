@@ -12,13 +12,14 @@
 #sharefooter strong { font-size: 12px; }
 #sharefooter span { color: var(--muted); font-size: 10px; }
 #sharefooter button { padding: 4px 8px; flex: none; color: var(--muted); background: var(--bg); font-size: 11px; }
+.sharepage #list .conv:first-child { margin-top: 20px; }
 .sharepage main > #bar { min-height: 58px; }
 .sharepage #chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .sharepage .chip { cursor: default; }
 .sharepage .chip:hover { border-color: var(--line); background: var(--card); }
-.sharemode { align-self: center; }
 .sharepage #view { min-height: 0; }
 .sharepage #msgs { padding-bottom: 24px; }
+.sharepage #jump { left: 50%; bottom: 16px; z-index: 4; }
 .sharepage .user { cursor: default; }
 .sharepage .card > footer { min-height: 20px; }
 .sharepage .empty { width: min(100%, 820px); margin: clamp(32px, 8vh, 88px) auto 0; color: var(--muted); text-align: center; }

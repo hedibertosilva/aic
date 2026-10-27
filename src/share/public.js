@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const shareId = location.pathname.split('/').filter(Boolean)[1] || '';
 let snapshot = null, current = null, timer = null;
 let viewSettings = { layout: 'columns', chatWidth: 1 };
+let renderedConversation = null, renderedLog = null;
 try { const theme=localStorage.getItem('aic-chat-theme'); if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme; } catch {}
 try {
   const saved=JSON.parse(localStorage.getItem('aic-share-view')||'null');
@@ -132,9 +133,14 @@ function renderLayout(conversation) {
 }
 function renderMessages(conversation) {
   const messages=$('msgs');
-  if (!conversation?.log?.length) { messages.replaceChildren(node('div','empty','No messages are currently shared.')); return; }
+  const log=conversation?.log||[],last=log.at(-1),signature=`${log.length}:${last?.from||''}:${last?.t0||''}:${last?.text?.length||0}:${(last?.text||'').slice(-80)}`;
+  const sameConversation=renderedConversation===conversation?.id,changed=renderedLog!==signature;
+  if(sameConversation&&!changed)return;
+  const followEnd=!sameConversation||messages.scrollHeight-messages.scrollTop-messages.clientHeight<80,previousTop=messages.scrollTop;
+  renderedConversation=conversation?.id||null;renderedLog=signature;
+  if (!log.length) { messages.replaceChildren(node('div','empty','No messages are currently shared.'));$('jump').classList.remove('show');return; }
   const wrap=node('div','wrap'), rows=new Map();
-  for(const entry of conversation.log) {
+  for(const entry of log) {
     if(entry.from==='you') {
       const user=node('div','user'), to=entry.to?.length?entry.to:(conversation.participants||[]).map(p=>p.name);
       user.append(node('span','to','TO: '+(to.length?to.join(', '):'No participants')),node('div','text',entry.text||''));
@@ -159,6 +165,8 @@ function renderMessages(conversation) {
     row.classList.add(`share-cols-${Math.min(row.childElementCount,8)}`); row.classList.toggle('solo',row.childElementCount<2);
   }
   messages.replaceChildren(wrap);
+  if(followEnd){messages.scrollTop=messages.scrollHeight;$('jump').classList.remove('show');}
+  else {messages.scrollTop=previousTop;$('jump').classList.add('show');}
 }
 function render() {
   const conversations=snapshot?.conversations||[];
@@ -184,6 +192,9 @@ $('unlock-form').onsubmit=async event=>{
 $('unlock').oncancel=event=>event.preventDefault();
 $('logout').onclick=async()=>{try{await request('/logout',{method:'POST'});}catch{}showUnlock();};
 $('search').oninput=()=>{if(snapshot)renderSidebar(snapshot.conversations||[]);};
+$('msgs').onscroll=()=>{if($('msgs').scrollHeight-$('msgs').scrollTop-$('msgs').clientHeight<80)$('jump').classList.remove('show');};
+$('jump').onclick=()=>{$('msgs').scrollTop=$('msgs').scrollHeight;$('jump').classList.remove('show');};
+$('jump').append(icon('<path d="M12 5v14M6 13l6 6 6-6"/>'),document.createTextNode('New messages'));
 $('menu').append(icon('<path d="M4 6h16M4 12h16M4 18h16"/>'));
 $('menu').onclick=()=>document.body.classList.toggle('drawer');
 $('scrim').onclick=()=>document.body.classList.remove('drawer');
