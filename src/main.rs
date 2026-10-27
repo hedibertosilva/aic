@@ -2,6 +2,7 @@ mod chat;
 mod cli;
 mod commands;
 mod common;
+mod share;
 mod workflow;
 
 // Modules keep resolving as `crate::agent`, `crate::state`, ... from anywhere.
@@ -15,7 +16,7 @@ use anyhow::{Context, Result};
 
 use cli::{
     AgentCommands, Cli, Commands, ConfigCommands, DevCommands, PlanCommands, SandboxCommands,
-    DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT,
+    ServerCommands, DEFAULT_CHAT_HOST, DEFAULT_CHAT_PORT,
 };
 
 fn main() {
@@ -64,6 +65,17 @@ fn run() -> Result<()> {
             }
             Some(ConfigCommands::Set { key, value }) => commands::config_cmd::set(&key, &value),
         },
+
+        Some(Commands::Server { command }) => match command {
+            ServerCommands::Start { public_url, host, port, data_dir, runtime } =>
+                share::container::start(&public_url, &host, port, data_dir.as_deref(), &runtime),
+            ServerCommands::Stop { runtime } => share::container::stop(&runtime),
+            ServerCommands::Status { runtime } => share::container::status(&runtime),
+            ServerCommands::Token { data_dir } => share::container::print_token(data_dir.as_deref()),
+        },
+
+        Some(Commands::ShareRelay { host, port, data_dir, public_url, admin_token }) =>
+            share::relay::run(&host, port, &data_dir, &public_url, &admin_token),
     }
 }
 
